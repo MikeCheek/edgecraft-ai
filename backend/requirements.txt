@@ -1,0 +1,20 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pydantic-settings
+numpy
+tensorflow
+opencv-python
+librosa
+soundfile
+scipy
+scikit-learn
+pillow
+requests
+python-dotenv
+pytest
+pytest-asyncio
+httpx
+ollama
+# tflite-runtime

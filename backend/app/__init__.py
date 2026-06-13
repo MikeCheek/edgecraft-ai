@@ -1,0 +1,1 @@
+"""EdgeCraft AI Backend Application"""
