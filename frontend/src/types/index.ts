@@ -18,6 +18,8 @@ export type QuantizationMethod =
   | 'WEIGHT_CLUSTERING'
   | 'DYNAMIC_QUANTIZATION'
 
+export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
+
 export interface DatasetInfo {
   id: string
   name: string
@@ -33,6 +35,7 @@ export interface DatasetSample {
   task: TinyMLTask
   filename: string
   timestamp: number
+  split?: DatasetSplit
 }
 
 export interface TrainingConfig {
@@ -43,7 +46,7 @@ export interface TrainingConfig {
   base_model: string
   task: TinyMLTask
   validation_split: number
-  input_shape?: number[] // NEW: e.g., [96, 96, 3] or [224, 224, 3]
+  input_shape?: number[]
 }
 
 export interface ModelMetadata {
@@ -51,8 +54,8 @@ export interface ModelMetadata {
   name: string
   training_id: string
   task: TinyMLTask
-  dataset_id?: string // NEW: To track duplicate trainings
-  base_model?: string // NEW: To track model architecture
+  dataset_id?: string
+  base_model?: string
   created_at: number
   accuracy: number
   loss: number
@@ -60,7 +63,7 @@ export interface ModelMetadata {
   val_loss: number
   optimized: boolean
   size_bytes: number
-  download_url?: string // NEW: Link to download base .tflite
+  download_url?: string
 }
 
 export interface TrainingMetrics {
@@ -92,7 +95,7 @@ export interface OptimizationResult {
   status: 'initialized' | 'running' | 'completed' | 'failed'
   c_array?: string
   cpp_wrapper?: string
-  download_url?: string // NEW: Link to download optimized .tflite
+  download_url?: string
 }
 
 export interface BoardRecommendation {

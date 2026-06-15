@@ -23,9 +23,11 @@ QuantizationMethod = Literal[
     "INT8_QUANTIZATION",
     "FLOAT16_QUANTIZATION",
     "PRUNING",
-    "WEIGHT_CLUSTERING",  # Example restoration
-    "DYNAMIC_QUANTIZATION" # Example restoration
+    "WEIGHT_CLUSTERING",
+    "DYNAMIC_QUANTIZATION" 
 ]
+
+DatasetSplit = Literal["train", "val", "test", "unassigned"]
 
 class DatasetInfo(BaseModel):
     """Information about a created dataset"""
@@ -43,6 +45,7 @@ class DatasetSample(BaseModel):
     task: TaskType
     filename: str
     timestamp: float
+    split: DatasetSplit = "unassigned"
 
 class TrainingConfig(BaseModel):
     """Training configuration"""

@@ -1,230 +1,923 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Play, Clock, History, AlertTriangle } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  Play, Square, RefreshCw, TrendingUp, Clock, Award, Timer,
+  ShieldCheck, History, X, ZoomIn, Download, ChevronDown, ChevronUp,
+  AlertTriangle,
+} from 'lucide-react';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ResponsiveContainer,
+} from 'recharts';
 import { useAPI } from '../hooks/useAPI';
 import { useAppContext } from '../context/AppContext';
-import { TrainingConfig, TinyMLTask, TrainingStatus, DatasetInfo, TrainingMetrics } from '../types';
+import { TinyMLTask, TrainingStatus } from '../types';
 
-// Custom SVG Line Chart for live progress
-const LineChart = ({ data, dataKey1, dataKey2, color1, color2, title }: { data: TrainingMetrics[], dataKey1: keyof TrainingMetrics, dataKey2: keyof TrainingMetrics, color1: string, color2: string, title: string }) => {
-  if (!data || data.length === 0) return null;
-  const height = 140;
-  const width = 400;
-  const padding = 10;
-  const usableHeight = height - padding * 2;
-  const maxVal = Math.max(
-    ...data.map(d => Math.max((d[dataKey1] as number) || 0, (d[dataKey2] as number) || 0)), 1
+interface ModelTrainerProps {
+  task: TinyMLTask;
+  onTrainingComplete?: () => void;
+}
+
+function getTaskDefaults(task: TinyMLTask): { input_shape: number[]; base_model: string } {
+  switch (task) {
+    case 'VISUAL_WAKE_WORDS':
+      return { input_shape: [96, 96, 1], base_model: 'MobileNetV2' };
+    case 'KEYWORD_SPOTTING':
+      return { input_shape: [40, 101, 1], base_model: 'MFCC_CNN' };
+    case 'AUDIO_CLASSIFICATION':
+      return { input_shape: [64, 101, 1], base_model: 'MFCC_CNN' };
+    case 'OBJECT_DETECTION':
+      return { input_shape: [224, 224, 3], base_model: 'MobileNetV2' };
+    case 'IMAGE_CLASSIFICATION':
+    default:
+      return { input_shape: [224, 224, 3], base_model: 'MobileNetV2' };
+  }
+}
+
+const IMAGE_MODELS = ['MobileNetV2', 'EfficientNet', 'Custom3LayerCNN'];
+const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet'];
+const AUDIO_TASKS: TinyMLTask[] = ['KEYWORD_SPOTTING', 'AUDIO_CLASSIFICATION'];
+
+function formatTime(secs: number): string {
+  if (!isFinite(secs) || secs < 0) return '--:--';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function formatDate(ts: number): string {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString();
+}
+
+// ─── Expandable / exportable chart ────────────────────────────────────────────
+
+interface MetricChartProps {
+  data: { epoch: number; train: number; val: number }[];
+  label: string;
+  color: string;
+  valColor: string;
+  formatY?: (v: number) => string;
+  expanded?: boolean;
+}
+
+function MetricChart({ data, label, color, valColor, formatY, expanded }: MetricChartProps) {
+  const height = expanded ? 320 : 140;
+  return (
+    <div className={`p-4 bg-slate-900/50 rounded-xl border border-slate-700 ${expanded ? 'col-span-2' : ''}`}>
+      <p className="text-xs text-gray-400 mb-3 font-medium">{label}</p>
+      <ResponsiveContainer width="100%" height={height}>
+        <LineChart data={data} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis
+            dataKey="epoch"
+            tick={{ fill: '#94a3b8', fontSize: 10 }}
+            tickLine={false}
+            label={{ value: 'Epoch', position: 'insideBottomRight', offset: -4, fill: '#64748b', fontSize: 10 }}
+          />
+          <YAxis
+            tick={{ fill: '#94a3b8', fontSize: 10 }}
+            tickLine={false}
+            tickFormatter={formatY}
+          />
+          <Tooltip
+            contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 8, fontSize: 12 }}
+            labelStyle={{ color: '#94a3b8' }}
+            formatter={(v: number, name: string) => [
+              formatY ? formatY(v) : v.toFixed(4),
+              name,
+            ]}
+          />
+          <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />
+          <Line type="monotone" dataKey="train" name="Train" stroke={color} strokeWidth={2} dot={false} isAnimationActive={false} />
+          <Line type="monotone" dataKey="val" name="Val" stroke={valColor} strokeWidth={2} dot={false} strokeDasharray="4 2" isAnimationActive={false} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
   );
-  const dx = width / Math.max(data.length - 1, 1);
-  const points1 = data.map((d, i) => `${i * dx},${height - padding - (((d[dataKey1] as number) || 0) / maxVal) * usableHeight}`).join(' ');
-  const points2 = data.map((d, i) => `${i * dx},${height - padding - (((d[dataKey2] as number) || (d[dataKey1] as number) || 0) / maxVal) * usableHeight}`).join(' ');
+}
+
+// Expanded chart modal with export
+interface ChartModalProps {
+  label: string;
+  color: string;
+  valColor: string;
+  data: { epoch: number; train: number; val: number }[];
+  formatY?: (v: number) => string;
+  onClose: () => void;
+}
+
+function ChartModal({ label, color, valColor, data, formatY, onClose }: ChartModalProps) {
+  const svgRef = useRef<HTMLDivElement>(null);
+
+  const handleExport = () => {
+    const svgEl = svgRef.current?.querySelector('svg');
+    if (!svgEl) return;
+    const serializer = new XMLSerializer();
+    const svgStr = serializer.serializeToString(svgEl);
+    const blob = new Blob([svgStr], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${label.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
-    <div className="flex-1 bg-slate-900/80 p-4 rounded-xl border border-slate-700 shadow-inner">
-      <h4 className="text-sm font-semibold text-gray-300 mb-3">{title}</h4>
-      <div className="relative w-full overflow-hidden" style={{ height: `${height}px` }}>
-        <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="overflow-visible">
-          <line x1="0" y1={padding} x2={width} y2={padding} stroke="#334155" strokeDasharray="4 4" />
-          <line x1="0" y1={height / 2} x2={width} y2={height / 2} stroke="#334155" strokeDasharray="4 4" />
-          <line x1="0" y1={height - padding} x2={width} y2={height - padding} stroke="#334155" strokeDasharray="4 4" />
-          <polyline points={points1} fill="none" stroke={color1} strokeWidth="3" strokeLinecap="round" />
-          <polyline points={points2} fill="none" stroke={color2} strokeWidth="3" strokeDasharray="6 6" strokeLinecap="round" />
-        </svg>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-4xl bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl p-6 animate-slideIn"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold text-white">{label}</h3>
+          <div className="flex gap-2">
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-gray-300 text-sm rounded-lg transition"
+            >
+              <Download className="w-4 h-4" /> Export SVG
+            </button>
+            <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+        <div ref={svgRef}>
+          <ResponsiveContainer width="100%" height={380}>
+            <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis
+                dataKey="epoch"
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                tickLine={false}
+                label={{ value: 'Epoch', position: 'insideBottomRight', offset: -4, fill: '#64748b', fontSize: 11 }}
+              />
+              <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} tickLine={false} tickFormatter={formatY} />
+              <Tooltip
+                contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 8, fontSize: 13 }}
+                labelStyle={{ color: '#94a3b8' }}
+                formatter={(v: number, name: string) => [
+                  formatY ? formatY(v) : v.toFixed(4),
+                  name,
+                ]}
+              />
+              <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
+              <Line type="monotone" dataKey="train" name="Train" stroke={color} strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="val" name="Val" stroke={valColor} strokeWidth={2.5} dot={false} strokeDasharray="5 3" isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
       </div>
     </div>
   );
 }
 
-interface ModelTrainerProps { task: TinyMLTask; onTrainingComplete?: () => void; }
+// ─── Past training popup ───────────────────────────────────────────────────────
+
+interface PastSessionPopupProps {
+  session: any;
+  onClose: () => void;
+}
+
+function PastSessionPopup({ session, onClose }: PastSessionPopupProps) {
+  const [expandedChart, setExpandedChart] = useState<'accuracy' | 'loss' | null>(null);
+
+  const accuracyData = (session.metrics ?? []).map((m: any) => ({
+    epoch: m.epoch,
+    train: parseFloat((m.accuracy * 100).toFixed(2)),
+    val: parseFloat((m.val_accuracy * 100).toFixed(2)),
+  }));
+  const lossData = (session.metrics ?? []).map((m: any) => ({
+    epoch: m.epoch,
+    train: parseFloat(m.loss.toFixed(4)),
+    val: parseFloat(m.val_loss.toFixed(4)),
+  }));
+
+  const last = session.metrics?.length ? session.metrics[session.metrics.length - 1] : null;
+
+  const statusColor =
+    session.status === 'completed' ? 'text-green-400' :
+      session.status === 'failed' ? 'text-red-400' :
+        session.status === 'cancelled' ? 'text-yellow-400' : 'text-purple-400';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl animate-slideIn"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 sticky top-0 bg-slate-900 z-10">
+          <div>
+            <h3 className="text-lg font-bold text-white">
+              {session.base_model} — {session.task?.replace(/_/g, ' ')}
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5">{formatDate(session.created_at)}</p>
+          </div>
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5">
+          {/* Info grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+            {[
+              ['Status', <span className={`font-semibold ${statusColor}`}>{session.status?.toUpperCase()}</span>],
+              ['Epochs', `${session.current_epoch ?? 0} / ${session.total_epochs}`],
+              ['Batch Size', session.batch_size],
+              ['Learning Rate', session.learning_rate],
+              ['Val Split', `${((session.validation_split ?? 0) * 100).toFixed(0)}%`],
+              ['Dropout', session.dropout_rate ?? '—'],
+              ['L2 Reg', session.l2_reg ?? '—'],
+              ['Early Stop', session.early_stopping ? `Yes (pat. ${session.early_stopping_patience})` : 'No'],
+            ].map(([k, v], i) => (
+              <div key={i} className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-gray-400 mb-1">{k}</div>
+                <div className="text-white font-medium">{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Final metrics */}
+          {last && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-xs text-gray-400 mb-1">Train Acc</div>
+                <div className="text-lg font-bold text-green-400">{(last.accuracy * 100).toFixed(1)}%</div>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-xs text-gray-400 mb-1">Val Acc</div>
+                <div className="text-lg font-bold text-cyan-400">{(last.val_accuracy * 100).toFixed(1)}%</div>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-xs text-gray-400 mb-1">Train Loss</div>
+                <div className="text-lg font-bold text-yellow-400">{last.loss.toFixed(4)}</div>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-xs text-gray-400 mb-1">Val Loss</div>
+                <div className="text-lg font-bold text-orange-400">{last.val_loss.toFixed(4)}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Charts */}
+          {accuracyData.length >= 2 && (
+            <div className="space-y-3">
+              {/* Accuracy chart */}
+              <div className="relative">
+                <button
+                  onClick={() => setExpandedChart('accuracy')}
+                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                  title="Expand"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+                <MetricChart data={accuracyData} label="Accuracy (%)" color="#22c55e" valColor="#06b6d4" formatY={v => `${v}%`} />
+              </div>
+              {/* Loss chart */}
+              <div className="relative">
+                <button
+                  onClick={() => setExpandedChart('loss')}
+                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                  title="Expand"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+                <MetricChart data={lossData} label="Loss" color="#eab308" valColor="#f97316" />
+              </div>
+            </div>
+          )}
+
+          {session.status === 'failed' && session.error && (
+            <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">
+              Error: {session.error}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Nested chart modal */}
+      {expandedChart === 'accuracy' && (
+        <ChartModal
+          label="Accuracy (%)"
+          color="#22c55e"
+          valColor="#06b6d4"
+          data={accuracyData}
+          formatY={v => `${v}%`}
+          onClose={() => setExpandedChart(null)}
+        />
+      )}
+      {expandedChart === 'loss' && (
+        <ChartModal
+          label="Loss"
+          color="#eab308"
+          valColor="#f97316"
+          data={lossData}
+          onClose={() => setExpandedChart(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Main component ────────────────────────────────────────────────────────────
 
 export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
-  const { state, dispatch } = useAppContext();
-  const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
-  const [config, setConfig] = useState<TrainingConfig>({ dataset_id: '', epochs: 50, batch_size: 32, learning_rate: 0.001, base_model: 'MobileNetV2', task, validation_split: 0.2 });
+  const { dispatch } = useAppContext();
+  const { request, apiClient } = useAPI();
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const defaults = getTaskDefaults(task);
+  const [datasetId, setDatasetId] = useState('');
+  const [datasets, setDatasets] = useState<{ id: string; name: string; sample_count: number }[]>([]);
+  const [epochs, setEpochs] = useState(30);
+  const [batchSize, setBatchSize] = useState(32);
+  const [learningRate, setLearningRate] = useState(0.001);
+  const [baseModel, setBaseModel] = useState(defaults.base_model);
+  const [validationSplit, setValidationSplit] = useState(0.2);
+
+  // Regularization
+  const [dropoutRate, setDropoutRate] = useState(0.5);
+  const [l2Reg, setL2Reg] = useState(0.0);
+  const [showRegularization, setShowRegularization] = useState(false);
+
+  // Early stopping
+  const [earlyStopping, setEarlyStopping] = useState(false);
+  const [esPatience, setEsPatience] = useState(5);
+  const [esMonitor, setEsMonitor] = useState<'val_loss' | 'val_accuracy'>('val_loss');
+
   const [trainingId, setTrainingId] = useState<string | null>(null);
-  const [trainingStatus, setTrainingStatus] = useState<TrainingStatus | null>(null);
+  const [status, setStatus] = useState<TrainingStatus | null>(null);
   const [isStarting, setIsStarting] = useState(false);
-  const [now, setNow] = useState(Date.now()); // Timer state
-  const { request, error, apiClient } = useAPI();
 
-  // Update timer every second for elapsed time tracking
-  useEffect(() => {
-    const interval = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, []);
+  // Past trainings
+  const [pastSessions, setPastSessions] = useState<any[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [viewingSession, setViewingSession] = useState<any | null>(null);
+
+  // Duplicate alert
+  const [duplicateWarning, setDuplicateWarning] = useState(false);
+
+  // Live chart expand/export
+  const [expandedLiveChart, setExpandedLiveChart] = useState<'accuracy' | 'loss' | null>(null);
+
+  const fetchDatasets = async () => {
+    const raw = await request(() => apiClient.listDatasets(task));
+    if (raw && raw.datasets) setDatasets(raw.datasets);
+  };
+
+  const fetchPastSessions = useCallback(async () => {
+    const raw = await request(() => apiClient.listAllSessions());
+    if (raw && raw.sessions) {
+      setPastSessions(raw.sessions.filter((s: any) => s.task === task));
+    }
+  }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    request(() => apiClient.listDatasets(task)).then(res => {
-      if (res?.datasets) {
-        setDatasets(res.datasets);
-        const validExisting = res.datasets.find((d: DatasetInfo) => d.id === config.dataset_id);
-        if (!validExisting) setConfig(c => ({ ...c, dataset_id: res.datasets.length > 0 ? res.datasets[0].id : '', task }));
-        else setConfig(c => ({ ...c, task }));
-      }
-    });
-  }, [task, request, apiClient]);
+    fetchDatasets();
+    fetchPastSessions();
+    setBaseModel(getTaskDefaults(task).base_model);
+  }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pollStatus = useCallback(async (id: string) => {
     const raw = await request(() => apiClient.getTrainingStatus(id));
     if (!raw) return;
-
-    const status: TrainingStatus = {
-      id: raw.id, status: raw.status, current_epoch: raw.current_epoch, total_epochs: raw.total_epochs,
-      progress: raw.progress, created_at: raw.created_at, started_at: raw.started_at, metrics: []
-    };
-
-    const mapMetrics = (rawMetrics: any) => (rawMetrics.metrics || rawMetrics).map((m: any) => ({
-      epoch: m.epoch, loss: m.loss || 0, accuracy: m.accuracy || 0,
-      val_loss: m.val_loss ?? m.valLoss ?? 0, val_accuracy: m.val_accuracy ?? m.valAccuracy ?? 0, timestamp: m.timestamp
-    }));
-
-    if (status.status === 'running' || status.status === 'initialized') {
-      const metrics = await request(() => apiClient.getTrainingMetrics(id));
-      if (metrics) status.metrics = mapMetrics(metrics);
-      setTrainingStatus(status);
-      dispatch({ type: 'SET_TRAINING', payload: status });
-      setTimeout(() => pollStatus(id), 1500);
-    } else if (status.status === 'completed') {
-      const metrics = await request(() => apiClient.getTrainingMetrics(id));
-      if (metrics) status.metrics = mapMetrics(metrics);
-      setTrainingStatus(status);
-      dispatch({ type: 'SET_TRAINING', payload: status });
+    const s: TrainingStatus = raw.data ?? raw;
+    setStatus(s);
+    dispatch({ type: 'SET_TRAINING', payload: s });
+    if (s.status === 'running' || s.status === 'initialized') {
+      pollRef.current = setTimeout(() => pollStatus(id), 1500);
+    } else if (s.status === 'completed') {
+      fetchPastSessions();
       onTrainingComplete?.();
     }
-  }, [request, apiClient, dispatch, onTrainingComplete]);
+  }, [request, apiClient, dispatch, onTrainingComplete, fetchPastSessions]);
+
+  useEffect(() => {
+    return () => { if (pollRef.current) clearTimeout(pollRef.current); };
+  }, []);
+
+  // Check for duplicate trainings
+  const checkDuplicate = useCallback(() => {
+    if (!datasetId) return false;
+    return pastSessions.some(
+      s =>
+        s.dataset_id === datasetId &&
+        s.base_model === baseModel &&
+        s.epochs === epochs &&
+        s.batch_size === batchSize &&
+        Math.abs(s.learning_rate - learningRate) < 1e-9 &&
+        (s.status === 'completed' || s.status === 'running')
+    );
+  }, [pastSessions, datasetId, baseModel, epochs, batchSize, learningRate]);
 
   const handleStart = async () => {
-    if (!config.dataset_id) { alert("Please select a dataset first."); return; }
+    if (!datasetId) { alert('Please select a dataset first.'); return; }
 
-    // NEW: Duplicate Dataset Protection
-    const duplicateModel = state.trainedModels.find(m => m.dataset_id === config.dataset_id && m.base_model === config.base_model);
-    if (duplicateModel) {
-      const confirmRun = window.confirm(`⚠️ A model ("${duplicateModel.name}") has already been trained on this dataset using ${config.base_model}.\n\nDo you want to re-run the training pipeline anyway?`);
-      if (!confirmRun) return;
+    if (checkDuplicate()) {
+      setDuplicateWarning(true);
+      return;
     }
+    await doStartTraining();
+  };
 
+  const doStartTraining = async () => {
+    setDuplicateWarning(false);
     setIsStarting(true);
-    const result = await request(() => apiClient.startTraining(config));
+    setStatus(null);
+
+    const taskDefaults = getTaskDefaults(task);
+    const raw = await request(() =>
+      apiClient.startTraining({
+        task,
+        dataset_id: datasetId,
+        epochs,
+        batch_size: batchSize,
+        learning_rate: learningRate,
+        base_model: baseModel,
+        validation_split: validationSplit,
+        input_shape: taskDefaults.input_shape,
+        early_stopping: earlyStopping,
+        early_stopping_patience: esPatience,
+        early_stopping_monitor: esMonitor,
+        dropout_rate: dropoutRate,
+        l2_reg: l2Reg,
+      })
+    );
     setIsStarting(false);
 
-    if (result?.training_id) {
-      setTrainingId(result.training_id);
-      pollStatus(result.training_id);
+    if (raw && raw.training_id) {
+      setTrainingId(raw.training_id);
+      pollStatus(raw.training_id);
     }
   };
 
-  const isTraining = trainingStatus?.status === 'running' || trainingStatus?.status === 'initialized';
+  const handleCancel = async () => {
+    if (!trainingId) return;
+    await request(() => apiClient.cancelTraining(trainingId));
+    if (pollRef.current) clearTimeout(pollRef.current);
+    setStatus(prev => prev ? { ...prev, status: 'cancelled' } : null);
+  };
 
-  // NEW: Time Calculations
-  const formatTime = (seconds: number) => `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  const elapsedSec = trainingStatus?.started_at ? Math.max(0, (now - (trainingStatus.started_at * 1000)) / 1000) : 0;
-  const timePerEpoch = trainingStatus?.current_epoch && trainingStatus.current_epoch > 0 ? elapsedSec / trainingStatus.current_epoch : 0;
-  const leftSec = trainingStatus ? Math.max(0, timePerEpoch * (trainingStatus.total_epochs - trainingStatus.current_epoch)) : 0;
+  const isRunning = status?.status === 'running' || status?.status === 'initialized';
+  const availableModels = AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
+  const latestMetrics = status?.metrics?.length ? status.metrics[status.metrics.length - 1] : null;
+
+  const accuracyData = (status?.metrics ?? []).map(m => ({
+    epoch: m.epoch,
+    train: parseFloat((m.accuracy * 100).toFixed(2)),
+    val: parseFloat((m.val_accuracy * 100).toFixed(2)),
+  }));
+  const lossData = (status?.metrics ?? []).map(m => ({
+    epoch: m.epoch,
+    train: parseFloat(m.loss.toFixed(4)),
+    val: parseFloat(m.val_loss.toFixed(4)),
+  }));
+
+  const elapsed: number = (status as any)?.elapsed_seconds ?? 0;
+  const remaining: number = (status as any)?.remaining_seconds ?? 0;
+
+  const statusColor =
+    status?.status === 'completed' ? 'text-green-400' :
+      status?.status === 'failed' ? 'text-red-400' :
+        status?.status === 'cancelled' ? 'text-yellow-400' : 'text-purple-400';
+
+  const barColor =
+    status?.status === 'completed' ? 'bg-green-500' :
+      status?.status === 'failed' ? 'bg-red-500' :
+        'bg-gradient-to-r from-purple-500 to-pink-500';
 
   return (
     <div className="space-y-6">
-      {/* Config Form */}
-      <div className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-2">Training Dataset</label>
-          <select value={config.dataset_id} onChange={(e) => setConfig({ ...config, dataset_id: e.target.value })} disabled={isTraining} className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white">
-            <option value="">-- Select a Compatible Dataset --</option>
-            {datasets.map(d => <option key={d.id} value={d.id}>{d.name} ({d.sample_count} samples)</option>)}
+
+      {/* ── Duplicate warning ── */}
+      {duplicateWarning && (
+        <div className="p-4 bg-amber-900/30 border border-amber-500/50 rounded-xl flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-amber-300 font-semibold text-sm">Duplicate training detected</p>
+            <p className="text-amber-400/80 text-xs mt-1">
+              The same dataset, model, epochs, batch size and learning rate were already used in a previous training. Do you still want to proceed?
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={doStartTraining}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition"
+              >
+                Train anyway
+              </button>
+              <button
+                onClick={() => setDuplicateWarning(false)}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-gray-300 text-xs rounded-lg transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Config Panel ── */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+        {/* Dataset selector */}
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium text-gray-300 mb-1">Dataset</label>
+          <select
+            value={datasetId}
+            onChange={e => setDatasetId(e.target.value)}
+            disabled={isRunning}
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+          >
+            <option value="">-- Select a dataset --</option>
+            {datasets.map(d => (
+              <option key={d.id} value={d.id}>{d.name} ({d.sample_count} samples)</option>
+            ))}
           </select>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <div>
-            <label className="block text-sm text-gray-300 mb-2">Epochs</label>
-            <input type="number" value={config.epochs} onChange={(e) => setConfig({ ...config, epochs: parseInt(e.target.value) })} disabled={isTraining} className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-300 mb-2">Batch Size</label>
-            <input type="number" value={config.batch_size} onChange={(e) => setConfig({ ...config, batch_size: parseInt(e.target.value) })} disabled={isTraining} className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-300 mb-2">Learning Rate</label>
-            <input type="number" step="0.0001" value={config.learning_rate} onChange={(e) => setConfig({ ...config, learning_rate: parseFloat(e.target.value) })} disabled={isTraining} className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-300 mb-2">Base Model</label>
-            <select value={config.base_model} onChange={(e) => setConfig({ ...config, base_model: e.target.value })} disabled={isTraining} className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white">
-              <option>MobileNetV2</option>
-              <option>EfficientNet</option>
-              <option>Custom3LayerCNN</option>
-            </select>
-          </div>
+
+        {/* Base model */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Base Model</label>
+          <select
+            value={baseModel}
+            onChange={e => setBaseModel(e.target.value)}
+            disabled={isRunning}
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+          >
+            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
         </div>
 
-        <button onClick={handleStart} disabled={isTraining || isStarting} className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-lg flex justify-center gap-2 font-bold shadow-lg disabled:opacity-50 transition-all">
-          <Play className="w-5 h-5" /> {isStarting ? 'Allocating Resources...' : `Start ${task.replace(/_/g, ' ')} Training`}
+        {/* Epochs */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Epochs: {epochs}</label>
+          <input
+            type="range" min={5} max={200} step={5} value={epochs}
+            onChange={e => setEpochs(Number(e.target.value))}
+            disabled={isRunning}
+            className="w-full accent-purple-500 disabled:opacity-50"
+          />
+        </div>
+
+        {/* Batch Size */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Batch Size: {batchSize}</label>
+          <input
+            type="range" min={8} max={128} step={8} value={batchSize}
+            onChange={e => setBatchSize(Number(e.target.value))}
+            disabled={isRunning}
+            className="w-full accent-purple-500 disabled:opacity-50"
+          />
+        </div>
+
+        {/* Learning Rate */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Learning Rate</label>
+          <select
+            value={learningRate}
+            onChange={e => setLearningRate(Number(e.target.value))}
+            disabled={isRunning}
+            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+          >
+            {[0.01, 0.005, 0.001, 0.0005, 0.0001].map(lr => (
+              <option key={lr} value={lr}>{lr}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Val split */}
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">
+            Validation Split: {(validationSplit * 100).toFixed(0)}%
+          </label>
+          <input
+            type="range" min={0.1} max={0.4} step={0.05} value={validationSplit}
+            onChange={e => setValidationSplit(Number(e.target.value))}
+            disabled={isRunning}
+            className="w-full accent-purple-500 disabled:opacity-50"
+          />
+        </div>
+      </div>
+
+      {/* ── Regularization ── */}
+      <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
+        <button
+          className="flex items-center justify-between w-full"
+          onClick={() => setShowRegularization(v => !v)}
+        >
+          <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-cyan-400" />
+            Regularization
+            {(dropoutRate !== 0.5 || l2Reg !== 0) && (
+              <span className="px-1.5 py-0.5 bg-cyan-900/50 border border-cyan-500/40 text-cyan-300 text-xs rounded-full">
+                active
+              </span>
+            )}
+          </span>
+          {showRegularization
+            ? <ChevronUp className="w-4 h-4 text-gray-400" />
+            : <ChevronDown className="w-4 h-4 text-gray-400" />}
+        </button>
+
+        {showRegularization && (
+          <div className="grid grid-cols-2 gap-4 pt-1">
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">
+                Dropout rate: {dropoutRate.toFixed(2)}
+              </label>
+              <input
+                type="range" min={0} max={0.9} step={0.05} value={dropoutRate}
+                onChange={e => setDropoutRate(Number(e.target.value))}
+                disabled={isRunning}
+                className="w-full accent-cyan-500 disabled:opacity-50"
+              />
+              <p className="text-xs text-gray-500 mt-1">Fraction of neurons dropped during training</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">
+                L2 regularization: {l2Reg === 0 ? 'off' : l2Reg.toExponential(1)}
+              </label>
+              <select
+                value={l2Reg}
+                onChange={e => setL2Reg(Number(e.target.value))}
+                disabled={isRunning}
+                className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
+              >
+                {[0, 0.0001, 0.0005, 0.001, 0.005, 0.01].map(v => (
+                  <option key={v} value={v}>{v === 0 ? 'Off (0)' : v}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 mt-1">Weight penalty applied to all dense/conv layers</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Early Stopping ── */}
+      <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <div
+              onClick={() => !isRunning && setEarlyStopping(v => !v)}
+              className={`relative w-9 h-5 rounded-full transition-colors ${earlyStopping ? 'bg-purple-600' : 'bg-slate-600'} ${isRunning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${earlyStopping ? 'translate-x-4' : ''}`} />
+            </div>
+            <span className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
+              <ShieldCheck className="w-4 h-4 text-purple-400" />
+              Early Stopping
+            </span>
+          </label>
+          {earlyStopping && (
+            <span className="text-xs text-gray-500">stops when {esMonitor} stops improving</span>
+          )}
+        </div>
+
+        {earlyStopping && (
+          <div className="grid grid-cols-2 gap-4 pt-1">
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">Monitor metric</label>
+              <select
+                value={esMonitor}
+                onChange={e => setEsMonitor(e.target.value as any)}
+                disabled={isRunning}
+                className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
+              >
+                <option value="val_loss">val_loss (recommended)</option>
+                <option value="val_accuracy">val_accuracy</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-400 mb-1">
+                Patience: {esPatience} epochs
+              </label>
+              <input
+                type="range" min={2} max={20} step={1} value={esPatience}
+                onChange={e => setEsPatience(Number(e.target.value))}
+                disabled={isRunning}
+                className="w-full accent-purple-500 disabled:opacity-50 mt-1"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Task info badge */}
+      <div className="px-3 py-2 bg-slate-800/50 rounded-lg border border-slate-700 text-xs text-gray-400 flex gap-4">
+        <span>Task: <span className="text-purple-300 font-medium">{task.replace(/_/g, ' ')}</span></span>
+        <span>Input: <span className="text-cyan-300 font-medium">{getTaskDefaults(task).input_shape.join('×')}</span></span>
+      </div>
+
+      {/* ── Action Buttons ── */}
+      <div className="flex gap-3">
+        <button
+          onClick={handleStart}
+          disabled={isRunning || isStarting || !datasetId}
+          className="flex-1 flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:from-slate-700 disabled:to-slate-700 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg transition-all"
+        >
+          {isStarting ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+          {isStarting ? 'Initializing...' : 'Start Training'}
+        </button>
+
+        {isRunning && (
+          <button
+            onClick={handleCancel}
+            className="px-4 py-3 bg-red-600/20 hover:bg-red-600/40 border border-red-500/50 text-red-400 font-semibold rounded-xl transition-all"
+          >
+            <Square className="w-5 h-5" />
+          </button>
+        )}
+
+        {/* History button */}
+        <button
+          onClick={() => setShowHistory(v => !v)}
+          className="flex items-center gap-2 px-4 py-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-gray-300 font-semibold rounded-xl transition-all"
+          title="Past trainings"
+        >
+          <History className="w-5 h-5" />
+          {pastSessions.length > 0 && (
+            <span className="text-xs bg-purple-600 text-white rounded-full px-1.5 py-0.5">{pastSessions.length}</span>
+          )}
         </button>
       </div>
 
-      {/* Live Training Status & Timer */}
-      {trainingStatus && (
-        <div className="p-4 bg-slate-900/50 rounded-lg border border-blue-500/30 space-y-5 animate-slideIn">
-          <div className="flex justify-between items-center bg-slate-800 p-3 rounded-lg border border-slate-700">
-            <div className="flex items-center gap-4 text-sm">
-              <span className={`px-3 py-1 rounded-full font-semibold capitalize ${trainingStatus.status === 'completed' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}`}>
-                {trainingStatus.status}
-              </span>
-              <div className="flex items-center gap-2 text-gray-400">
-                <Clock className="w-4 h-4 text-cyan-400" /> Elapsed: <span className="text-white">{formatTime(elapsedSec)}</span>
-              </div>
-            </div>
-            {trainingStatus.status === 'running' && (
-              <div className="text-sm text-gray-400">
-                ETA: <span className="text-yellow-400 font-mono">{formatTime(leftSec)}</span>
-              </div>
-            )}
-          </div>
-
-          {trainingStatus.total_epochs > 0 && (
-            <>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-400">Epoch Progress:</span>
-                <span className="text-white font-mono">{trainingStatus.current_epoch} / {trainingStatus.total_epochs}</span>
-              </div>
-              <div className="w-full bg-slate-700 rounded-full h-2">
-                <div className="bg-blue-500 h-2 rounded-full transition-all duration-300" style={{ width: `${trainingStatus.progress}%` }} />
-              </div>
-            </>
-          )}
-
-          {trainingStatus.metrics?.length > 0 && (
-            <div className="space-y-4 animate-fadeIn">
-              <div className="flex gap-4">
-                <LineChart data={trainingStatus.metrics} dataKey1="accuracy" dataKey2="val_accuracy" color1="#4ade80" color2="#22d3ee" title="Accuracy History" />
-                <LineChart data={trainingStatus.metrics} dataKey1="loss" dataKey2="val_loss" color1="#facc15" color2="#fb923c" title="Loss History" />
-              </div>
+      {/* ── Past Sessions Panel ── */}
+      {showHistory && (
+        <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-2 animate-slideIn">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
+            <History className="w-4 h-4 text-purple-400" /> Past Trainings ({pastSessions.length})
+          </h3>
+          {pastSessions.length === 0 ? (
+            <p className="text-gray-500 text-sm text-center py-4">No past trainings for this task.</p>
+          ) : (
+            <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
+              {pastSessions.map(s => {
+                const last = s.metrics?.length ? s.metrics[s.metrics.length - 1] : null;
+                const sc =
+                  s.status === 'completed' ? 'text-green-400 bg-green-900/20 border-green-500/30' :
+                    s.status === 'failed' ? 'text-red-400 bg-red-900/20 border-red-500/30' :
+                      s.status === 'cancelled' ? 'text-yellow-400 bg-yellow-900/20 border-yellow-500/30' :
+                        'text-purple-400 bg-purple-900/20 border-purple-500/30';
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => setViewingSession(s)}
+                    className="w-full text-left p-3 bg-slate-900/50 hover:bg-slate-700/50 rounded-lg border border-slate-700 hover:border-slate-500 transition-all group"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${sc}`}>
+                          {s.status?.toUpperCase()}
+                        </span>
+                        <span className="text-white text-sm font-medium">{s.base_model}</span>
+                      </div>
+                      <span className="text-xs text-gray-500">{formatDate(s.created_at)}</span>
+                    </div>
+                    <div className="flex gap-4 mt-1.5 text-xs text-gray-400">
+                      <span>Ep {s.current_epoch}/{s.total_epochs}</span>
+                      {last && (
+                        <>
+                          <span className="text-green-400">Acc {(last.accuracy * 100).toFixed(1)}%</span>
+                          <span className="text-cyan-400">Val {(last.val_accuracy * 100).toFixed(1)}%</span>
+                        </>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
       )}
 
-      {/* NEW: Training History */}
-      {state.trainedModels.length > 0 && !isTraining && (
-        <div className="mt-8 pt-6 border-t border-slate-700">
-          <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-            <History className="w-5 h-5 text-purple-400" /> Training History
-          </h3>
-          <div className="space-y-3">
-            {state.trainedModels.filter(m => m.task === task).map(model => (
-              <div key={model.id} className="flex items-center justify-between p-3 bg-slate-800 rounded-lg border border-slate-700">
-                <div>
-                  <div className="text-white font-medium">{model.name}</div>
-                  <div className="text-xs text-gray-400 flex gap-3 mt-1">
-                    <span>Base: {model.base_model || 'Unknown'}</span>
-                    <span>Acc: {(model.accuracy * 100).toFixed(1)}%</span>
-                    <span>Val Acc: {(model.val_accuracy * 100).toFixed(1)}%</span>
-                  </div>
-                </div>
-                <div className={`px-2 py-1 text-xs rounded-full font-medium ${model.optimized ? 'bg-green-500/20 text-green-400' : 'bg-slate-700 text-gray-400'}`}>
-                  {model.optimized ? 'Optimized' : 'Raw Model'}
-                </div>
+      {/* ── Current Training Status ── */}
+      {status && (
+        <div className="space-y-4 animate-slideIn">
+          {/* Progress bar */}
+          <div>
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-gray-400">Epoch {status.current_epoch} / {status.total_epochs}</span>
+              <span className={`font-semibold ${statusColor}`}>{status.status.toUpperCase()}</span>
+            </div>
+            <div className="w-full bg-slate-700 rounded-full h-3">
+              <div
+                className={`h-3 rounded-full transition-all duration-500 ${barColor}`}
+                style={{ width: `${status.progress || 0}%` }}
+              />
+            </div>
+
+            {(isRunning || status.status === 'completed') && elapsed > 0 && (
+              <div className="flex gap-6 mt-2 text-xs text-gray-400">
+                <span className="flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-cyan-500" />
+                  Elapsed: <span className="text-cyan-300 font-mono ml-1">{formatTime(elapsed)}</span>
+                </span>
+                {isRunning && (
+                  <span className="flex items-center gap-1">
+                    <Timer className="w-3 h-3 text-amber-500" />
+                    Remaining: <span className="text-amber-300 font-mono ml-1">{formatTime(remaining)}</span>
+                  </span>
+                )}
+                {status.status === 'completed' && (
+                  <span className="flex items-center gap-1">
+                    <Timer className="w-3 h-3 text-green-500" />
+                    Total: <span className="text-green-300 font-mono ml-1">{formatTime(elapsed)}</span>
+                  </span>
+                )}
               </div>
-            ))}
+            )}
           </div>
+
+          {/* Live metric cards */}
+          {latestMetrics && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                  <TrendingUp className="w-3 h-3" /> Accuracy
+                </div>
+                <span className="text-lg font-bold text-green-400">
+                  {(latestMetrics.accuracy * 100).toFixed(1)}%
+                </span>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                  <Award className="w-3 h-3" /> Val Accuracy
+                </div>
+                <span className="text-lg font-bold text-cyan-400">
+                  {(latestMetrics.val_accuracy * 100).toFixed(1)}%
+                </span>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="text-xs text-gray-400 mb-1">Loss</div>
+                <span className="text-lg font-bold text-yellow-400">{latestMetrics.loss.toFixed(4)}</span>
+              </div>
+              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
+                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                  <Clock className="w-3 h-3" /> Val Loss
+                </div>
+                <span className="text-lg font-bold text-orange-400">{latestMetrics.val_loss.toFixed(4)}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Live charts with expand button */}
+          {accuracyData.length >= 2 && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="relative">
+                <button
+                  onClick={() => setExpandedLiveChart('accuracy')}
+                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                  title="Expand chart"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+                <MetricChart data={accuracyData} label="Accuracy (%)" color="#22c55e" valColor="#06b6d4" formatY={v => `${v}%`} />
+              </div>
+              <div className="relative">
+                <button
+                  onClick={() => setExpandedLiveChart('loss')}
+                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                  title="Expand chart"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+                <MetricChart data={lossData} label="Loss" color="#eab308" valColor="#f97316" />
+              </div>
+            </div>
+          )}
+
+          {status.status === 'failed' && (status as any).error && (
+            <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">
+              Error: {(status as any).error}
+            </div>
+          )}
         </div>
+      )}
+
+      {/* ── Live chart modal ── */}
+      {expandedLiveChart === 'accuracy' && (
+        <ChartModal
+          label="Accuracy (%)" color="#22c55e" valColor="#06b6d4"
+          data={accuracyData} formatY={v => `${v}%`}
+          onClose={() => setExpandedLiveChart(null)}
+        />
+      )}
+      {expandedLiveChart === 'loss' && (
+        <ChartModal
+          label="Loss" color="#eab308" valColor="#f97316"
+          data={lossData}
+          onClose={() => setExpandedLiveChart(null)}
+        />
+      )}
+
+      {/* ── Past session popup ── */}
+      {viewingSession && (
+        <PastSessionPopup session={viewingSession} onClose={() => setViewingSession(null)} />
       )}
     </div>
   );

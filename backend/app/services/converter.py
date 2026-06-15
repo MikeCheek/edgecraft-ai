@@ -4,28 +4,27 @@ import uuid
 import time
 from typing import Dict
 
+
 class Converter:
     """Persistent model optimization and conversion service"""
-    
+
     def __init__(self, storage_dir: str = "data_storage"):
         self.storage_dir = storage_dir
         self.db_file = os.path.join(storage_dir, "optimization_db.json")
-        
+
         if not os.path.exists(storage_dir):
             os.makedirs(storage_dir)
 
         self.optimization_sessions: Dict[str, dict] = {}
         self.active_optimizations: Dict[str, bool] = {}
-        
+
         self._load_from_disk()
 
     def _save_to_disk(self):
-        """Persist optimization sessions to JSON"""
         with open(self.db_file, "w") as f:
             json.dump(self.optimization_sessions, f, indent=2)
 
     def _load_from_disk(self):
-        """Load state from disk on startup"""
         if os.path.exists(self.db_file):
             with open(self.db_file, "r") as f:
                 self.optimization_sessions = json.load(f)
@@ -33,7 +32,6 @@ class Converter:
     def create_optimization_session(self, training_id: str, method: str,
                                     sparsity_level: float) -> str:
         optimization_id = str(uuid.uuid4())
-        
         self.optimization_sessions[optimization_id] = {
             "id": optimization_id,
             "training_id": training_id,
@@ -43,16 +41,15 @@ class Converter:
             "created_at": time.time(),
             "started_at": None,
             "completed_at": None,
-            "original_size": 0,
-            "optimized_size": 0,
+            "original_size_bytes": 0,
+            "optimized_size_bytes": 0,
             "compression_ratio": 0.0,
             "c_array": None
         }
-        
         self.active_optimizations[optimization_id] = False
         self._save_to_disk()
         return optimization_id
-    
+
     def optimize(self, optimization_id: str):
         """Execute optimization and persist status"""
         try:
@@ -61,40 +58,46 @@ class Converter:
             session["status"] = "running"
             session["started_at"] = time.time()
             self._save_to_disk()
-            
-            original_size = 2500000 
+
+            original_size = 2_500_000
+
+            # FIX: Added WEIGHT_CLUSTERING and DYNAMIC_QUANTIZATION ratios
             compression_ratios = {
                 "INT8_QUANTIZATION": 0.25,
                 "FLOAT16_QUANTIZATION": 0.50,
-                "PRUNING": 0.65
+                "PRUNING": 0.65,
+                "WEIGHT_CLUSTERING": 0.70,
+                "DYNAMIC_QUANTIZATION": 0.80,
             }
-            
+
             ratio = compression_ratios.get(session["method"], 0.5)
-            session["original_size"] = original_size
-            session["optimized_size"] = int(original_size * ratio)
+            # FIX: use _bytes suffix to match frontend expectations
+            session["original_size_bytes"] = original_size
+            session["optimized_size_bytes"] = int(original_size * ratio)
             session["compression_ratio"] = ratio
-            
-            time.sleep(1) 
-            
+
+            time.sleep(1)
+
             session["status"] = "completed"
             session["completed_at"] = time.time()
             self._save_to_disk()
-        
+
         except Exception as e:
+            session = self.optimization_sessions[optimization_id]
             session["status"] = "failed"
             session["error"] = str(e)
             self._save_to_disk()
         finally:
             self.active_optimizations[optimization_id] = False
-    
+
     def generate_c_array(self, optimization_id: str) -> str:
         if optimization_id not in self.optimization_sessions:
             raise ValueError(f"Optimization session {optimization_id} not found")
-        
+
         session = self.optimization_sessions[optimization_id]
-        
-        hex_values = " ".join([f"0x{i:02x}" for i in range(min(100, session["optimized_size"]))])
-        
+        optimized_size = session["optimized_size_bytes"]
+        hex_values = " ".join([f"0x{i:02x}" for i in range(min(100, optimized_size))])
+
         c_array = f"""#ifndef MODEL_DATA_H
 #define MODEL_DATA_H
 
@@ -102,36 +105,40 @@ class Converter:
 
 const unsigned char g_model[] DATA_ALIGN_ATTRIBUTE = {{
 {hex_values},
-  // ... ({session['optimized_size']} bytes total)
+  // ... ({optimized_size} bytes total)
 }};
-const unsigned int g_model_len = {session['optimized_size']};
+const unsigned int g_model_len = {optimized_size};
 
 #endif // MODEL_DATA_H
 """
         session["c_array"] = c_array
-        self._save_to_disk() # Save the generated C-array to persistence
+        self._save_to_disk()
         return c_array
-    
+
     def get_optimization_status(self, optimization_id: str) -> dict:
         if optimization_id in self.optimization_sessions:
             return self.optimization_sessions[optimization_id]
-        else:
-            raise ValueError(f"Optimization session {optimization_id} not found")
-        
+        raise ValueError(f"Optimization session {optimization_id} not found")
+
     def get_optimization_result(self, optimization_id: str) -> dict:
-        if optimization_id in self.optimization_sessions:
-            session = self.optimization_sessions[optimization_id]
-            if session["status"] == "completed":
-                return {
-                    "original_size": session["original_size"],
-                    "optimized_size": session["optimized_size"],
-                    "compression_ratio": session["compression_ratio"]
-                }
-            else:
-                raise ValueError(f"Optimization session {optimization_id} is not completed yet")
-        else:
+        """FIX: Return field names that match the frontend OptimizationResult type."""
+        if optimization_id not in self.optimization_sessions:
             raise ValueError(f"Optimization session {optimization_id} not found")
-        
+
+        session = self.optimization_sessions[optimization_id]
+        if session["status"] != "completed":
+            raise ValueError(f"Optimization session {optimization_id} is not completed yet")
+
+        return {
+            "id": optimization_id,
+            "original_size_bytes": session["original_size_bytes"],
+            "optimized_size_bytes": session["optimized_size_bytes"],
+            "compression_ratio": session["compression_ratio"],
+            "method": session["method"],
+            "status": session["status"],
+            "c_array": session.get("c_array"),
+        }
+
     def cancel_optimization(self, optimization_id: str) -> bool:
         if optimization_id in self.active_optimizations and self.active_optimizations[optimization_id]:
             self.active_optimizations[optimization_id] = False
@@ -141,7 +148,7 @@ const unsigned int g_model_len = {session['optimized_size']};
             self._save_to_disk()
             return True
         return False
-    
+
     def delete_optimization(self, optimization_id: str) -> bool:
         if optimization_id in self.optimization_sessions:
             del self.optimization_sessions[optimization_id]
