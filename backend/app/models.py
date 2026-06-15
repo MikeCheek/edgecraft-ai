@@ -1,5 +1,7 @@
 from pydantic import BaseModel
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any, Generic, TypeVar
+
+T = TypeVar("T")
 
 # Task Types
 TaskType = Literal[
@@ -17,22 +19,34 @@ BoardType = Literal[
     "ARDUINO_NANO_33_BLE"
 ]
 
-# Quantization Methods
 QuantizationMethod = Literal[
     "INT8_QUANTIZATION",
     "FLOAT16_QUANTIZATION",
-    "PRUNING"
+    "PRUNING",
+    "WEIGHT_CLUSTERING",  # Example restoration
+    "DYNAMIC_QUANTIZATION" # Example restoration
 ]
+
+class DatasetInfo(BaseModel):
+    """Information about a created dataset"""
+    id: str
+    name: str
+    task: TaskType
+    sample_count: int
+    created_at: float
 
 class DatasetSample(BaseModel):
     """Single dataset sample"""
+    id: str
+    dataset_id: str
     label: str
-    file_path: str
     task: TaskType
+    filename: str
     timestamp: float
 
 class TrainingConfig(BaseModel):
     """Training configuration"""
+    dataset_id: str
     epochs: int = 50
     batch_size: int = 32
     learning_rate: float = 0.001
@@ -40,29 +54,18 @@ class TrainingConfig(BaseModel):
     task: TaskType
     validation_split: float = 0.2
 
-class OptimizationConfig(BaseModel):
-    """Optimization configuration"""
-    method: QuantizationMethod
-    sparsity_level: float = 0.5  # For pruning
-    representative_dataset_size: int = 100
-
-class BoardInfo(BaseModel):
-    """Target board information"""
-    board: BoardType
-    ram_kb: int
-    flash_kb: int
-    dsp_enabled: bool = True
-
 class ModelMetadata(BaseModel):
-    """Model metadata"""
+    """Model metadata for trained models"""
+    id: str
     name: str
+    training_id: str
     task: TaskType
     created_at: float
-    input_shape: tuple
-    output_shape: tuple
     accuracy: float
     loss: float
-    optimized: bool = False
+    val_accuracy: float
+    val_loss: float
+    optimized: bool
     size_bytes: int
 
 class TrainingMetrics(BaseModel):
@@ -74,28 +77,57 @@ class TrainingMetrics(BaseModel):
     val_accuracy: float
     timestamp: float
 
+class TrainingStatus(BaseModel):
+    """Real-time status of a training session"""
+    id: str
+    status: Literal['initialized', 'running', 'completed', 'failed', 'cancelled']
+    current_epoch: int
+    total_epochs: int
+    progress: float
+    created_at: float
+    started_at: Optional[float] = None
+    metrics: List[TrainingMetrics] = []
+
 class OptimizationResult(BaseModel):
-    """Result of optimization"""
+    """Result of an optimization/quantization session"""
+    id: str
     original_size_bytes: int
     optimized_size_bytes: int
     compression_ratio: float
     method: QuantizationMethod
-    c_array_preview: str
+    status: Literal['initialized', 'running', 'completed', 'failed']
+    c_array: Optional[str] = None
+    cpp_wrapper: Optional[str] = None
 
 class BoardRecommendation(BaseModel):
-    """Board-specific recommendation"""
+    """Board-specific hardware evaluation"""
     board: BoardType
+    board_name: str
     ram_usage_kb: int
     flash_usage_kb: int
     ram_percentage: float
     flash_percentage: float
-    warnings: List[str]
-    suggestions: List[str]
+    warnings: List[str] = []
+    suggestions: List[str] = []
     estimated_inference_ms: float
+    deployment_feasible: bool
 
 class LLMSuggestion(BaseModel):
     """LLM-powered suggestion for model improvement"""
     suggestion: str
     reasoning: str
-    parameters_to_adjust: dict
+    parameters_to_adjust: Dict[str, Any] = {}
     estimated_improvement: str
+
+class DatasetStatistics(BaseModel):
+    """Global statistics across all datasets"""
+    total_samples: int
+    by_task: Dict[str, int] = {}
+    by_label: Dict[str, int] = {}
+
+class ApiResponse(BaseModel, Generic[T]):
+    """Standardized API Response wrapper"""
+    status: Literal['success', 'error']
+    data: Optional[T] = None
+    message: Optional[str] = None
+    error: Optional[str] = None

@@ -104,26 +104,25 @@ class ModelFactory:
         return model
 
     @staticmethod
-    def create_model(
-        task: str,
-        num_classes: int = 10,
-        base_model: str = "MobileNetV2"
-    ) -> keras.Model:
-        """Factory method to create appropriate model for task"""
+    def create_model(task: str, num_classes: int = 10, base_model: str = "MobileNetV2", input_shape: tuple = (224, 224, 3)) -> keras.Model:
         models = {
             "IMAGE_CLASSIFICATION": lambda: ModelFactory.create_image_classification_model(
-                num_classes=num_classes,
-                base_model_name=base_model
+                input_shape=input_shape, num_classes=num_classes, base_model_name=base_model
             ),
             "OBJECT_DETECTION": lambda: ModelFactory.create_image_classification_model(
+                input_shape=input_shape,
                 num_classes=num_classes,
                 base_model_name=base_model
             ),
-            "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(),
+            "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(
+                input_shape=input_shape
+            ),
             "KEYWORD_SPOTTING": lambda: ModelFactory.create_keyword_spotting_model(
+                input_shape=input_shape,
                 num_classes=num_classes
             ),
             "AUDIO_CLASSIFICATION": lambda: ModelFactory.create_audio_classification_model(
+                input_shape=input_shape,
                 num_classes=num_classes
             ),
         }

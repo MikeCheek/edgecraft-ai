@@ -1,240 +1,143 @@
 import { useState, useEffect } from 'react';
-import {
-  DataCollector,
-  ModelTrainer,
-  OptimizationStudio,
-  BoardAdvisor,
-  LLMAdvisor,
-} from './components';
+import { DataCollector, ModelTrainer, OptimizationStudio, BoardAdvisor, LLMAdvisor, DashboardOverview, DatasetManager } from './components';
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
-import { TinyMLTask, TargetBoard, TrainingStatus } from './types';
-import { BarChart3, Code2, Zap } from 'lucide-react';
+import { TinyMLTask, TargetBoard } from './types';
+import { BarChart3, Code2, Zap, LayoutDashboard, Database, BrainCircuit, Cpu, Settings2 } from 'lucide-react';
+import { useAPI } from './hooks/useAPI';
 
 export default function App() {
   const { state, dispatch } = useAppContext();
   const isHealthy = useHealthCheck();
+  const { request, apiClient } = useAPI();
 
   const [selectedTask, setSelectedTask] = useState<TinyMLTask>('IMAGE_CLASSIFICATION');
   const [selectedBoard, setSelectedBoard] = useState<TargetBoard>('ESP32_S3_N16R8');
-  const [trainingMetrics, setTrainingMetrics] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'collect' | 'train' | 'optimize' | 'deploy'>('collect');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'collect' | 'train' | 'optimize' | 'deploy'>('dashboard');
 
-  const handleTaskSelect = (task: TinyMLTask) => {
+  const fetchStatsAndModels = async () => {
+    const rawStats = await request(() => apiClient.getDatasetStats());
+    if (rawStats) {
+      dispatch({ type: 'UPDATE_DATASET_STATS', payload: { total_samples: rawStats.total_samples || 0, by_task: rawStats.by_task || {}, by_label: rawStats.by_label || {} } });
+    }
+    const rawModels = await request(() => apiClient.listModels());
+    if (rawModels && rawModels.models) {
+      dispatch({ type: 'SET_MODELS', payload: rawModels.models });
+    }
+  };
+
+  useEffect(() => { if (isHealthy) fetchStatsAndModels(); }, [isHealthy]);
+
+  const handleTaskSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const task = e.target.value as TinyMLTask;
     setSelectedTask(task);
     dispatch({ type: 'SET_TASK', payload: task });
   };
 
-  const handleBoardSelect = (board: TargetBoard) => {
-    setSelectedBoard(board);
-    dispatch({ type: 'SET_BOARD', payload: board });
-  };
-
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
-      {/* Header */}
-      <header className="sticky top-0 z-50 bg-black bg-opacity-40 backdrop-blur-md border-b border-purple-500/20">
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-purple-400 to-pink-500 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-lg">EC</span>
-              </div>
-              <div>
-                <h1 className="text-2xl font-bold text-white">EdgeCraft AI</h1>
-                <p className="text-sm text-purple-200">Local TinyML Studio</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="px-4 py-2 rounded-lg bg-purple-500/20 border border-purple-500/50">
-                <p className="text-sm text-purple-100">
-                  Backend:{' '}
-                  <span className={isHealthy ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'}>
-                    {isHealthy ? 'Connected' : 'Offline'}
-                  </span>
-                </p>
-              </div>
-            </div>
+    <div className="flex h-screen bg-slate-950 text-gray-100 overflow-hidden">
+      {/* Sidebar Navigation */}
+      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
+        <div className="h-16 flex items-center px-6 border-b border-slate-800">
+          <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-600 rounded-lg flex items-center justify-center mr-3 shadow-lg">
+            <span className="text-white font-bold text-sm">EC</span>
           </div>
-
-          {/* Tab Navigation */}
-          <div className="flex gap-2 border-b border-purple-500/20">
-            {[
-              { id: 'collect', label: 'Data Collection', icon: '📊' },
-              { id: 'train', label: 'Training', icon: '🚀' },
-              { id: 'optimize', label: 'Optimization', icon: '⚡' },
-              { id: 'deploy', label: 'Deployment', icon: '📦' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`px-4 py-3 font-medium transition ${activeTab === tab.id
-                    ? 'text-white border-b-2 border-purple-400'
-                    : 'text-gray-400 hover:text-gray-200'
-                  }`}
-              >
-                {tab.icon} {tab.label}
-              </button>
-            ))}
-          </div>
+          <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">EdgeCraft AI</h1>
         </div>
-      </header>
+        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
+          {[
+            { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+            { id: 'collect', label: 'Data Collection', icon: Database },
+            { id: 'train', label: 'Model Training', icon: BrainCircuit },
+            { id: 'optimize', label: 'Optimization', icon: Cpu },
+            { id: 'deploy', label: 'Deployment', icon: Code2 },
+          ].map((item) => (
+            <button key={item.id} onClick={() => setActiveTab(item.id as any)} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 font-medium ${activeTab === item.id ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30' : 'text-gray-400 hover:bg-slate-800/50 hover:text-gray-200'}`}>
+              <item.icon className={`w-5 h-5 ${activeTab === item.id ? 'text-purple-400' : 'text-gray-500'}`} /> {item.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
 
-      <main className="max-w-7xl mx-auto px-4 py-8">
-        {/* Task & Board Selection */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-          {/* Task Selection */}
-          <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-purple-500/30 p-6">
-            <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
-              <BarChart3 className="w-5 h-5 text-purple-400" />
-              Select Task
-            </h2>
-            <div className="space-y-2">
-              {['IMAGE_CLASSIFICATION', 'OBJECT_DETECTION', 'VISUAL_WAKE_WORDS', 'KEYWORD_SPOTTING', 'AUDIO_CLASSIFICATION'].map((task) => (
-                <button
-                  key={task}
-                  onClick={() => handleTaskSelect(task as TinyMLTask)}
-                  className={`w-full px-4 py-3 rounded-lg text-left transition border ${selectedTask === task
-                      ? 'bg-purple-600 border-purple-400 text-white'
-                      : 'bg-purple-500/20 hover:bg-purple-500/40 text-purple-100 border-purple-500/30'
-                    }`}
-                >
-                  {task.replace(/_/g, ' ')}
-                </button>
-              ))}
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-10">
+          <div className="flex items-center gap-6 flex-1">
+            <div className="flex items-center gap-2 text-sm"><Settings2 className="w-4 h-4 text-gray-500" /><span className="text-gray-400">Global Config:</span></div>
+            <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5">
+              <BarChart3 className="w-4 h-4 text-purple-400" />
+              <select value={selectedTask} onChange={handleTaskSelect} className="bg-transparent text-sm text-white focus:outline-none cursor-pointer">
+                <option value="IMAGE_CLASSIFICATION">Image Classification</option>
+                <option value="OBJECT_DETECTION">Object Detection</option>
+                <option value="VISUAL_WAKE_WORDS">Visual Wake Words</option>
+                <option value="KEYWORD_SPOTTING">Keyword Spotting</option>
+                <option value="AUDIO_CLASSIFICATION">Audio Classification</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5">
+              <Zap className="w-4 h-4 text-cyan-400" />
+              <select value={selectedBoard} onChange={(e) => { setSelectedBoard(e.target.value as TargetBoard); dispatch({ type: 'SET_BOARD', payload: e.target.value as TargetBoard }); }} className="bg-transparent text-sm text-white focus:outline-none cursor-pointer">
+                <option value="ESP32_S3_N16R8">ESP32-S3 (N16R8)</option>
+                <option value="RASPBERRY_PI_PICO_2_W">Raspberry Pi Pico 2 W</option>
+                <option value="ARDUINO_NANO_33_BLE">Arduino Nano 33 BLE</option>
+              </select>
             </div>
           </div>
+        </header>
 
-          {/* Board Selection */}
-          <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-cyan-500/30 p-6">
-            <h2 className="text-xl font-semibold text-white mb-4 flex items-center gap-2">
-              <Zap className="w-5 h-5 text-cyan-400" />
-              Target Board
-            </h2>
-            <div className="space-y-2">
-              {['ESP32_S3_N16R8', 'RASPBERRY_PI_PICO_2_W', 'ARDUINO_NANO_33_BLE'].map((board) => (
-                <button
-                  key={board}
-                  onClick={() => handleBoardSelect(board as TargetBoard)}
-                  className={`w-full px-4 py-3 rounded-lg text-left transition border ${selectedBoard === board
-                      ? 'bg-cyan-600 border-cyan-400 text-white'
-                      : 'bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-100 border-cyan-500/30'
-                    }`}
-                >
-                  {board.replace(/_/g, ' ')}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Main Content Area - Tab Based */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Main Panel */}
-          <div className="lg:col-span-2">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-purple-500/30 p-6">
-              {activeTab === 'collect' && (
-                <div>
-                  <h3 className="text-lg font-semibold text-white mb-4">📊 Collect Training Data</h3>
-                  <DataCollector task={selectedTask} />
+        <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+          <div className="max-w-6xl mx-auto animate-slideIn">
+            {activeTab === 'dashboard' && <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />}
+            {activeTab === 'collect' && (
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
+                <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
+              </div>
+            )}
+            {activeTab === 'train' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
+                  <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
                 </div>
-              )}
-
-              {activeTab === 'train' && (
-                <div>
-                  <h3 className="text-lg font-semibold text-white mb-4">🚀 Train Model</h3>
-                  <ModelTrainer task={selectedTask} />
-                </div>
-              )}
-
-              {activeTab === 'optimize' && (
-                <div>
-                  <h3 className="text-lg font-semibold text-white mb-4">⚡ Optimize Model</h3>
-                  <OptimizationStudio trainingId={state.currentTraining?.id} />
-                </div>
-              )}
-
-              {activeTab === 'deploy' && (
-                <div>
-                  <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                    <Code2 className="w-5 h-5" />
-                    Export & Deploy
-                  </h3>
-                  <div className="space-y-4">
-                    <div className="p-4 bg-slate-900/50 rounded-lg border border-pink-500/20">
-                      <p className="text-sm text-gray-300 mb-3">
-                        Export your optimized model as C-array and deployment files
-                      </p>
-                      <button
-                        disabled={!state.currentOptimization}
-                        className="w-full px-4 py-2 bg-pink-600 hover:bg-pink-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition"
-                      >
-                        Export C-Array
-                      </button>
-                    </div>
+                <div className="space-y-6">
+                  <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4">AI Advisor</h3>
+                    <LLMAdvisor
+                      trainingId={state.currentTraining?.id}
+                      metrics={state.currentTraining?.metrics}
+                      status={state.currentTraining?.status}
+                    />
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Board Recommendations */}
+              </div>
+            )}
             {activeTab === 'optimize' && (
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-cyan-500/30 p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">📍 Board Compatibility</h3>
-                <BoardAdvisor
-                  optimizationId={state.currentOptimization?.id}
-                  board={selectedBoard}
-                />
-              </div>
-            )}
-
-            {/* LLM Suggestions */}
-            {(activeTab === 'train' || activeTab === 'optimize') && (
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-purple-500/30 p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">💡 AI Suggestions</h3>
-                <LLMAdvisor
-                  trainingId={state.currentTraining?.id}
-                  metrics={trainingMetrics}
-                  optimizationId={state.currentOptimization?.id}
-                  board={selectedBoard}
-                />
-              </div>
-            )}
-
-            {/* Model Info */}
-            {state.currentTraining && (
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-lg border border-blue-500/30 p-6">
-                <h3 className="text-lg font-semibold text-white mb-4">📈 Training Status</h3>
-                <div className="space-y-3 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Task:</span>
-                    <span className="text-white font-semibold">{selectedTask}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Status:</span>
-                    <span className="text-blue-300 font-semibold">{state.currentTraining.status}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Progress:</span>
-                    <span className="text-white font-semibold">
-                      {state.currentTraining.currentEpoch}/{state.currentTraining.totalEpochs}
-                    </span>
-                  </div>
-                  <div className="w-full bg-slate-700 rounded-full h-2 mt-2">
-                    <div
-                      className="bg-blue-500 h-2 rounded-full transition-all"
-                      style={{ width: `${state.currentTraining.progress}%` }}
-                    ></div>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
+                  <OptimizationStudio models={state.trainedModels} />
+                </div>
+                <div className="space-y-6">
+                  <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4">Hardware Target</h3>
+                    <BoardAdvisor optimizationId={state.currentOptimization?.id} board={selectedBoard} />
                   </div>
                 </div>
               </div>
             )}
+            {activeTab === 'deploy' && (
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl max-w-3xl">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Export C-Array</h2>
+                <div className="p-6 bg-slate-900/80 rounded-lg border border-pink-500/20 text-center">
+                  <button disabled={!state.currentOptimization} className="px-8 py-3 bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 disabled:from-slate-700 text-white font-bold rounded-lg transition-all shadow-lg">
+                    {state.currentOptimization ? 'Generate edgecraft_model.h' : 'Complete optimization first'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      </main>
+        </main>
+      </div>
     </div>
   );
 }

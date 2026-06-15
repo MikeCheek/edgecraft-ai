@@ -18,3 +18,8 @@ frontend/.env.local
 # OS
 .DS_Store
 Thumbs.db
+
+**.bin
+**.json
+backend.*
+frontend.*

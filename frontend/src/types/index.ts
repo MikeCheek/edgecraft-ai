@@ -6,136 +6,130 @@ export type TinyMLTask =
   | 'KEYWORD_SPOTTING'
   | 'AUDIO_CLASSIFICATION'
 
-// Board Types
 export type TargetBoard =
   | 'ESP32_S3_N16R8'
   | 'RASPBERRY_PI_PICO_2_W'
   | 'ARDUINO_NANO_33_BLE'
 
-// Quantization Methods
 export type QuantizationMethod =
   | 'INT8_QUANTIZATION'
   | 'FLOAT16_QUANTIZATION'
   | 'PRUNING'
+  | 'WEIGHT_CLUSTERING'
+  | 'DYNAMIC_QUANTIZATION'
 
-// Dataset Sample
+export interface DatasetInfo {
+  id: string
+  name: string
+  task: TinyMLTask
+  sample_count: number
+  created_at: number
+}
+
 export interface DatasetSample {
   id: string
+  dataset_id: string
   label: string
   task: TinyMLTask
   filename: string
   timestamp: number
 }
 
-// Training Configuration
 export interface TrainingConfig {
+  dataset_id: string
   epochs: number
-  batchSize: number
-  learningRate: number
-  baseModel: string
+  batch_size: number
+  learning_rate: number
+  base_model: string
   task: TinyMLTask
-  validationSplit: number
+  validation_split: number
+  input_shape?: number[] // NEW: e.g., [96, 96, 3] or [224, 224, 3]
 }
 
-// Optimization Configuration
-export interface OptimizationConfig {
-  method: QuantizationMethod
-  sparsityLevel: number
-  representativeDatasetSize: number
-}
-
-// Board Information
-export interface BoardInfo {
-  board: TargetBoard
-  name: string
-  ramKb: number
-  flashKb: number
-  dspEnabled: boolean
-  features: string[]
-  recommendedModels: string[]
-}
-
-// Model Metadata
 export interface ModelMetadata {
   id: string
   name: string
+  training_id: string
   task: TinyMLTask
-  createdAt: number
-  inputShape: number[]
-  outputShape: number[]
+  dataset_id?: string // NEW: To track duplicate trainings
+  base_model?: string // NEW: To track model architecture
+  created_at: number
   accuracy: number
   loss: number
+  val_accuracy: number
+  val_loss: number
   optimized: boolean
-  sizeBytes: number
+  size_bytes: number
+  download_url?: string // NEW: Link to download base .tflite
 }
 
-// Training Metrics
 export interface TrainingMetrics {
   epoch: number
   loss: number
   accuracy: number
-  valLoss: number
-  valAccuracy: number
+  val_loss: number
+  val_accuracy: number
   timestamp: number
 }
 
-// Training Status
 export interface TrainingStatus {
   id: string
   status: 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
-  currentEpoch: number
-  totalEpochs: number
+  current_epoch: number
+  total_epochs: number
   progress: number
-  createdAt: number
-  startedAt?: number
+  created_at: number
+  started_at?: number
   metrics: TrainingMetrics[]
 }
 
-// Optimization Result
 export interface OptimizationResult {
   id: string
-  originalSizeBytes: number
-  optimizedSizeBytes: number
-  compressionRatio: number
+  original_size_bytes: number
+  optimized_size_bytes: number
+  compression_ratio: number
   method: QuantizationMethod
   status: 'initialized' | 'running' | 'completed' | 'failed'
-  cArray?: string
-  cppWrapper?: string
+  c_array?: string
+  cpp_wrapper?: string
+  download_url?: string // NEW: Link to download optimized .tflite
 }
 
-// Board Recommendation
 export interface BoardRecommendation {
   board: TargetBoard
-  boardName: string
-  ramUsageKb: number
-  flashUsageKb: number
-  ramPercentage: number
-  flashPercentage: number
+  board_name: string
+  ram_usage_kb: number
+  flash_usage_kb: number
+  ram_percentage: number
+  flash_percentage: number
   warnings: string[]
   suggestions: string[]
-  estimatedInferenceMs: number
-  deploymentFeasible: boolean
+  estimated_inference_ms: number
+  deployment_feasible: boolean
 }
 
-// LLM Suggestion
 export interface LLMSuggestion {
   suggestion: string
   reasoning: string
-  parametersToAdjust: Record<string, any>
-  estimatedImprovement: string
+  parameters_to_adjust: Record<string, any>
+  estimated_improvement: string
 }
 
-// Dataset Statistics
 export interface DatasetStatistics {
-  totalSamples: number
-  byTask: Record<string, number>
-  byLabel: Record<string, number>
+  total_samples: number
+  by_task: Record<string, number>
+  by_label: Record<string, number>
 }
 
-// API Response Wrapper
 export interface ApiResponse<T> {
   status: 'success' | 'error'
   data?: T
   message?: string
   error?: string
+}
+
+export interface InferenceResult {
+  class_name: string
+  confidence: number
+  inference_time_ms: number
 }
