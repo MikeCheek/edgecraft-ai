@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Play, Square, RefreshCw, TrendingUp, Clock, Award, Timer,
   ShieldCheck, History, X, ZoomIn, Download, ChevronDown, ChevronUp,
-  AlertTriangle,
+  AlertTriangle, Settings, Activity
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -33,8 +33,8 @@ function getTaskDefaults(task: TinyMLTask): { input_shape: number[]; base_model:
   }
 }
 
-const IMAGE_MODELS = ['MobileNetV2', 'EfficientNet', 'Custom3LayerCNN'];
-const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet'];
+const IMAGE_MODELS = ['MobileNetV2', 'EfficientNet', 'ResNet50V2', 'MobileNetV3Small', 'Custom3LayerCNN'];
+const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet', 'AudioLSTM', 'AudioGRU'];
 const AUDIO_TASKS: TinyMLTask[] = ['KEYWORD_SPOTTING', 'AUDIO_CLASSIFICATION'];
 
 function formatTime(secs: number): string {
@@ -51,7 +51,7 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
-// ─── Expandable / exportable chart ────────────────────────────────────────────
+// === Expandable / exportable chart ============================================
 
 interface MetricChartProps {
   data: { epoch: number; train: number; val: number }[];
@@ -175,7 +175,7 @@ function ChartModal({ label, color, valColor, data, formatY, onClose }: ChartMod
   );
 }
 
-// ─── Past training popup ───────────────────────────────────────────────────────
+// === Past training popup =======================================================
 
 interface PastSessionPopupProps {
   session: any;
@@ -324,7 +324,7 @@ function PastSessionPopup({ session, onClose }: PastSessionPopupProps) {
   );
 }
 
-// ─── Main component ────────────────────────────────────────────────────────────
+// === Main component ============================================================
 
 export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const { dispatch } = useAppContext();
@@ -339,6 +339,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [learningRate, setLearningRate] = useState(0.001);
   const [baseModel, setBaseModel] = useState(defaults.base_model);
   const [validationSplit, setValidationSplit] = useState(0.2);
+
+  // Layout expansion state
+  const [isConfigExpanded, setIsConfigExpanded] = useState(true);
 
   // Regularization
   const [dropoutRate, setDropoutRate] = useState(0.5);
@@ -429,6 +432,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     setDuplicateWarning(false);
     setIsStarting(true);
     setStatus(null);
+    setIsConfigExpanded(false); // Automatically collapse config upon starting
 
     const taskDefaults = getTaskDefaults(task);
     const raw = await request(() =>
@@ -494,226 +498,218 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   return (
     <div className="space-y-6">
 
-      {/* ── Duplicate warning ── */}
-      {duplicateWarning && (
-        <div className="p-4 bg-amber-900/30 border border-amber-500/50 rounded-xl flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <p className="text-amber-300 font-semibold text-sm">Duplicate training detected</p>
-            <p className="text-amber-400/80 text-xs mt-1">
-              The same dataset, model, epochs, batch size and learning rate were already used in a previous training. Do you still want to proceed?
-            </p>
-            <div className="flex gap-2 mt-3">
-              <button
-                onClick={doStartTraining}
-                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition"
-              >
-                Train anyway
-              </button>
-              <button
-                onClick={() => setDuplicateWarning(false)}
-                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-gray-300 text-xs rounded-lg transition"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Config Panel ── */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-        {/* Dataset selector */}
-        <div className="md:col-span-2">
-          <label className="block text-sm font-medium text-gray-300 mb-1">Dataset</label>
-          <select
-            value={datasetId}
-            onChange={e => setDatasetId(e.target.value)}
-            disabled={isRunning}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
-          >
-            <option value="">-- Select a dataset --</option>
-            {datasets.map(d => (
-              <option key={d.id} value={d.id}>{d.name} ({d.sample_count} samples)</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Base model */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">Base Model</label>
-          <select
-            value={baseModel}
-            onChange={e => setBaseModel(e.target.value)}
-            disabled={isRunning}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
-          >
-            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </div>
-
-        {/* Epochs */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">Epochs: {epochs}</label>
-          <input
-            type="range" min={5} max={200} step={5} value={epochs}
-            onChange={e => setEpochs(Number(e.target.value))}
-            disabled={isRunning}
-            className="w-full accent-purple-500 disabled:opacity-50"
-          />
-        </div>
-
-        {/* Batch Size */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">Batch Size: {batchSize}</label>
-          <input
-            type="range" min={8} max={128} step={8} value={batchSize}
-            onChange={e => setBatchSize(Number(e.target.value))}
-            disabled={isRunning}
-            className="w-full accent-purple-500 disabled:opacity-50"
-          />
-        </div>
-
-        {/* Learning Rate */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">Learning Rate</label>
-          <select
-            value={learningRate}
-            onChange={e => setLearningRate(Number(e.target.value))}
-            disabled={isRunning}
-            className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
-          >
-            {[0.01, 0.005, 0.001, 0.0005, 0.0001].map(lr => (
-              <option key={lr} value={lr}>{lr}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Val split */}
-        <div>
-          <label className="block text-sm font-medium text-gray-300 mb-1">
-            Validation Split: {(validationSplit * 100).toFixed(0)}%
-          </label>
-          <input
-            type="range" min={0.1} max={0.4} step={0.05} value={validationSplit}
-            onChange={e => setValidationSplit(Number(e.target.value))}
-            disabled={isRunning}
-            className="w-full accent-purple-500 disabled:opacity-50"
-          />
-        </div>
-      </div>
-
-      {/* ── Regularization ── */}
-      <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
+      {/* -- Configuration Wrapper -- */}
+      <div className="bg-slate-800/40 rounded-xl border border-slate-700 overflow-hidden shadow-sm transition-all duration-300">
         <button
-          className="flex items-center justify-between w-full"
-          onClick={() => setShowRegularization(v => !v)}
+          onClick={() => setIsConfigExpanded(!isConfigExpanded)}
+          className="w-full px-6 py-4 flex items-center justify-between bg-slate-800/80 hover:bg-slate-700/80 transition-colors"
         >
-          <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-cyan-400" />
-            Regularization
-            {(dropoutRate !== 0.5 || l2Reg !== 0) && (
-              <span className="px-1.5 py-0.5 bg-cyan-900/50 border border-cyan-500/40 text-cyan-300 text-xs rounded-full">
-                active
-              </span>
-            )}
-          </span>
-          {showRegularization
-            ? <ChevronUp className="w-4 h-4 text-gray-400" />
-            : <ChevronDown className="w-4 h-4 text-gray-400" />}
+          <div className="flex items-center gap-3">
+            <Settings className="w-5 h-5 text-purple-400" />
+            <h3 className="text-lg font-semibold text-white">Model Configuration</h3>
+          </div>
+          {isConfigExpanded ? <ChevronUp className="w-5 h-5 text-gray-400" /> : <ChevronDown className="w-5 h-5 text-gray-400" />}
         </button>
 
-        {showRegularization && (
-          <div className="grid grid-cols-2 gap-4 pt-1">
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">
-                Dropout rate: {dropoutRate.toFixed(2)}
-              </label>
-              <input
-                type="range" min={0} max={0.9} step={0.05} value={dropoutRate}
-                onChange={e => setDropoutRate(Number(e.target.value))}
-                disabled={isRunning}
-                className="w-full accent-cyan-500 disabled:opacity-50"
-              />
-              <p className="text-xs text-gray-500 mt-1">Fraction of neurons dropped during training</p>
+        {isConfigExpanded && (
+          <div className="p-6 space-y-6 border-t border-slate-700 animate-fadeIn bg-slate-900/30">
+            {/* -- Config Grid -- */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+              {/* Dataset selector */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-300 mb-1">Dataset</label>
+                <select
+                  value={datasetId}
+                  onChange={e => setDatasetId(e.target.value)}
+                  disabled={isRunning}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+                >
+                  <option value="">-- Select a dataset --</option>
+                  {datasets.map(d => (
+                    <option key={d.id} value={d.id}>{d.name} ({d.sample_count} samples)</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Base model */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Base Model</label>
+                <select
+                  value={baseModel}
+                  onChange={e => setBaseModel(e.target.value)}
+                  disabled={isRunning}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+                >
+                  {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+
+              {/* Epochs */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Epochs: {epochs}</label>
+                <input
+                  type="range" min={5} max={200} step={5} value={epochs}
+                  onChange={e => setEpochs(Number(e.target.value))}
+                  disabled={isRunning}
+                  className="w-full accent-purple-500 disabled:opacity-50"
+                />
+              </div>
+
+              {/* Batch Size */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Batch Size: {batchSize}</label>
+                <input
+                  type="range" min={8} max={128} step={8} value={batchSize}
+                  onChange={e => setBatchSize(Number(e.target.value))}
+                  disabled={isRunning}
+                  className="w-full accent-purple-500 disabled:opacity-50"
+                />
+              </div>
+
+              {/* Learning Rate */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">Learning Rate</label>
+                <select
+                  value={learningRate}
+                  onChange={e => setLearningRate(Number(e.target.value))}
+                  disabled={isRunning}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white disabled:opacity-50"
+                >
+                  {[0.01, 0.005, 0.001, 0.0005, 0.0001].map(lr => (
+                    <option key={lr} value={lr}>{lr}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Val split */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  Validation Split: {(validationSplit * 100).toFixed(0)}%
+                </label>
+                <input
+                  type="range" min={0.1} max={0.4} step={0.05} value={validationSplit}
+                  onChange={e => setValidationSplit(Number(e.target.value))}
+                  disabled={isRunning}
+                  className="w-full accent-purple-500 disabled:opacity-50"
+                />
+              </div>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">
-                L2 regularization: {l2Reg === 0 ? 'off' : l2Reg.toExponential(1)}
-              </label>
-              <select
-                value={l2Reg}
-                onChange={e => setL2Reg(Number(e.target.value))}
-                disabled={isRunning}
-                className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
+
+            {/* -- Regularization -- */}
+            <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
+              <button
+                className="flex items-center justify-between w-full"
+                onClick={() => setShowRegularization(v => !v)}
               >
-                {[0, 0.0001, 0.0005, 0.001, 0.005, 0.01].map(v => (
-                  <option key={v} value={v}>{v === 0 ? 'Off (0)' : v}</option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">Weight penalty applied to all dense/conv layers</p>
+                <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                  Regularization
+                  {(dropoutRate !== 0.5 || l2Reg !== 0) && (
+                    <span className="px-1.5 py-0.5 bg-cyan-900/50 border border-cyan-500/40 text-cyan-300 text-xs rounded-full">
+                      active
+                    </span>
+                  )}
+                </span>
+                {showRegularization
+                  ? <ChevronUp className="w-4 h-4 text-gray-400" />
+                  : <ChevronDown className="w-4 h-4 text-gray-400" />}
+              </button>
+
+              {showRegularization && (
+                <div className="grid grid-cols-2 gap-4 pt-1">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Dropout rate: {dropoutRate.toFixed(2)}
+                    </label>
+                    <input
+                      type="range" min={0} max={0.9} step={0.05} value={dropoutRate}
+                      onChange={e => setDropoutRate(Number(e.target.value))}
+                      disabled={isRunning}
+                      className="w-full accent-cyan-500 disabled:opacity-50"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Fraction of neurons dropped during training</p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      L2 regularization: {l2Reg === 0 ? 'off' : l2Reg.toExponential(1)}
+                    </label>
+                    <select
+                      value={l2Reg}
+                      onChange={e => setL2Reg(Number(e.target.value))}
+                      disabled={isRunning}
+                      className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
+                    >
+                      {[0, 0.0001, 0.0005, 0.001, 0.005, 0.01].map(v => (
+                        <option key={v} value={v}>{v === 0 ? 'Off (0)' : v}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">Weight penalty applied to all dense/conv layers</p>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* -- Early Stopping -- */}
+            <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <div
+                    onClick={() => !isRunning && setEarlyStopping(v => !v)}
+                    className={`relative w-9 h-5 rounded-full transition-colors ${earlyStopping ? 'bg-purple-600' : 'bg-slate-600'} ${isRunning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${earlyStopping ? 'translate-x-4' : ''}`} />
+                  </div>
+                  <span className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
+                    <ShieldCheck className="w-4 h-4 text-purple-400" />
+                    Early Stopping
+                  </span>
+                </label>
+                {earlyStopping && (
+                  <span className="text-xs text-gray-500">stops when {esMonitor} stops improving</span>
+                )}
+              </div>
+
+              {earlyStopping && (
+                <div className="grid grid-cols-2 gap-4 pt-1">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">Monitor metric</label>
+                    <select
+                      value={esMonitor}
+                      onChange={e => setEsMonitor(e.target.value as any)}
+                      disabled={isRunning}
+                      className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
+                    >
+                      <option value="val_loss">val_loss (recommended)</option>
+                      <option value="val_accuracy">val_accuracy</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                      Patience: {esPatience} epochs
+                    </label>
+                    <input
+                      type="range" min={2} max={20} step={1} value={esPatience}
+                      onChange={e => setEsPatience(Number(e.target.value))}
+                      disabled={isRunning}
+                      className="w-full accent-purple-500 disabled:opacity-50 mt-1"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Task info badge */}
+            <div className="px-3 py-2 bg-slate-800/50 rounded-lg border border-slate-700 text-xs text-gray-400 flex gap-4">
+              <span>Task: <span className="text-purple-300 font-medium">{task.replace(/_/g, ' ')}</span></span>
+              <span>Input: <span className="text-cyan-300 font-medium">{getTaskDefaults(task).input_shape.join('×')}</span></span>
+            </div>
+
           </div>
         )}
       </div>
 
-      {/* ── Early Stopping ── */}
-      <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
-        <div className="flex items-center justify-between">
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <div
-              onClick={() => !isRunning && setEarlyStopping(v => !v)}
-              className={`relative w-9 h-5 rounded-full transition-colors ${earlyStopping ? 'bg-purple-600' : 'bg-slate-600'} ${isRunning ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
-            >
-              <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${earlyStopping ? 'translate-x-4' : ''}`} />
-            </div>
-            <span className="text-sm font-medium text-gray-300 flex items-center gap-1.5">
-              <ShieldCheck className="w-4 h-4 text-purple-400" />
-              Early Stopping
-            </span>
-          </label>
-          {earlyStopping && (
-            <span className="text-xs text-gray-500">stops when {esMonitor} stops improving</span>
-          )}
-        </div>
-
-        {earlyStopping && (
-          <div className="grid grid-cols-2 gap-4 pt-1">
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">Monitor metric</label>
-              <select
-                value={esMonitor}
-                onChange={e => setEsMonitor(e.target.value as any)}
-                disabled={isRunning}
-                className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50"
-              >
-                <option value="val_loss">val_loss (recommended)</option>
-                <option value="val_accuracy">val_accuracy</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1">
-                Patience: {esPatience} epochs
-              </label>
-              <input
-                type="range" min={2} max={20} step={1} value={esPatience}
-                onChange={e => setEsPatience(Number(e.target.value))}
-                disabled={isRunning}
-                className="w-full accent-purple-500 disabled:opacity-50 mt-1"
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Task info badge */}
-      <div className="px-3 py-2 bg-slate-800/50 rounded-lg border border-slate-700 text-xs text-gray-400 flex gap-4">
-        <span>Task: <span className="text-purple-300 font-medium">{task.replace(/_/g, ' ')}</span></span>
-        <span>Input: <span className="text-cyan-300 font-medium">{getTaskDefaults(task).input_shape.join('×')}</span></span>
-      </div>
-
-      {/* ── Action Buttons ── */}
+      {/* -- Action Buttons -- */}
       <div className="flex gap-3">
         <button
           onClick={handleStart}
@@ -746,7 +742,34 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </button>
       </div>
 
-      {/* ── Past Sessions Panel ── */}
+      {/* -- Duplicate warning -- */}
+      {duplicateWarning && (
+        <div className="p-4 bg-amber-900/30 border border-amber-500/50 rounded-xl flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-amber-300 font-semibold text-sm">Duplicate training detected</p>
+            <p className="text-amber-400/80 text-xs mt-1">
+              The same dataset, model, epochs, batch size and learning rate were already used in a previous training. Do you still want to proceed?
+            </p>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={doStartTraining}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold rounded-lg transition"
+              >
+                Train anyway
+              </button>
+              <button
+                onClick={() => setDuplicateWarning(false)}
+                className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-gray-300 text-xs rounded-lg transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* -- Past Sessions Panel -- */}
       {showHistory && (
         <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-2 animate-slideIn">
           <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
@@ -795,111 +818,124 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </div>
       )}
 
-      {/* ── Current Training Status ── */}
+      {/* -- Dedicated Progress Card -- */}
       {status && (
-        <div className="space-y-4 animate-slideIn">
-          {/* Progress bar */}
-          <div>
-            <div className="flex justify-between text-sm mb-1">
-              <span className="text-gray-400">Epoch {status.current_epoch} / {status.total_epochs}</span>
-              <span className={`font-semibold ${statusColor}`}>{status.status.toUpperCase()}</span>
-            </div>
-            <div className="w-full bg-slate-700 rounded-full h-3">
-              <div
-                className={`h-3 rounded-full transition-all duration-500 ${barColor}`}
-                style={{ width: `${status.progress || 0}%` }}
-              />
+        <div className="mt-8 bg-slate-900/80 border border-purple-500/30 rounded-2xl p-6 shadow-2xl relative overflow-hidden animate-slideIn">
+          <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500 opacity-80"></div>
+
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <Activity className="w-5 h-5 text-purple-400" /> Live Training Progress
+            </h3>
+            <span className={`px-3 py-1 text-xs font-bold rounded-full ${statusColor} bg-slate-800 border border-slate-700`}>
+              {status.status.toUpperCase()}
+            </span>
+          </div>
+
+          <div className="space-y-6">
+            {/* Progress bar */}
+            <div>
+              <div className="flex justify-between text-sm mb-1">
+                <span className="text-gray-400">Epoch {status.current_epoch} / {status.total_epochs}</span>
+              </div>
+              <div className="w-full bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner">
+                <div
+                  className={`h-3 rounded-full transition-all duration-500 ${barColor}`}
+                  style={{ width: `${status.progress || 0}%` }}
+                />
+              </div>
+
+              {(isRunning || status.status === 'completed') && elapsed > 0 && (
+                <div className="flex gap-6 mt-3 text-xs text-gray-400">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-4 h-4 text-cyan-500" />
+                    Elapsed: <span className="text-cyan-300 font-mono ml-1">{formatTime(elapsed)}</span>
+                  </span>
+                  {isRunning && (
+                    <span className="flex items-center gap-1">
+                      <Timer className="w-4 h-4 text-amber-500" />
+                      Remaining: <span className="text-amber-300 font-mono ml-1">{formatTime(remaining)}</span>
+                    </span>
+                  )}
+                  {status.status === 'completed' && (
+                    <span className="flex items-center gap-1">
+                      <Timer className="w-4 h-4 text-green-500" />
+                      Total: <span className="text-green-300 font-mono ml-1">{formatTime(elapsed)}</span>
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
-            {(isRunning || status.status === 'completed') && elapsed > 0 && (
-              <div className="flex gap-6 mt-2 text-xs text-gray-400">
-                <span className="flex items-center gap-1">
-                  <Clock className="w-3 h-3 text-cyan-500" />
-                  Elapsed: <span className="text-cyan-300 font-mono ml-1">{formatTime(elapsed)}</span>
-                </span>
-                {isRunning && (
-                  <span className="flex items-center gap-1">
-                    <Timer className="w-3 h-3 text-amber-500" />
-                    Remaining: <span className="text-amber-300 font-mono ml-1">{formatTime(remaining)}</span>
+            {/* Live metric cards */}
+            {latestMetrics && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                    <TrendingUp className="w-3 h-3" /> Accuracy
+                  </div>
+                  <span className="text-2xl font-bold text-green-400">
+                    {(latestMetrics.accuracy * 100).toFixed(1)}%
                   </span>
-                )}
-                {status.status === 'completed' && (
-                  <span className="flex items-center gap-1">
-                    <Timer className="w-3 h-3 text-green-500" />
-                    Total: <span className="text-green-300 font-mono ml-1">{formatTime(elapsed)}</span>
+                </div>
+                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                    <Award className="w-3 h-3" /> Val Accuracy
+                  </div>
+                  <span className="text-2xl font-bold text-cyan-400">
+                    {(latestMetrics.val_accuracy * 100).toFixed(1)}%
                   </span>
-                )}
+                </div>
+                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                  <div className="text-xs text-gray-400 mb-1">Loss</div>
+                  <span className="text-2xl font-bold text-yellow-400">{latestMetrics.loss.toFixed(4)}</span>
+                </div>
+                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                    <Clock className="w-3 h-3" /> Val Loss
+                  </div>
+                  <span className="text-2xl font-bold text-orange-400">{latestMetrics.val_loss.toFixed(4)}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Live charts with expand button */}
+            {accuracyData.length >= 2 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="relative">
+                  <button
+                    onClick={() => setExpandedLiveChart('accuracy')}
+                    className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                    title="Expand chart"
+                  >
+                    <ZoomIn className="w-4 h-4" />
+                  </button>
+                  <MetricChart data={accuracyData} label="Accuracy (%)" color="#22c55e" valColor="#06b6d4" formatY={v => `${v}%`} />
+                </div>
+                <div className="relative">
+                  <button
+                    onClick={() => setExpandedLiveChart('loss')}
+                    className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                    title="Expand chart"
+                  >
+                    <ZoomIn className="w-4 h-4" />
+                  </button>
+                  <MetricChart data={lossData} label="Loss" color="#eab308" valColor="#f97316" />
+                </div>
+              </div>
+            )}
+
+            {status.status === 'failed' && (status as any).error && (
+              <div className="p-4 bg-red-900/30 border border-red-500/50 rounded-xl text-red-300 text-sm">
+                <strong className="block mb-1">Training Error Context:</strong>
+                {(status as any).error}
               </div>
             )}
           </div>
-
-          {/* Live metric cards */}
-          {latestMetrics && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                  <TrendingUp className="w-3 h-3" /> Accuracy
-                </div>
-                <span className="text-lg font-bold text-green-400">
-                  {(latestMetrics.accuracy * 100).toFixed(1)}%
-                </span>
-              </div>
-              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                  <Award className="w-3 h-3" /> Val Accuracy
-                </div>
-                <span className="text-lg font-bold text-cyan-400">
-                  {(latestMetrics.val_accuracy * 100).toFixed(1)}%
-                </span>
-              </div>
-              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                <div className="text-xs text-gray-400 mb-1">Loss</div>
-                <span className="text-lg font-bold text-yellow-400">{latestMetrics.loss.toFixed(4)}</span>
-              </div>
-              <div className="p-3 bg-slate-800 rounded-lg border border-slate-700">
-                <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                  <Clock className="w-3 h-3" /> Val Loss
-                </div>
-                <span className="text-lg font-bold text-orange-400">{latestMetrics.val_loss.toFixed(4)}</span>
-              </div>
-            </div>
-          )}
-
-          {/* Live charts with expand button */}
-          {accuracyData.length >= 2 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="relative">
-                <button
-                  onClick={() => setExpandedLiveChart('accuracy')}
-                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
-                  title="Expand chart"
-                >
-                  <ZoomIn className="w-4 h-4" />
-                </button>
-                <MetricChart data={accuracyData} label="Accuracy (%)" color="#22c55e" valColor="#06b6d4" formatY={v => `${v}%`} />
-              </div>
-              <div className="relative">
-                <button
-                  onClick={() => setExpandedLiveChart('loss')}
-                  className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
-                  title="Expand chart"
-                >
-                  <ZoomIn className="w-4 h-4" />
-                </button>
-                <MetricChart data={lossData} label="Loss" color="#eab308" valColor="#f97316" />
-              </div>
-            </div>
-          )}
-
-          {status.status === 'failed' && (status as any).error && (
-            <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">
-              Error: {(status as any).error}
-            </div>
-          )}
         </div>
       )}
 
-      {/* ── Live chart modal ── */}
+      {/* -- Live chart modal -- */}
       {expandedLiveChart === 'accuracy' && (
         <ChartModal
           label="Accuracy (%)" color="#22c55e" valColor="#06b6d4"
@@ -915,7 +951,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         />
       )}
 
-      {/* ── Past session popup ── */}
+      {/* -- Past session popup -- */}
       {viewingSession && (
         <PastSessionPopup session={viewingSession} onClose={() => setViewingSession(null)} />
       )}

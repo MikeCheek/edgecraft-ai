@@ -3,7 +3,7 @@ import { DataCollector, ModelTrainer, OptimizationStudio, BoardAdvisor, LLMAdvis
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
 import { TinyMLTask, TargetBoard } from './types';
-import { BarChart3, Code2, Zap, LayoutDashboard, Database, BrainCircuit, Cpu, Settings2 } from 'lucide-react';
+import { BarChart3, Code2, Zap, LayoutDashboard, Database, BrainCircuit, Cpu, Settings2, Activity, Lightbulb } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 
 export default function App() {
@@ -61,7 +61,24 @@ export default function App() {
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-10">
-          <div className="flex items-center gap-6 flex-1">
+
+          {/* Health Status Indicator */}
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full mr-4">
+            <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
+              <Activity className="w-3 h-3 text-gray-500" /> Backend API
+            </span>
+            <div className="flex items-center gap-1.5 ml-1">
+              <span className="relative flex h-2 w-2">
+                {isHealthy && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
+                <span className={`relative inline-flex rounded-full h-2 w-2 ${isHealthy ? 'bg-green-500' : 'bg-red-500'}`}></span>
+              </span>
+              <span className={`text-[10px] font-bold uppercase tracking-wider ${isHealthy ? 'text-green-400' : 'text-red-400'}`}>
+                {isHealthy ? 'Online' : 'Offline'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6 flex-1 justify-end">
             <div className="flex items-center gap-2 text-sm"><Settings2 className="w-4 h-4 text-gray-500" /><span className="text-gray-400">Global Config:</span></div>
             <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5">
               <BarChart3 className="w-4 h-4 text-purple-400" />
@@ -87,30 +104,44 @@ export default function App() {
         <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
           <div className="max-w-6xl mx-auto animate-slideIn">
             {activeTab === 'dashboard' && <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />}
+
             {activeTab === 'collect' && (
               <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
                 <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
                 <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
               </div>
             )}
+
             {activeTab === 'train' && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-2 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
-                  <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
-                </div>
-                <div className="space-y-6">
-                  <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-6">
-                    <h3 className="text-lg font-semibold text-white mb-4">AI Advisor</h3>
-                    <LLMAdvisor
-                      trainingId={state.currentTraining?.id}
-                      metrics={state.currentTraining?.metrics}
-                      status={state.currentTraining?.status}
-                    />
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
+                {/* Dynamically shift columns so config dominates the screen until training finishes */}
+                <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+                  <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                    <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
+                    <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
                   </div>
                 </div>
+
+                {/* Only reveal the LLM Card when training hits 'completed' */}
+                {state.currentTraining?.status === 'completed' && (
+                  <div className="space-y-6 animate-slideIn">
+                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
+                      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500"></div>
+                      <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+                        <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
+                      </h3>
+                      <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics, our AI provides actionable insights for deployment or further parameter tuning.</p>
+                      <LLMAdvisor
+                        trainingId={state.currentTraining?.id}
+                        metrics={state.currentTraining?.metrics}
+                        status={state.currentTraining?.status}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
+
             {activeTab === 'optimize' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
@@ -125,6 +156,7 @@ export default function App() {
                 </div>
               </div>
             )}
+
             {activeTab === 'deploy' && (
               <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl max-w-3xl">
                 <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Export C-Array</h2>

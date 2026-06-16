@@ -17,4 +17,5 @@ pytest
 pytest-asyncio
 httpx
 ollama
+aiohttp
 # tflite-runtime

@@ -4,7 +4,6 @@ from tensorflow import keras
 from tensorflow.keras import layers, regularizers
 from typing import Tuple
 
-
 class ModelFactory:
     """Factory for creating TinyML models for different tasks.
 
@@ -54,9 +53,39 @@ class ModelFactory:
                 layers.Dropout(dropout_rate),
                 layers.Dense(num_classes, activation="softmax"),
             ])
+            
+        elif base_model_name == "ResNet50V2":
+            base = keras.applications.ResNet50V2(
+                input_shape=input_shape,
+                include_top=False,
+                weights="imagenet",
+            )
+            base.trainable = False
+            model = keras.Sequential([
+                base,
+                layers.GlobalAveragePooling2D(),
+                layers.Dense(256, activation="relu", kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax"),
+            ])
+            
+        elif base_model_name == "MobileNetV3Small":
+            base = keras.applications.MobileNetV3Small(
+                input_shape=input_shape,
+                include_top=False,
+                weights="imagenet",
+            )
+            base.trainable = False
+            model = keras.Sequential([
+                base,
+                layers.GlobalAveragePooling2D(),
+                layers.Dense(128, activation="relu", kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax"),
+            ])
 
         else:
-            # Custom3LayerCNN – ultra-low memory
+            # Custom3LayerCNN - ultra-low memory
             model = keras.Sequential([
                 layers.Conv2D(16, 3, activation="relu", input_shape=input_shape,
                               kernel_regularizer=reg),
@@ -104,45 +133,81 @@ class ModelFactory:
     def create_audio_classification_model(
         input_shape: Tuple[int, int] = (40, 101),
         num_classes: int = 4,
+        base_model_name: str = "MFCC_CNN",
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
     ) -> keras.Model:
         """Audio classification model using MFCC spectrograms."""
         reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-        model = keras.Sequential([
-            layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
-                          kernel_regularizer=reg),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(128, (3, 3), activation="relu", kernel_regularizer=reg),
-            layers.GlobalAveragePooling2D(),
-            layers.Dense(256, activation="relu", kernel_regularizer=reg),
-            layers.Dropout(dropout_rate),
-            layers.Dense(num_classes, activation="softmax"),
-        ])
+        
+        if base_model_name == "AudioLSTM":
+            model = keras.Sequential([
+                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
+                layers.LSTM(64, return_sequences=True, kernel_regularizer=reg),
+                layers.LSTM(64, kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax")
+            ])
+        elif base_model_name == "AudioGRU":
+            model = keras.Sequential([
+                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
+                layers.GRU(64, return_sequences=True, kernel_regularizer=reg),
+                layers.GRU(64, kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax")
+            ])
+        else:
+            model = keras.Sequential([
+                layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
+                              kernel_regularizer=reg),
+                layers.MaxPooling2D((2, 2)),
+                layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
+                layers.MaxPooling2D((2, 2)),
+                layers.Conv2D(128, (3, 3), activation="relu", kernel_regularizer=reg),
+                layers.GlobalAveragePooling2D(),
+                layers.Dense(256, activation="relu", kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax"),
+            ])
         return model
 
     @staticmethod
     def create_keyword_spotting_model(
         input_shape: Tuple[int, int] = (40, 101),
         num_classes: int = 2,
+        base_model_name: str = "MFCC_CNN",
         dropout_rate: float = 0.3,
         l2_reg: float = 0.0,
     ) -> keras.Model:
         """Lightweight keyword spotting model."""
         reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-        model = keras.Sequential([
-            layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
-                          kernel_regularizer=reg),
-            layers.MaxPooling2D((2, 2)),
-            layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
-            layers.MaxPooling2D((2, 2)),
-            layers.Flatten(),
-            layers.Dense(128, activation="relu", kernel_regularizer=reg),
-            layers.Dropout(dropout_rate),
-            layers.Dense(num_classes, activation="softmax"),
-        ])
+        
+        if base_model_name == "AudioLSTM":
+            model = keras.Sequential([
+                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
+                layers.LSTM(32, kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax")
+            ])
+        elif base_model_name == "AudioGRU":
+            model = keras.Sequential([
+                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
+                layers.GRU(32, kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax")
+            ])
+        else:
+            model = keras.Sequential([
+                layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
+                              kernel_regularizer=reg),
+                layers.MaxPooling2D((2, 2)),
+                layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
+                layers.MaxPooling2D((2, 2)),
+                layers.Flatten(),
+                layers.Dense(128, activation="relu", kernel_regularizer=reg),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_classes, activation="softmax"),
+            ])
         return model
 
     # ----------------------------------------------------------------- router
@@ -171,11 +236,11 @@ class ModelFactory:
             ),
             "KEYWORD_SPOTTING": lambda: ModelFactory.create_keyword_spotting_model(
                 input_shape=input_shape, num_classes=num_classes,
-                dropout_rate=dropout_rate, l2_reg=l2_reg,
+                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
             ),
             "AUDIO_CLASSIFICATION": lambda: ModelFactory.create_audio_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
-                dropout_rate=dropout_rate, l2_reg=l2_reg,
+                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
             ),
         }
         if task not in factories:

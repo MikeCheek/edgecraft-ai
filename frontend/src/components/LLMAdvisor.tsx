@@ -1,222 +1,169 @@
-import { Lightbulb, TrendingUp, AlertCircle, RefreshCw, Cpu, ChevronDown } from 'lucide-react';
+import { Lightbulb, TrendingUp, RefreshCw, Cpu, Key } from 'lucide-react';
 import { LLMSuggestion } from '../types';
-import { useState, useEffect, useRef } from 'react';
+import { useState } from 'react';
 import { useAPI } from '../hooks/useAPI';
 
 interface LLMAdvisorProps {
   trainingId?: string;
   metrics?: any;
   status?: string;
-  optimizationId?: string;
-  board?: string;
 }
 
-const OLLAMA_MODELS = ['phi3', 'mistral', 'gemma:2b', 'llama3:8b', 'neural-chat'];
+const OLLAMA_MODELS = ['llama3', 'phi3', 'mistral', 'gemma:2b', 'neural-chat'];
+const OPENROUTER_MODELS = ['openrouter/free'];
 
-export function LLMAdvisor({ trainingId, metrics, status, optimizationId, board }: LLMAdvisorProps) {
+export function LLMAdvisor({ trainingId, status }: LLMAdvisorProps) {
   const [suggestions, setSuggestions] = useState<LLMSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [useLocalLLM, setUseLocalLLM] = useState(false);
-  const [llmAvailable, setLlmAvailable] = useState<boolean | null>(null);
-  const [llmModel, setLlmModel] = useState('phi3');
-  const [selectedModel, setSelectedModel] = useState('phi3');
-  const { request, error, apiClient } = useAPI();
-  const lastFetchedTrainingId = useRef<string | null>(null);
 
-  // Check if Ollama is running on mount
-  useEffect(() => {
-    const checkLLM = async () => {
-      const raw = await request(() => apiClient.getLLMStatus());
-      if (raw?.llm) {
-        setLlmAvailable(raw.llm.available ?? false);
-        if (raw.llm.model) setLlmModel(raw.llm.model);
-      }
-    };
-    checkLLM();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Provider Toggle Configuration state
+  const [provider, setProvider] = useState<'ollama' | 'openrouter'>('ollama');
 
-  // Auto-fetch suggestions when training completes
-  useEffect(() => {
-    const autoFetch = async () => {
-      if (
-        status === 'completed' &&
-        trainingId &&
-        metrics &&
-        metrics.length > 0 &&
-        trainingId !== lastFetchedTrainingId.current
-      ) {
-        lastFetchedTrainingId.current = trainingId;
-        await fetchSuggestions();
-      }
-    };
-    autoFetch();
-  }, [trainingId, metrics, status]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Model Selectors state variables
+  const [llmModel, setLlmModel] = useState('llama3');
+  const [openRouterModel, setOpenRouterModel] = useState('google/gemini-flash-1.5');
+  const [openRouterKey, setOpenRouterKey] = useState('');
 
-  const fetchSuggestions = async () => {
-    if (!trainingId || !metrics?.length) return;
+  const { request, apiClient } = useAPI();
+
+  const handleGetSuggestions = async () => {
+    if (!trainingId) return;
+
+    if (provider === 'openrouter' && !openRouterKey) {
+      alert("Please enter your OpenRouter API key.");
+      return;
+    }
+
     setIsLoading(true);
-    setSuggestions([]);
+    const activeModel = provider === 'ollama' ? llmModel : openRouterModel;
 
-    const finalMetrics = metrics[metrics.length - 1];
-    const raw = await request(() =>
-      apiClient.getLLMSuggestions(trainingId, finalMetrics, useLocalLLM)
+    const result = await request(() =>
+      apiClient.getLLMSuggestions(
+        trainingId,
+        provider,
+        activeModel,
+        provider === 'openrouter' ? openRouterKey : undefined
+      )
     );
+
     setIsLoading(false);
 
-    if (raw) {
-      const list = Array.isArray(raw) ? raw : raw.suggestions || [raw];
-      setSuggestions(
-        list.map((s: any) => ({
-          suggestion: s.suggestion || 'Suggestion available',
-          reasoning: s.reasoning || '',
-          parameters_to_adjust: s.parameters_to_adjust || s.parameters || {},
-          estimated_improvement: s.estimated_improvement || s.expected_improvement || '',
-        }))
-      );
+    if (result && result.suggestions) {
+      setSuggestions(result.suggestions);
     }
   };
 
-  const LLMStatusBadge = () => {
-    if (llmAvailable === null) return null;
-    return llmAvailable ? (
-      <span className="flex items-center gap-1 text-xs text-green-400 bg-green-900/30 border border-green-600/40 rounded-full px-2 py-0.5">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-        Ollama online · {llmModel}
-      </span>
-    ) : (
-      <span className="flex items-center gap-1 text-xs text-gray-500 bg-slate-800 border border-slate-600 rounded-full px-2 py-0.5">
-        <span className="w-1.5 h-1.5 rounded-full bg-gray-500" />
-        Ollama offline
-      </span>
-    );
-  };
-
   return (
-    <div className="space-y-4">
-      {/* Header row */}
-      <div className="flex flex-wrap items-center gap-3">
-        <LLMStatusBadge />
+    <div className="flex flex-col h-full space-y-4">
+      {/* Selector Container */}
+      <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700 flex flex-col gap-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
 
-        {/* Real LLM toggle */}
-        <label className="flex items-center gap-2 cursor-pointer select-none">
-          <div
-            onClick={() => setUseLocalLLM(v => !v)}
-            className={`relative w-9 h-5 rounded-full transition-colors ${useLocalLLM && llmAvailable
-                ? 'bg-purple-600'
-                : 'bg-slate-600 opacity-60'
-              } ${!llmAvailable ? 'cursor-not-allowed' : 'cursor-pointer'}`}
-          >
-            <span
-              className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${useLocalLLM && llmAvailable ? 'translate-x-4' : ''
+          {/* Local / Cloud Toggle button segment */}
+          <div className="flex items-center bg-slate-800 rounded-lg p-1 border border-slate-700">
+            <button
+              onClick={() => setProvider('ollama')}
+              className={`px-3 py-1 text-sm rounded-md transition-all whitespace-nowrap ${provider === 'ollama' ? 'bg-purple-600 text-white shadow-md' : 'text-gray-400 hover:text-white'
                 }`}
+            >
+              Local (Ollama)
+            </button>
+            <button
+              onClick={() => setProvider('openrouter')}
+              className={`px-3 py-1 text-sm rounded-md transition-all whitespace-nowrap ${provider === 'openrouter' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-400 hover:text-white'
+                }`}
+            >
+              Cloud (OpenRouter)
+            </button>
+          </div>
+
+          {/* Model selection dropdown menu list */}
+          <div className="flex items-center gap-2 w-full sm:flex-1">
+            <Cpu className="w-4 h-4 text-gray-400 flex-shrink-0" />
+            <select
+              value={provider === 'ollama' ? llmModel : openRouterModel}
+              onChange={(e) => {
+                if (provider === 'ollama') setLlmModel(e.target.value);
+                else setOpenRouterModel(e.target.value);
+              }}
+              className="bg-slate-800 text-white text-sm rounded-lg px-3 py-1.5 border border-slate-700 w-full outline-none focus:border-purple-500 transition-colors cursor-pointer"
+            >
+              {provider === 'ollama'
+                ? OLLAMA_MODELS.map(m => <option key={m} value={m}>{m}</option>)
+                : OPENROUTER_MODELS.map(m => <option key={m} value={m}>{m}</option>)
+              }
+            </select>
+          </div>
+        </div>
+
+        {/* Dynamic API Token Row for Cloud Integration */}
+        {provider === 'openrouter' && (
+          <div className="flex items-center gap-2 animate-fadeIn">
+            <Key className="w-4 h-4 text-blue-400 flex-shrink-0" />
+            <input
+              type="password"
+              placeholder="Enter OpenRouter API Key (sk-or-v1-...)"
+              value={openRouterKey}
+              onChange={(e) => setOpenRouterKey(e.target.value)}
+              className="bg-slate-800 text-white text-sm rounded-lg px-3 py-1.5 border border-slate-700 flex-1 outline-none focus:border-blue-500 transition-colors"
             />
           </div>
-          <span className="text-xs text-gray-400 flex items-center gap-1">
-            <Cpu className="w-3 h-3" />
-            Use local LLM
-            {!llmAvailable && <span className="text-gray-600">(install Ollama)</span>}
-          </span>
-        </label>
-
-        {/* Model selector (only when local LLM enabled) */}
-        {useLocalLLM && llmAvailable && (
-          <div className="relative">
-            <select
-              value={selectedModel}
-              onChange={e => setSelectedModel(e.target.value)}
-              className="appearance-none text-xs bg-slate-800 border border-slate-600 rounded-lg pl-2 pr-6 py-1 text-gray-300 focus:outline-none focus:border-purple-500"
-            >
-              {OLLAMA_MODELS.map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-            <ChevronDown className="absolute right-1 top-1.5 w-3 h-3 text-gray-500 pointer-events-none" />
-          </div>
-        )}
-
-        {/* Manual re-fetch */}
-        {status === 'completed' && trainingId && (
-          <button
-            onClick={fetchSuggestions}
-            disabled={isLoading}
-            className="ml-auto flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 disabled:opacity-40 transition-colors"
-          >
-            <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
         )}
       </div>
 
-      {/* Install hint when local LLM toggled but Ollama is offline */}
-      {useLocalLLM && !llmAvailable && (
-        <div className="p-3 rounded-lg bg-slate-900/50 border border-amber-700/40 text-xs text-amber-300 space-y-1">
-          <p className="font-semibold">Ollama is not running</p>
-          <p>Install it from <span className="text-amber-200">ollama.com</span>, then pull a model:</p>
-          <code className="block bg-slate-800 rounded p-1.5 mt-1 text-gray-300 font-mono">
-            ollama pull phi3
-          </code>
-          <p className="text-gray-400 mt-1">Then restart the backend and refresh this page.</p>
-        </div>
-      )}
+      {/* Action Execution Button Control */}
+      <button
+        onClick={handleGetSuggestions}
+        disabled={isLoading || !trainingId || status !== 'completed'}
+        className="w-full py-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-gray-500 text-white rounded-xl font-medium transition-all shadow-lg flex items-center justify-center gap-2"
+      >
+        {isLoading ? (
+          <><RefreshCw className="w-5 h-5 animate-spin" /> Analyzing with AI...</>
+        ) : (
+          <><Lightbulb className="w-5 h-5" /> Generate AI Insights</>
+        )}
+      </button>
 
-      {/* Loading */}
-      {isLoading ? (
-        <div className="text-sm text-gray-400 flex items-center justify-center gap-2 py-6">
-          <RefreshCw className="w-4 h-4 animate-spin" />
-          {useLocalLLM ? 'Querying local LLM…' : 'Generating AI Analysis…'}
-        </div>
-      ) : suggestions.length > 0 ? (
-        <div className="space-y-3 animate-fadeIn">
-          {useLocalLLM && llmAvailable && (
-            <p className="text-xs text-purple-400 flex items-center gap-1">
-              <Cpu className="w-3 h-3" /> Generated by local LLM ({llmModel})
-            </p>
-          )}
-          {suggestions.map((s, i) => (
-            <div
-              key={i}
-              className="p-4 rounded-lg bg-gradient-to-r from-purple-900/30 to-pink-900/30 border border-purple-500/30"
-            >
-              <div className="flex gap-3">
-                <Lightbulb className="w-5 h-5 text-yellow-400 flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-semibold text-white mb-1">{s.suggestion}</p>
-                  <p className="text-sm text-gray-300 mb-2">{s.reasoning}</p>
+      {/* Results Box Feed Rendering */}
+      <div className="flex-1 overflow-y-auto pr-2 space-y-4 custom-scrollbar mt-4">
+        {suggestions.length > 0 ? (
+          suggestions.map((sug, idx) => (
+            <div key={idx} className="bg-slate-800/80 rounded-xl p-4 border border-slate-700 hover:border-purple-500/50 transition-colors group">
+              <div className="flex items-start gap-3 mb-2">
+                <div className="w-8 h-8 rounded-full bg-purple-900/50 flex items-center justify-center border border-purple-500/30 flex-shrink-0">
+                  <Lightbulb className="w-4 h-4 text-purple-400" />
+                </div>
+                <div>
+                  <h4 className="text-white font-medium text-sm">{sug.suggestion}</h4>
+                  <p className="text-gray-400 text-xs mt-1">{sug.reasoning}</p>
+                </div>
+              </div>
 
-                  {s.parameters_to_adjust && Object.keys(s.parameters_to_adjust).length > 0 && (
-                    <div className="mb-2 p-2 bg-slate-900/50 rounded text-xs text-gray-300">
-                      {Object.entries(s.parameters_to_adjust).map(([key, value]) => (
-                        <p key={key}>
-                          <span className="text-purple-300">{key}:</span> {String(value)}
-                        </p>
-                      ))}
-                    </div>
-                  )}
+              <div className="ml-11 space-y-2">
+                {sug.parameters_to_adjust && Object.entries(sug.parameters_to_adjust).length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(sug.parameters_to_adjust).map(([k, v]) => (
+                      <span key={k} className="px-2 py-1 bg-slate-900 rounded-md text-[10px] text-gray-300 font-mono border border-slate-700">
+                        {k}: <span className="text-cyan-400">{String(v)}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
 
-                  {s.estimated_improvement && (
-                    <p className="text-xs text-green-300 flex items-center gap-1">
-                      <TrendingUp className="w-3 h-3" /> Expected: {s.estimated_improvement}
-                    </p>
-                  )}
+                <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-900/10 py-1.5 px-3 rounded-lg w-fit border border-emerald-500/20">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  {sug.estimated_improvement}
                 </div>
               </div>
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="p-4 rounded-lg bg-slate-900/50 border border-slate-700">
-          <p className="text-sm text-gray-400 flex items-center gap-2">
-            <Lightbulb className="w-4 h-4 text-yellow-400" />
-            Complete training to auto-generate AI suggestions.
-          </p>
-        </div>
-      )}
-
-      {error && (
-        <div className="text-red-400 text-sm flex items-center gap-2">
-          <AlertCircle className="w-4 h-4" /> {error}
-        </div>
-      )}
+          ))
+        ) : (
+          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-gray-500">
+            <Lightbulb className="w-12 h-12 mb-3 opacity-20" />
+            <p className="text-sm">Run AI analysis to get optimization suggestions for your model architecture and parameters.</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

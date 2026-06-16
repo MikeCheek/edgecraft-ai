@@ -58,8 +58,8 @@ async def get_info():
             "ARDUINO_NANO_33_BLE"
         ],
         "models": {
-            "image": ["MobileNetV2", "EfficientNet", "Custom3LayerCNN"],
-            "audio": ["MFCC_CNN", "WaveNet"],
+            "image": ["MobileNetV2", "EfficientNet", "ResNet50V2", "MobileNetV3Small", "Custom3LayerCNN"],
+            "audio": ["MFCC_CNN", "WaveNet", "AudioLSTM", "AudioGRU"],
             "text": ["TinyBERT"]
         }
     }

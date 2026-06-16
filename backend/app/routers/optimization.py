@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, Dict
-from app.services.shared_state import converter
+from app.services.shared_state import converter, trainer
 from app.services.mcu_advisor import MCUAdvisor
 from app.services.llm_advisor import LLMAdvisor
 from app.services.local_llm_advisor import LocalLLMAdvisor
@@ -10,7 +10,6 @@ router = APIRouter()
 mcu_advisor = MCUAdvisor()
 llm_advisor = LLMAdvisor()          # rule-based (always available)
 local_llm = LocalLLMAdvisor()       # real Ollama-backed advisor
-
 
 # --- Request Schemas ---
 class OptimizationRequest(BaseModel):
@@ -23,17 +22,22 @@ class BoardEvaluationRequest(BaseModel):
     optimization_id: str
     board: str
 
+# class LLMSuggestRequest(BaseModel):
+#     training_id: str
+#     metrics: Dict
+#     use_local_llm: bool = False     # opt-in to real LLM
+
 class LLMSuggestRequest(BaseModel):
     training_id: str
-    metrics: Dict
-    use_local_llm: bool = False     # NEW: opt-in to real LLM
+    provider: Optional[str] = "ollama"
+    model_name: Optional[str] = "llama3"
+    api_key: Optional[str] = None
 
 class LLMOptimizeRequest(BaseModel):
     optimization_id: str
     board: str
-    use_local_llm: bool = False     # NEW: opt-in to real LLM
+    use_local_llm: bool = False     # opt-in to real LLM
 # -----------------------
-
 
 @router.post("/quantize")
 async def quantize_model(request: OptimizationRequest, background_tasks: BackgroundTasks):
@@ -48,14 +52,12 @@ async def quantize_model(request: OptimizationRequest, background_tasks: Backgro
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @router.get("/status/{optimization_id}")
 async def get_optimization_status(optimization_id: str):
     try:
         return {"status": "success", "data": converter.get_optimization_status(optimization_id)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 @router.get("/result/{optimization_id}")
 async def get_optimization_result(optimization_id: str):
@@ -64,14 +66,12 @@ async def get_optimization_result(optimization_id: str):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @router.post("/to-c-array/{optimization_id}")
 async def export_as_c_array(optimization_id: str):
     try:
         return {"status": "success", "c_array": converter.generate_c_array(optimization_id)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 @router.post("/evaluate-board")
 async def evaluate_for_board(request: BoardEvaluationRequest):
@@ -84,14 +84,12 @@ async def evaluate_for_board(request: BoardEvaluationRequest):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @router.get("/boards")
 async def get_supported_boards():
     try:
         return {"status": "success", "boards": mcu_advisor.get_supported_boards()}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 @router.get("/llm-status")
 async def get_llm_status():
@@ -101,36 +99,54 @@ async def get_llm_status():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+# @router.post("/llm-suggest")
+# async def get_llm_suggestions(request: LLMSuggestRequest):
+#     """
+#     Return context-aware training improvement suggestions.
+#     Fetches context from current session memory.
+#     """
+#     try:
+#         session_context = trainer.get_training_status(request.training_id)
+        
+#         if request.use_local_llm:
+#             suggestions = local_llm.get_training_suggestions(metrics=request.metrics)
+#         else:
+#             suggestions = llm_advisor.get_suggestions(
+#                 training_id=request.training_id,
+#                 metrics=request.metrics,
+#                 context=session_context
+#             )
+#         return {"status": "success", "suggestions": suggestions}
+#     except Exception as e:
+#         return {"status": "error", "message": str(e)}
 
 @router.post("/llm-suggest")
 async def get_llm_suggestions(request: LLMSuggestRequest):
-    """
-    Return training improvement suggestions.
-    When use_local_llm=True the request is sent to Ollama; otherwise
-    the deterministic rule-based advisor is used.
-    """
+    """ Enhanced to support dynamic LLM provider selection. """
     try:
-        if request.use_local_llm:
-            suggestions = local_llm.get_training_suggestions(metrics=request.metrics)
-        else:
-            suggestions = llm_advisor.get_suggestions(
-                training_id=request.training_id,
-                metrics=request.metrics,
-            )
+        session_context = trainer.get_training_status(request.training_id)
+        
+        advisor = LLMAdvisor()
+        
+        print(f"LLM Suggestion Request: training_id={request.training_id}, provider={request.provider}, model_name={request.model_name}, api_key={'***' if request.api_key else None}")
+        
+        suggestions = await advisor.generate_suggestions(
+            context=session_context,
+            provider=request.provider,
+            model_name=request.model_name,
+            api_key=request.api_key
+        )
         return {"status": "success", "suggestions": suggestions}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 @router.post("/llm-optimize")
 async def get_llm_optimization_advice(request: LLMOptimizeRequest):
     """
     Return board-specific optimisation advice.
-    When use_local_llm=True the request is sent to Ollama.
     """
     try:
         if request.use_local_llm:
-            # Resolve model size from converter state when possible
             opt_data = converter.get_optimization_result(request.optimization_id) or {}
             size_kb = (opt_data.get("optimized_size_bytes", 0) or
                        opt_data.get("original_size_bytes", 0)) // 1024
