@@ -2,6 +2,7 @@ import tensorflow as tf
 import numpy as np
 from typing import Tuple, Optional
 
+
 class QuantizationOptimizer:
     """Handle model quantization and pruning for TinyML"""
 
@@ -34,6 +35,14 @@ class QuantizationOptimizer:
         return tflite_model
 
     @staticmethod
+    def apply_float16_quantization_from_keras(model: tf.keras.Model) -> bytes:
+        """Apply FLOAT16 quantization directly from a Keras model (no saved path needed)."""
+        converter = tf.lite.TFLiteConverter.from_keras_model(model)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.target_spec.supported_types = [tf.float16]
+        return converter.convert()
+
+    @staticmethod
     def apply_pruning(model: tf.keras.Model, sparsity: float = 0.5) -> tf.keras.Model:
         """Apply weight pruning to reduce model size"""
         import tensorflow_model_optimization as tfmot
@@ -60,19 +69,20 @@ class QuantizationOptimizer:
 
     @staticmethod
     def estimate_model_size(model: tf.keras.Model) -> dict:
-        """Estimate model size before and after quantization"""
-        # Convert to TFLite
+        """Estimate model size before and after quantization (from live Keras model)."""
         tflite_full = QuantizationOptimizer.convert_to_tflite(model)
-        tflite_int8 = QuantizationOptimizer.apply_float16_quantization("")  # Placeholder
+        tflite_fp16 = QuantizationOptimizer.apply_float16_quantization_from_keras(model)
 
         full_size = len(tflite_full)
-        int8_size = int(full_size * 0.25)  # Estimated
-        float16_size = int(full_size * 0.50)
+        fp16_size = len(tflite_fp16)
+        # INT8 is roughly 25% of the float32 size — exact value requires
+        # a representative dataset, so we give an estimate here.
+        int8_size_est = int(full_size * 0.25)
 
         return {
             "full_precision": full_size,
-            "int8_quantized": int8_size,
-            "float16_quantized": float16_size,
-            "compression_ratio_int8": int8_size / full_size if full_size > 0 else 0,
-            "compression_ratio_float16": float16_size / full_size if full_size > 0 else 0
+            "int8_quantized": int8_size_est,
+            "float16_quantized": fp16_size,
+            "compression_ratio_int8": int8_size_est / full_size if full_size > 0 else 0,
+            "compression_ratio_float16": fp16_size / full_size if full_size > 0 else 0,
         }
