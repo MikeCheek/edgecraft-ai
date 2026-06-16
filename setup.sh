@@ -97,9 +97,16 @@ info "Creating venv with Python $PYTHON_VERSION..."
 uv venv --python "$PYTHON_VERSION" .venv
 success "Virtual environment created"
 
-info "Installing Python dependencies (this will download CUDA wheels, ~2 GB)..."
-uv pip install --python .venv/bin/python -r requirements.txt
-success "Backend dependencies installed"
+info "Installing standard Python dependencies (FastAPI, OpenCV, etc.)..."
+# Install everything EXCEPT tensorflow first, so you can see if something is actually compiling
+grep -v "tensorflow" requirements.txt > req_fast.txt
+uv pip install -v --python .venv/bin/python -r req_fast.txt
+success "Standard dependencies installed"
+
+info "Downloading TensorFlow and CUDA wheels (~2 GB, please wait)..."
+# Now install TensorFlow with verbose logs so you can watch the download progress
+uv pip install -v --python .venv/bin/python "tensorflow[and-cuda]==2.17.1"
+success "Backend dependencies completely installed"
 
 # ── 6. CUDA library path fix ─────────────────────────────────────────────────
 # tensorflow[and-cuda] installs CUDA libs as Python packages under site-packages.

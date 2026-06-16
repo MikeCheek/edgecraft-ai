@@ -4,11 +4,9 @@ python-multipart
 pydantic
 pydantic-settings
 numpy
-# tensorflow[and-cuda] self-bundles CUDA 12.3 + cuDNN 8 as pip wheels —
 # no system CUDA install needed inside WSL. Your Windows NVIDIA driver
 # (561.17) provides the GPU; WSL2 passes it through automatically.
 # RTX 4050 (Ada, compute capability 8.9) is fully supported.
-tensorflow[and-cuda]==2.17.1
 opencv-python-headless
 librosa
 soundfile

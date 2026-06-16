@@ -83,9 +83,13 @@ class DataProcessor:
         # Horizontal flip
         augmented.append(np.fliplr(image))
         
-        # Slight rotation
-        from scipy import ndimage
-        rotated = ndimage.rotate(image, angle=15, reshape=False)
+        # Slight rotation (Using cv2 instead of scipy)
+        h, w = image.shape[:2]
+        center = (w / 2.0, h / 2.0)
+        # Get rotation matrix for 15 degrees, scale 1.0
+        rotation_matrix = cv2.getRotationMatrix2D(center, 15, 1.0)
+        # Apply the rotation
+        rotated = cv2.warpAffine(image, rotation_matrix, (w, h))
         augmented.append(rotated)
         
         # Brightness adjustment
