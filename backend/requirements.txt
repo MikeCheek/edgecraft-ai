@@ -22,3 +22,9 @@ httpx
 ollama
 aiohttp
 # tflite-runtime
+
+# Add these to your existing requirements.txt
+python-dotenv>=1.0.0
+kaggle>=1.6.0
+huggingface_hub>=0.20.0
+httpx>=0.27.0

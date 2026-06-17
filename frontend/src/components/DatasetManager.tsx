@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
   Eye, Tag, ChevronDown, ChevronUp, AlertTriangle, Image as ImageIcon,
-  FolderPlus, Tags, Download, Upload, Loader2
+  FolderPlus, Tags, Download, Upload, Loader2, Globe, XCircle
 } from 'lucide-react';
 import { useAPI } from '../hooks/useAPI';
 import { DataCollector } from './DataCollector';
@@ -54,7 +54,6 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
 
   return (
     <div className={`bg-slate-800 rounded-xl border border-slate-700 overflow-hidden group hover:border-slate-500 transition-all ${deleting ? 'opacity-50' : ''}`}>
-      {/* Thumbnail */}
       <div className="relative h-28 bg-slate-900 flex items-center justify-center">
         {isAudio ? (
           <div className="flex flex-col items-center gap-1 opacity-50">
@@ -76,7 +75,6 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
             onError={() => setImgError(true)}
           />
         )}
-        {/* Delete button overlay */}
         <button
           onClick={handleDelete}
           disabled={deleting}
@@ -88,47 +86,30 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
         </button>
       </div>
 
-      {/* Label row */}
       <div className="p-2">
         {editing ? (
           <div className="space-y-1.5">
             {!useCustom && (
-              <select
-                value={label}
-                onChange={e => setLabel(e.target.value)}
-                className="w-full px-2 py-1 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500"
-              >
+              <select value={label} onChange={e => setLabel(e.target.value)}
+                className="w-full px-2 py-1 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500">
                 {allLabels.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             )}
             <div className="flex items-center gap-1">
-              <input
-                type="checkbox"
-                checked={useCustom}
-                onChange={e => setUseCustom(e.target.checked)}
-                className="accent-purple-500"
-                id={`custom-${sample.id}`}
-              />
+              <input type="checkbox" checked={useCustom} onChange={e => setUseCustom(e.target.checked)}
+                className="accent-purple-500" id={`custom-${sample.id}`} />
               <label htmlFor={`custom-${sample.id}`} className="text-xs text-gray-400 cursor-pointer">New label</label>
             </div>
             {useCustom && (
-              <input
-                autoFocus
-                value={customLabel}
-                onChange={e => setCustomLabel(e.target.value)}
+              <input autoFocus value={customLabel} onChange={e => setCustomLabel(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleSave()}
                 placeholder="Type new label..."
-                className="w-full px-2 py-1 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500"
-              />
+                className="w-full px-2 py-1 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500" />
             )}
             <div className="flex gap-1 pt-0.5">
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="flex-1 flex items-center justify-center gap-1 py-1 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-xs rounded transition"
-              >
-                {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                Save
+              <button onClick={handleSave} disabled={saving}
+                className="flex-1 flex items-center justify-center gap-1 py-1 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-xs rounded transition">
+                {saving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />} Save
               </button>
               <button onClick={() => { setEditing(false); setLabel(sample.label); setUseCustom(false); }}
                 className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-gray-400 text-xs rounded transition">
@@ -150,15 +131,12 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
 
         <div className="flex items-center justify-between mt-1 pt-1 border-t border-slate-700/50">
           <span className="text-[10px] text-gray-500 uppercase tracking-wider">Split</span>
-          <select
-            value={sample.split || 'unassigned'}
-            onChange={(e) => onSplitChange(sample.id, e.target.value)}
+          <select value={sample.split || 'unassigned'} onChange={(e) => onSplitChange(sample.id, e.target.value)}
             className={`text-[10px] px-1.5 py-0.5 rounded font-medium focus:outline-none cursor-pointer ${sample.split === 'train' ? 'bg-blue-900/40 text-blue-400' :
               sample.split === 'val' ? 'bg-amber-900/40 text-amber-400' :
                 sample.split === 'test' ? 'bg-green-900/40 text-green-400' :
                   'bg-slate-700/50 text-gray-400'
-              }`}
-          >
+              }`}>
             <option value="unassigned">Unassigned</option>
             <option value="train">Train</option>
             <option value="val">Val</option>
@@ -198,9 +176,7 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
     if (labelsRaw?.labels) setLabels(labelsRaw.labels);
     if (samplesRaw?.samples) {
       const counts: Record<string, number> = {};
-      for (const s of samplesRaw.samples) {
-        counts[s.label] = (counts[s.label] ?? 0) + 1;
-      }
+      for (const s of samplesRaw.samples) counts[s.label] = (counts[s.label] ?? 0) + 1;
       setSampleCounts(counts);
     }
     setLoading(false);
@@ -244,27 +220,16 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
       <p className="text-xs text-gray-400 font-medium flex items-center gap-1.5">
         <Tags className="w-3.5 h-3.5" /> Classes ({labels.length})
       </p>
-
-      {/* Add class */}
       <div className="flex gap-2">
-        <input
-          type="text"
-          value={newClass}
-          onChange={e => setNewClass(e.target.value)}
+        <input type="text" value={newClass} onChange={e => setNewClass(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleAddClass()}
           placeholder="New class name..."
-          className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-purple-500"
-        />
-        <button
-          onClick={handleAddClass}
-          disabled={adding || !newClass.trim()}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition"
-        >
-          {adding ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />}
-          Add
+          className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-purple-500" />
+        <button onClick={handleAddClass} disabled={adding || !newClass.trim()}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white text-sm font-semibold rounded-lg transition">
+          {adding ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />} Add
         </button>
       </div>
-
       {loading ? (
         <div className="flex items-center justify-center py-4 gap-2 text-gray-400 text-xs">
           <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Loading...
@@ -277,37 +242,23 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
             <div key={label} className="flex items-center gap-2 p-2 bg-slate-900/50 rounded-lg border border-slate-700 group">
               {editingLabel === label ? (
                 <>
-                  <input
-                    autoFocus
-                    value={editValue}
-                    onChange={e => setEditValue(e.target.value)}
+                  <input autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') handleRenameLabel(label); if (e.key === 'Escape') setEditingLabel(null); }}
-                    className="flex-1 px-2 py-0.5 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500"
-                  />
-                  <button onClick={() => handleRenameLabel(label)} className="text-green-400 hover:text-green-300 p-0.5">
-                    <Check className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => setEditingLabel(null)} className="text-gray-400 hover:text-gray-200 p-0.5">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                    className="flex-1 px-2 py-0.5 bg-slate-700 border border-slate-500 rounded text-white text-xs focus:outline-none focus:border-purple-500" />
+                  <button onClick={() => handleRenameLabel(label)} className="text-green-400 hover:text-green-300 p-0.5"><Check className="w-3.5 h-3.5" /></button>
+                  <button onClick={() => setEditingLabel(null)} className="text-gray-400 hover:text-gray-200 p-0.5"><X className="w-3.5 h-3.5" /></button>
                 </>
               ) : (
                 <>
                   <Tag className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" />
                   <span className="flex-1 text-white text-xs font-medium truncate">{label}</span>
                   <span className="text-xs text-gray-500">{sampleCounts[label] ?? 0} samples</span>
-                  <button
-                    onClick={() => { setEditingLabel(label); setEditValue(label); }}
-                    className="p-0.5 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition"
-                    title="Rename class"
-                  >
+                  <button onClick={() => { setEditingLabel(label); setEditValue(label); }}
+                    className="p-0.5 text-gray-500 hover:text-white opacity-0 group-hover:opacity-100 transition" title="Rename class">
                     <Edit2 className="w-3 h-3" />
                   </button>
-                  <button
-                    onClick={() => handleDeleteLabel(label)}
-                    className="p-0.5 text-red-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition"
-                    title="Delete class"
-                  >
+                  <button onClick={() => handleDeleteLabel(label)}
+                    className="p-0.5 text-red-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition" title="Delete class">
                     <Trash2 className="w-3 h-3" />
                   </button>
                 </>
@@ -321,179 +272,476 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
 }
 
 // ============================================================================
-// Resumable Multi-Part Chunk Upload Controller
+// Download Progress Bar Component
 // ============================================================================
 
-interface ChunkUploadStudioProps {
-  datasetId: string;
-  taskType: string;
-  onUploadSuccess: () => void;
+interface DownloadProgress {
+  downloaded: number;
+  total: number;
+  startTime: number;
+  downloadId?: string;
+  phase: 'downloading' | 'processing' | 'complete' | 'error' | 'cancelled';
+  message?: string;
+  count?: number;
 }
 
-function ChunkUploadStudio({ datasetId, taskType, onUploadSuccess }: ChunkUploadStudioProps) {
+function DownloadProgressBar({ progress, onCancel }: { progress: DownloadProgress; onCancel: () => void }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (progress.phase === 'downloading' || progress.phase === 'processing') {
+      const interval = setInterval(() => setNow(Date.now()), 500);
+      return () => clearInterval(interval);
+    }
+  }, [progress.phase]);
+
+  const elapsed = (now - progress.startTime) / 1000;
+  const pct = progress.total > 0 ? Math.min((progress.downloaded / progress.total) * 100, 100) : 0;
+  const speed = elapsed > 0 ? progress.downloaded / elapsed : 0;
+  const remaining = speed > 0 && progress.total > 0 ? (progress.total - progress.downloaded) / speed : 0;
+
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+    return `${(bytes / 1073741824).toFixed(2)} GB`;
+  };
+
+  const formatTime = (secs: number) => {
+    if (!isFinite(secs) || secs < 0) return '--:--';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const isActive = progress.phase === 'downloading' || progress.phase === 'processing';
+
+  return (
+    <div className="mt-3 p-3 bg-slate-950/80 rounded-lg border border-slate-700 space-y-2">
+      {/* Status header */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+          {isActive && <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />}
+          {progress.phase === 'downloading' && 'Downloading...'}
+          {progress.phase === 'processing' && (progress.message || 'Processing archive...')}
+          {progress.phase === 'complete' && <><Check className="w-3.5 h-3.5 text-emerald-400" /> Complete — {progress.count} samples imported</>}
+          {progress.phase === 'error' && <><AlertTriangle className="w-3.5 h-3.5 text-red-400" /> {progress.message || 'Download failed'}</>}
+          {progress.phase === 'cancelled' && <><XCircle className="w-3.5 h-3.5 text-amber-400" /> Cancelled</>}
+        </span>
+        {isActive && (
+          <button onClick={onCancel}
+            className="flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-400 hover:text-red-300 bg-red-900/30 hover:bg-red-900/50 border border-red-500/30 rounded-md transition">
+            <XCircle className="w-3 h-3" /> Cancel
+          </button>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      {(progress.phase === 'downloading' || progress.phase === 'processing') && (
+        <>
+          <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all duration-300 ${progress.phase === 'processing' ? 'bg-amber-500 animate-pulse' : 'bg-indigo-500'
+              }`} style={{ width: `${progress.phase === 'processing' ? 100 : pct}%` }} />
+          </div>
+
+          {/* Stats row */}
+          {progress.phase === 'downloading' && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] text-gray-400">
+              <div>
+                <span className="text-gray-500">Downloaded:</span>{' '}
+                <span className="text-slate-200 font-medium">{formatBytes(progress.downloaded)}</span>
+                {progress.total > 0 && <span> / {formatBytes(progress.total)}</span>}
+              </div>
+              <div>
+                <span className="text-gray-500">Speed:</span>{' '}
+                <span className="text-slate-200 font-medium">{formatBytes(speed)}/s</span>
+              </div>
+              <div>
+                <span className="text-gray-500">Elapsed:</span>{' '}
+                <span className="text-slate-200 font-medium">{formatTime(elapsed)}</span>
+              </div>
+              <div>
+                <span className="text-gray-500">ETA:</span>{' '}
+                <span className="text-slate-200 font-medium">{formatTime(remaining)}</span>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Unified Data Importer Component
+// ============================================================================
+
+type ImportTab = 'local' | 'url' | 'kaggle' | 'huggingface';
+
+interface DataImporterProps {
+  datasetId: string;
+  task: TinyMLTask;
+  onImportSuccess: () => void;
+}
+
+function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
+  const { apiClient } = useAPI();
+  const [activeTab, setActiveTab] = useState<ImportTab>('local');
+
+  // Token status
+  const [tokenStatus, setTokenStatus] = useState<{ kaggle_configured: boolean; huggingface_configured: boolean } | null>(null);
+  useEffect(() => {
+    apiClient.getRemoteTokenStatus().then(setTokenStatus).catch(() => { });
+  }, [apiClient]);
+
+  // ─── Local ZIP state ─────────────────────────────────────────────────────
   const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [statusText, setStatusText] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('');
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const CHUNK_SIZE = 2 * 1024 * 1024;
+  const MAX_CONCURRENT = 3;
 
-  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB Chunks
-  const MAX_CONCURRENT_UPLOADS = 3;
+  // ─── Remote download state ───────────────────────────────────────────────
+  const [url, setUrl] = useState('');
+  const [kaggleQuery, setKaggleQuery] = useState('');
+  const [kaggleResults, setKaggleResults] = useState<any[]>([]);
+  const [hfQuery, setHfQuery] = useState('');
+  const [hfResults, setHfResults] = useState<any[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
+  // ─── Local ZIP upload handler ────────────────────────────────────────────
   const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setUploading(true);
-    setProgress(0);
-    setError(null);
-    setStatusText('Initializing secure remote multi-part upload stream context...');
+    setUploadProgress(0);
+    setUploadError(null);
+    setUploadStatus('Initializing chunked upload...');
 
     try {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-      const initRes = await fetch('http://127.0.0.1:8000/api/datasets/upload_zip/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dataset_id: datasetId,
-          task: taskType,
-          filename: file.name,
-          total_chunks: totalChunks,
-          file_size: file.size
-        })
+      const initData = await apiClient.initZipUpload({
+        dataset_id: datasetId, task, filename: file.name,
+        total_chunks: totalChunks, file_size: file.size, chunk_size: CHUNK_SIZE,
       });
-
-      const initData = await initRes.json();
-      if (initData.status !== 'success') throw new Error(initData.message || 'Initialization failed');
+      if (initData.status !== 'success') throw new Error(initData.message || 'Init failed');
       const { upload_id } = initData;
 
-      setStatusText(`Streaming blocks... 0 of ${totalChunks} uploaded`);
-      let completedChunks = 0;
-      let activeUploads = 0;
-      let currentChunkIndex = 0;
+      setUploadStatus(`Streaming chunks... 0/${totalChunks}`);
+      let completed = 0;
+      let active = 0;
+      let current = 0;
 
       await new Promise<void>((resolve, reject) => {
         const uploadNext = () => {
-          if (currentChunkIndex >= totalChunks && activeUploads === 0) {
-            resolve();
-            return;
-          }
-
-          while (activeUploads < MAX_CONCURRENT_UPLOADS && currentChunkIndex < totalChunks) {
-            const index = currentChunkIndex;
-            currentChunkIndex++;
-            activeUploads++;
-
-            const start = index * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunkSlice = file.slice(start, end);
-
-            const reader = new FileReader();
-            reader.onload = async (event) => {
-              try {
-                const arrayBuffer = event.target?.result as ArrayBuffer;
-
-                const chunkRes = await fetch(`http://127.0.0.1:8000/api/datasets/upload_zip/chunk/${upload_id}/${index}`, {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/octet-stream' },
-                  body: arrayBuffer
-                });
-
-                if (!chunkRes.ok) throw new Error(`Chunk error on index sequence: ${index}`);
-
-                completedChunks++;
-                setProgress(Math.round((completedChunks / totalChunks) * 100));
-                setStatusText(`Streaming binary array blocks... ${completedChunks} of ${totalChunks} complete`);
-
-                activeUploads--;
+          if (current >= totalChunks && active === 0) { resolve(); return; }
+          while (active < MAX_CONCURRENT && current < totalChunks) {
+            const idx = current++;
+            active++;
+            const blob = file.slice(idx * CHUNK_SIZE, Math.min((idx + 1) * CHUNK_SIZE, file.size));
+            apiClient.putZipChunk(upload_id, idx, blob)
+              .then(() => {
+                completed++;
+                setUploadProgress(Math.round((completed / totalChunks) * 100));
+                setUploadStatus(`Streaming chunks... ${completed}/${totalChunks}`);
+                active--;
                 uploadNext();
-              } catch (err: any) {
-                reject(err);
-              }
-            };
-            reader.onerror = () => reject(new Error("Local file slicing disk access breach."));
-            reader.readAsArrayBuffer(chunkSlice);
+              })
+              .catch(reject);
           }
         };
-
         uploadNext();
       });
 
-      setStatusText('Reassembling multi-gigabyte disk buffer and running database unpack pipeline...');
-      const finalizeRes = await fetch('http://127.0.0.1:8000/api/datasets/upload_zip/finalize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          upload_id,
-          dataset_id: datasetId,
-          task: taskType,
-          total_chunks: totalChunks
-        })
+      setUploadStatus('Finalizing and extracting...');
+      const result = await apiClient.finalizeZipUpload({
+        upload_id, dataset_id: datasetId, task, total_chunks: totalChunks,
       });
-
-      const finalizeData = await finalizeRes.json();
-      if (!finalizeRes.ok) throw new Error(finalizeData.detail || 'Post-stream payload unpack execution crash');
-
-      setStatusText(`Successfully compiled data structural mappings! Imported ${finalizeData.count} samples.`);
+      setUploadStatus(`✓ Imported ${result.count ?? 0} samples`);
       if (fileInputRef.current) fileInputRef.current.value = '';
-      onUploadSuccess();
-
+      onImportSuccess();
     } catch (err: any) {
-      console.error(err);
-      setError(err.message || 'Stream processing framework pipeline crashed.');
+      setUploadError(err.message || 'Upload failed');
     } finally {
       setUploading(false);
     }
   };
 
+  // ─── Remote download via SSE ─────────────────────────────────────────────
+  const startRemoteDownload = (source: 'url' | 'kaggle' | 'huggingface', params: any) => {
+    if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
+
+    const progress: DownloadProgress = {
+      downloaded: 0, total: 0, startTime: Date.now(),
+      phase: 'downloading',
+    };
+    setDownloadProgress({ ...progress });
+
+    const es = apiClient.createRemoteDownloadSSE({
+      source, dataset_id: datasetId, task, ...params,
+    });
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'progress') {
+          setDownloadProgress(prev => prev ? {
+            ...prev,
+            downloaded: data.downloaded ?? prev.downloaded,
+            total: data.total ?? prev.total,
+            downloadId: data.download_id ?? prev.downloadId,
+            phase: 'downloading',
+          } : prev);
+        } else if (data.type === 'processing') {
+          setDownloadProgress(prev => prev ? {
+            ...prev, phase: 'processing', message: data.message,
+          } : prev);
+        } else if (data.type === 'complete') {
+          setDownloadProgress(prev => prev ? {
+            ...prev, phase: 'complete', count: data.count,
+          } : prev);
+          es.close();
+          eventSourceRef.current = null;
+          onImportSuccess();
+        } else if (data.type === 'error') {
+          setDownloadProgress(prev => prev ? {
+            ...prev, phase: 'error', message: data.detail,
+          } : prev);
+          es.close();
+          eventSourceRef.current = null;
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.onerror = () => {
+      setDownloadProgress(prev => prev ? {
+        ...prev, phase: 'error', message: 'Connection lost',
+      } : prev);
+      es.close();
+      eventSourceRef.current = null;
+    };
+  };
+
+  const handleCancel = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    if (downloadProgress?.downloadId) {
+      apiClient.cancelRemoteDownload(downloadProgress.downloadId).catch(() => { });
+    }
+    setDownloadProgress(prev => prev ? { ...prev, phase: 'cancelled' } : prev);
+  };
+
+  // ─── Kaggle search ──────────────────────────────────────────────────────
+  const handleKaggleSearch = async () => {
+    if (!kaggleQuery.trim()) return;
+    setSearching(true);
+    try {
+      const res = await apiClient.searchKaggle(kaggleQuery.trim());
+      setKaggleResults(res.datasets || []);
+    } catch { setKaggleResults([]); }
+    finally { setSearching(false); }
+  };
+
+  // ─── HuggingFace search ─────────────────────────────────────────────────
+  const handleHfSearch = async () => {
+    if (!hfQuery.trim()) return;
+    setSearching(true);
+    try {
+      const res = await apiClient.searchHuggingFace(hfQuery.trim());
+      setHfResults(res.datasets || []);
+    } catch { setHfResults([]); }
+    finally { setSearching(false); }
+  };
+
+  const formatBytes = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+    return `${(bytes / 1073741824).toFixed(2)} GB`;
+  };
+
+  const isDownloading = downloadProgress && (downloadProgress.phase === 'downloading' || downloadProgress.phase === 'processing');
+
+  const tabs: { key: ImportTab; icon: string; label: string }[] = [
+    { key: 'local', icon: '📤', label: 'Local ZIP' },
+    { key: 'url', icon: '🌐', label: 'Remote URL' },
+    { key: 'kaggle', icon: '📊', label: 'Kaggle' },
+    { key: 'huggingface', icon: '🤗', label: 'HuggingFace' },
+  ];
+
   return (
-    <div className="p-4 bg-slate-900 rounded-xl border border-slate-700/60 mt-2">
-      <div className="flex items-center gap-2 mb-4">
-        <Upload size={18} className="text-indigo-400" />
-        <h4 className="text-sm font-semibold text-slate-200">Resumable Gigabyte ZIP Streamer</h4>
+    <div className="p-4 bg-slate-900 rounded-xl border border-slate-700/60 mt-2 space-y-3">
+      {/* Tab bar */}
+      <div className="flex gap-1 border-b border-slate-700 pb-2">
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setActiveTab(t.key)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-t-md transition ${activeTab === t.key
+              ? 'bg-slate-800 text-white border-b-2 border-indigo-500'
+              : 'text-gray-400 hover:text-gray-200'
+              }`}>
+            {t.icon} {t.label}
+          </button>
+        ))}
       </div>
 
-      {!uploading && (
-        <div
-          onClick={() => fileInputRef.current?.click()}
-          className="border border-dashed border-slate-700 hover:border-indigo-500 cursor-pointer rounded-lg p-5 text-center bg-slate-950/20 transition group"
-        >
-          <Upload className="mx-auto mb-2 text-slate-500 group-hover:text-indigo-400 transition" size={24} />
-          <span className="block text-xs font-medium mb-0.5">Select ZIP Package</span>
-          <span className="text-[10px] text-slate-500">Supports massive datasets up to 10GB+ smoothly</span>
-          <input type="file" ref={fileInputRef} onChange={handleZipUpload} accept=".zip" className="hidden" />
+      {/* Token status for remote tabs */}
+      {activeTab !== 'local' && tokenStatus && (
+        <div className="flex gap-4 text-[10px] text-gray-500">
+          <span className="flex items-center gap-1">
+            {tokenStatus.kaggle_configured ? <Check className="w-3 h-3 text-green-400" /> : <X className="w-3 h-3 text-red-400" />}
+            Kaggle
+          </span>
+          <span className="flex items-center gap-1">
+            {tokenStatus.huggingface_configured ? <Check className="w-3 h-3 text-green-400" /> : <AlertTriangle className="w-3 h-3 text-yellow-400" />}
+            HuggingFace
+          </span>
         </div>
       )}
 
-      {uploading && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-300">
-            <span className="flex items-center gap-1.5">
-              <Loader2 className="animate-spin text-indigo-400" size={14} />
-              Streaming ArrayBuffers...
-            </span>
-            <span>{progress}%</span>
+      {/* ═══ LOCAL ZIP TAB ═══ */}
+      {activeTab === 'local' && (
+        <div>
+          {!uploading && (
+            <div onClick={() => fileInputRef.current?.click()}
+              className="border border-dashed border-slate-700 hover:border-indigo-500 cursor-pointer rounded-lg p-5 text-center bg-slate-950/20 transition group">
+              <Upload className="mx-auto mb-2 text-slate-500 group-hover:text-indigo-400 transition" size={24} />
+              <span className="block text-xs font-medium mb-0.5">Select ZIP Package</span>
+              <span className="text-[10px] text-slate-500">Chunked upload — supports large datasets (10GB+)</span>
+              <input type="file" ref={fileInputRef} onChange={handleZipUpload} accept=".zip" className="hidden" />
+            </div>
+          )}
+          {uploading && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs font-medium text-slate-300">
+                <span className="flex items-center gap-1.5">
+                  <Loader2 className="animate-spin text-indigo-400" size={14} /> {uploadStatus}
+                </span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+                <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${uploadProgress}%` }} />
+              </div>
+            </div>
+          )}
+          {!uploading && uploadStatus && !uploadError && (
+            <div className="mt-2 p-2 bg-slate-950/60 rounded border border-slate-800 text-[11px] font-mono text-emerald-400 flex items-center gap-2">
+              <Check size={14} /> {uploadStatus}
+            </div>
+          )}
+          {uploadError && (
+            <div className="mt-2 p-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] rounded flex gap-2">
+              <AlertTriangle size={14} className="shrink-0" /> {uploadError}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══ REMOTE URL TAB ═══ */}
+      {activeTab === 'url' && (
+        <div>
+          <p className="text-[11px] text-gray-500 mb-2">Paste a direct .zip download link. The server will download, extract, and import it.</p>
+          <div className="flex gap-2">
+            <input type="text" value={url} onChange={e => setUrl(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !isDownloading && url.trim() && startRemoteDownload('url', { url: url.trim() })}
+              placeholder="https://example.com/dataset.zip"
+              disabled={!!isDownloading}
+              className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-600 rounded-lg text-white text-xs placeholder-gray-500 focus:outline-none focus:border-indigo-500 disabled:opacity-50" />
+            <button onClick={() => startRemoteDownload('url', { url: url.trim() })}
+              disabled={!!isDownloading || !url.trim()}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition">
+              <Globe className="w-3.5 h-3.5" /> Download
+            </button>
           </div>
-          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
-            <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${progress}%` }} />
+          {downloadProgress && <DownloadProgressBar progress={downloadProgress} onCancel={handleCancel} />}
+        </div>
+      )}
+
+      {/* ═══ KAGGLE TAB ═══ */}
+      {activeTab === 'kaggle' && (
+        <div>
+          {!tokenStatus?.kaggle_configured && (
+            <p className="text-[11px] text-amber-400 mb-2">⚠️ Set KAGGLE_USERNAME and KAGGLE_KEY in backend .env</p>
+          )}
+          <div className="flex gap-2 mb-3">
+            <input type="text" value={kaggleQuery} onChange={e => setKaggleQuery(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleKaggleSearch()}
+              placeholder="Search Kaggle datasets..."
+              disabled={searching || !!isDownloading}
+              className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-600 rounded-lg text-white text-xs placeholder-gray-500 focus:outline-none focus:border-cyan-500 disabled:opacity-50" />
+            <button onClick={handleKaggleSearch} disabled={searching || !kaggleQuery.trim() || !!isDownloading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition">
+              {searching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />} Search
+            </button>
           </div>
+          {kaggleResults.length > 0 && (
+            <div className="max-h-52 overflow-y-auto border border-slate-700 rounded-lg divide-y divide-slate-800 custom-scrollbar">
+              {kaggleResults.map(ds => (
+                <div key={ds.ref} className="flex items-center justify-between px-3 py-2 hover:bg-slate-800/50 transition">
+                  <div className="flex-1 min-w-0 mr-3">
+                    <p className="text-xs font-medium text-white truncate">{ds.title}</p>
+                    <p className="text-[10px] text-gray-500 truncate">{formatBytes(ds.size)} • {(ds.download_count ?? 0).toLocaleString()} downloads • {ds.ref}</p>
+                  </div>
+                  <button onClick={() => startRemoteDownload('kaggle', { dataset_ref: ds.ref })}
+                    disabled={!!isDownloading}
+                    className="shrink-0 px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-[10px] font-semibold rounded-md transition">
+                    Import
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {downloadProgress && <DownloadProgressBar progress={downloadProgress} onCancel={handleCancel} />}
         </div>
       )}
 
-      {statusText && (
-        <div className="mt-3 p-2 bg-slate-950/60 rounded border border-slate-800 text-[11px] font-mono text-slate-300 flex items-center gap-2">
-          {!error && !uploading ? <Check className="text-emerald-400 shrink-0" size={14} /> : <Loader2 className="animate-spin text-indigo-400 shrink-0" size={14} />}
-          <span>{statusText}</span>
+      {/* ═══ HUGGINGFACE TAB ═══ */}
+      {activeTab === 'huggingface' && (
+        <div>
+          <div className="flex gap-2 mb-3">
+            <input type="text" value={hfQuery} onChange={e => setHfQuery(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleHfSearch()}
+              placeholder="Search HuggingFace datasets..."
+              disabled={searching || !!isDownloading}
+              className="flex-1 px-3 py-1.5 bg-slate-950 border border-slate-600 rounded-lg text-white text-xs placeholder-gray-500 focus:outline-none focus:border-amber-500 disabled:opacity-50" />
+            <button onClick={handleHfSearch} disabled={searching || !hfQuery.trim() || !!isDownloading}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition">
+              {searching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Database className="w-3.5 h-3.5" />} Search
+            </button>
+          </div>
+          {hfResults.length > 0 && (
+            <div className="max-h-52 overflow-y-auto border border-slate-700 rounded-lg divide-y divide-slate-800 custom-scrollbar">
+              {hfResults.map(ds => (
+                <div key={ds.id} className="flex items-center justify-between px-3 py-2 hover:bg-slate-800/50 transition">
+                  <div className="flex-1 min-w-0 mr-3">
+                    <p className="text-xs font-medium text-white truncate">{ds.id}</p>
+                    <p className="text-[10px] text-gray-500 truncate">{(ds.downloads ?? 0).toLocaleString()} downloads{ds.tags?.length > 0 && ` • ${ds.tags.slice(0, 3).join(', ')}`}</p>
+                  </div>
+                  <button onClick={() => startRemoteDownload('huggingface', { repo_id: ds.id })}
+                    disabled={!!isDownloading}
+                    className="shrink-0 px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-[10px] font-semibold rounded-md transition">
+                    Import
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {downloadProgress && <DownloadProgressBar progress={downloadProgress} onCancel={handleCancel} />}
         </div>
       )}
 
-      {error && (
-        <div className="mt-3 p-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] rounded flex gap-2">
-          <AlertTriangle size={14} className="shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+      {/* Single-file capture */}
+      <div className="pt-3 border-t border-slate-800">
+        <p className="text-[10px] font-semibold text-slate-500 mb-1.5 uppercase tracking-wider">Single File Upload</p>
+        <DataCollector datasetId={datasetId} task={task} onSampleAdded={onImportSuccess} />
+      </div>
     </div>
   );
 }
@@ -517,8 +765,6 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const [filterSplit, setFilterSplit] = useState<string>('ALL');
   const [isLoading, setIsLoading] = useState(true);
   const [showClassManager, setShowClassManager] = useState(false);
-
-  // Split Control
   const [trainPct, setTrainPct] = useState(70);
   const [valPct, setValPct] = useState(20);
   const [testPct, setTestPct] = useState(10);
@@ -539,8 +785,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
 
   const handleRelabel = async (sampleId: string, newLabel: string) => {
     await request(() => apiClient.relabelSample(sampleId, newLabel));
-    await fetchAll();
-    onChanged();
+    await fetchAll(); onChanged();
   };
 
   const handleSplitChange = async (sampleId: string, newSplit: string) => {
@@ -550,21 +795,15 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   };
 
   const handleAutoSplit = async () => {
-    if (trainPct + valPct + testPct !== 100) {
-      alert("Percentages must sum to exactly 100");
-      return;
-    }
+    if (trainPct + valPct + testPct !== 100) { alert("Percentages must sum to exactly 100"); return; }
     setIsSplitting(true);
     await request(() => apiClient.autoSplitDataset(dataset.id, trainPct, valPct, testPct));
-    await fetchAll();
-    setIsSplitting(false);
-    onChanged();
+    await fetchAll(); setIsSplitting(false); onChanged();
   };
 
   const handleDelete = async (sampleId: string) => {
     await request(() => apiClient.deleteSample(sampleId));
-    setSamples(prev => prev.filter(s => s.id !== sampleId));
-    onChanged();
+    setSamples(prev => prev.filter(s => s.id !== sampleId)); onChanged();
   };
 
   const visible = samples.filter(s => {
@@ -574,14 +813,12 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   });
 
   const countByLabel = allLabels.reduce<Record<string, number>>((acc, l) => {
-    acc[l] = samples.filter(s => s.label === l).length;
-    return acc;
+    acc[l] = samples.filter(s => s.label === l).length; return acc;
   }, {});
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
       <div className="w-full max-w-5xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
-
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 bg-slate-800/50">
           <div className="flex items-center gap-3">
@@ -592,13 +829,8 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowClassManager(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showClassManager
-                ? 'bg-purple-700 border-purple-500 text-white'
-                : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'
-                }`}
-            >
+            <button onClick={() => setShowClassManager(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showClassManager ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
               <Tags className="w-4 h-4" /> Manage Classes
             </button>
             <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition">
@@ -607,17 +839,13 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
           </div>
         </div>
 
-        {/* Class manager panel */}
         {showClassManager && (
           <div className="px-6 py-4 border-b border-slate-700 bg-slate-800/20">
-            <ClassManager
-              datasetId={dataset.id}
-              onChanged={() => { fetchAll(); onChanged(); }}
-            />
+            <ClassManager datasetId={dataset.id} onChanged={() => { fetchAll(); onChanged(); }} />
           </div>
         )}
 
-        {/* Auto Split controller */}
+        {/* Auto Split */}
         <div className="px-6 py-3 border-b border-slate-700 bg-slate-800/20 flex flex-wrap gap-4 items-end">
           <div className="flex-1 space-y-1">
             <label className="text-xs text-gray-400 font-medium">Auto-Split (Train/Val/Test)</label>
@@ -629,49 +857,35 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
               <input type="number" min="0" max="100" value={testPct} onChange={e => setTestPct(Number(e.target.value))} className="w-16 px-2 py-1 bg-slate-900 border border-slate-600 rounded text-xs text-white" />
               <span className="text-gray-500">%</span>
             </div>
-            {trainPct + valPct + testPct !== 100 && (
-              <p className="text-[10px] text-red-400">Sum must be equal to 100%</p>
-            )}
+            {trainPct + valPct + testPct !== 100 && <p className="text-[10px] text-red-400">Sum must be equal to 100%</p>}
           </div>
-          <button
-            onClick={handleAutoSplit}
+          <button onClick={handleAutoSplit}
             disabled={isSplitting || trainPct + valPct + testPct !== 100 || samples.length === 0}
-            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition flex items-center gap-2"
-          >
-            {isSplitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />}
-            Generate Split
+            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition flex items-center gap-2">
+            {isSplitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FolderPlus className="w-3.5 h-3.5" />} Generate Split
           </button>
         </div>
 
-        {/* Filter bars */}
+        {/* Filters */}
         <div className="flex flex-col border-b border-slate-700 bg-slate-800/30 flex-shrink-0">
           <div className="flex gap-2 px-6 py-2 overflow-x-auto border-b border-slate-700/50">
             <span className="text-xs text-gray-500 py-1 mr-2 flex-shrink-0">Filter Label:</span>
-            <button
-              onClick={() => setFilterLabel('ALL')}
-              className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterLabel === 'ALL' ? 'bg-purple-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}
-            >
+            <button onClick={() => setFilterLabel('ALL')}
+              className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterLabel === 'ALL' ? 'bg-purple-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}>
               All ({samples.length})
             </button>
             {allLabels.map(l => (
-              <button
-                key={l}
-                onClick={() => setFilterLabel(l)}
-                className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterLabel === l ? 'bg-purple-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}
-              >
+              <button key={l} onClick={() => setFilterLabel(l)}
+                className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterLabel === l ? 'bg-purple-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}>
                 {l} ({countByLabel[l] ?? 0})
               </button>
             ))}
           </div>
-
           <div className="flex gap-2 px-6 py-2 overflow-x-auto">
             <span className="text-xs text-gray-500 py-1 mr-2 flex-shrink-0">Filter Split:</span>
             {['ALL', 'train', 'val', 'test', 'unassigned'].map(sp => (
-              <button
-                key={sp}
-                onClick={() => setFilterSplit(sp)}
-                className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterSplit === sp ? 'bg-blue-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}
-              >
+              <button key={sp} onClick={() => setFilterSplit(sp)}
+                className={`px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap transition ${filterSplit === sp ? 'bg-blue-600 text-white' : 'bg-slate-700 text-gray-300 hover:bg-slate-600'}`}>
                 {sp}
               </button>
             ))}
@@ -691,7 +905,6 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
             </div>
           ) : (
             <>
-              {/* Imbalance warning */}
               {allLabels.length > 1 && (() => {
                 const counts = allLabels.map(l => countByLabel[l] ?? 0);
                 const min = Math.min(...counts), max = Math.max(...counts);
@@ -702,18 +915,10 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
                   </div>
                 ) : null;
               })()}
-
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
                 {visible.map(s => (
-                  <SampleCard
-                    key={s.id}
-                    sample={s}
-                    allLabels={allLabels}
-                    apiBase={apiBase}
-                    onRelabel={handleRelabel}
-                    onSplitChange={handleSplitChange}
-                    onDelete={handleDelete}
-                  />
+                  <SampleCard key={s.id} sample={s} allLabels={allLabels} apiBase={apiBase}
+                    onRelabel={handleRelabel} onSplitChange={handleSplitChange} onDelete={handleDelete} />
                 ))}
               </div>
             </>
@@ -778,93 +983,57 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     if (selectedId === id) setSelectedId(null);
     if (expandedUpload === id) setExpandedUpload(null);
     if (expandedClasses === id) setExpandedClasses(null);
-    await fetchDatasets();
-    onDatasetChanged?.();
+    await fetchDatasets(); onDatasetChanged?.();
   };
 
   const handleClear = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!window.confirm('Clear all samples from this dataset?')) return;
     await request(() => apiClient.clearDataset(id));
-    await fetchDatasets();
-    onDatasetChanged?.();
+    await fetchDatasets(); onDatasetChanged?.();
   };
 
   const handleRename = async (id: string) => {
     if (!editName.trim()) return;
     await request(() => apiClient.renameDataset(id, editName.trim()));
-    setEditingId(null);
-    await fetchDatasets();
+    setEditingId(null); await fetchDatasets();
   };
 
   const handleExportFull = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`full-${dataset.id}`);
-    try {
-      // Force direct browser download standard via URL redirection if dynamic blob compilation finishes
-      window.location.href = `${apiBase}/datasets/export/full/${dataset.id}`;
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setExportingId(null);
-    }
+    try { window.location.href = `${apiBase}/datasets/export/full/${dataset.id}`; }
+    catch { } finally { setExportingId(null); }
   };
 
   const handleExportSplit = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`split-${dataset.id}`);
-    try {
-      window.location.href = `${apiBase}/datasets/export/split/${dataset.id}`;
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setExportingId(null);
-    }
-  };
-
-  const toggleUpload = (id: string) => {
-    setExpandedUpload(prev => prev === id ? null : id);
-  };
-
-  const toggleClasses = (id: string) => {
-    setExpandedClasses(prev => prev === id ? null : id);
+    try { window.location.href = `${apiBase}/datasets/export/split/${dataset.id}`; }
+    catch { } finally { setExportingId(null); }
   };
 
   return (
     <div className="space-y-6">
-      {/* Explorer modal */}
       {exploringDataset && (
-        <DatasetExplorer
-          dataset={exploringDataset}
-          apiBase={apiBase}
+        <DatasetExplorer dataset={exploringDataset} apiBase={apiBase}
           onClose={() => setExploringDataset(null)}
-          onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }}
-        />
+          onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
       )}
 
       {/* Create New Dataset */}
       <div className="flex gap-3">
-        <input
-          type="text"
-          value={newName}
-          onChange={e => setNewName(e.target.value)}
+        <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleCreate()}
           placeholder={`New ${task.replace(/_/g, ' ').toLowerCase()} dataset...`}
-          className="flex-1 px-4 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-        />
-        <button
-          onClick={handleCreate}
-          disabled={isCreating || !newName.trim()}
-          className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold rounded-lg transition"
-        >
-          {isCreating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          Create
+          className="flex-1 px-4 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-purple-500" />
+        <button onClick={handleCreate} disabled={isCreating || !newName.trim()}
+          className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold rounded-lg transition">
+          {isCreating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Create
         </button>
       </div>
 
-      {error && (
-        <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">{error}</div>
-      )}
+      {error && <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">{error}</div>}
 
       {/* Dataset List */}
       {isLoading ? (
@@ -880,24 +1049,15 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
         <div className="space-y-3">
           {datasets.map(dataset => (
             <div key={dataset.id} className="rounded-xl border border-slate-700 overflow-hidden bg-slate-800/50">
-
               {/* Dataset row */}
               <div className="flex items-center gap-3 px-4 py-3">
                 {editingId === dataset.id ? (
                   <div className="flex gap-2 flex-1">
-                    <input
-                      autoFocus
-                      value={editName}
-                      onChange={e => setEditName(e.target.value)}
+                    <input autoFocus value={editName} onChange={e => setEditName(e.target.value)}
                       onKeyDown={e => e.key === 'Enter' && handleRename(dataset.id)}
-                      className="flex-1 px-2 py-1 bg-slate-700 rounded text-white text-sm focus:outline-none focus:border-purple-500 border border-slate-600"
-                    />
-                    <button onClick={() => handleRename(dataset.id)} className="text-green-400 hover:text-green-300 p-1">
-                      <Check className="w-4 h-4" />
-                    </button>
-                    <button onClick={() => setEditingId(null)} className="text-gray-400 hover:text-gray-200 p-1">
-                      <X className="w-4 h-4" />
-                    </button>
+                      className="flex-1 px-2 py-1 bg-slate-700 rounded text-white text-sm focus:outline-none focus:border-purple-500 border border-slate-600" />
+                    <button onClick={() => handleRename(dataset.id)} className="text-green-400 hover:text-green-300 p-1"><Check className="w-4 h-4" /></button>
+                    <button onClick={() => setEditingId(null)} className="text-gray-400 hover:text-gray-200 p-1"><X className="w-4 h-4" /></button>
                   </div>
                 ) : (
                   <>
@@ -905,88 +1065,40 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                       <p className="font-semibold text-white truncate">{dataset.name}</p>
                       <p className="text-xs text-gray-400">{dataset.sample_count} samples</p>
                     </div>
-
-                    {/* Action buttons */}
                     <div className="flex items-center gap-1 shrink-0">
-                      {/* Explore */}
-                      <button
-                        onClick={() => setExploringDataset(dataset)}
-                        className="flex items-center gap-1 px-2 py-1 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-slate-700 rounded-lg transition"
-                        title="Explore samples"
-                      >
+                      <button onClick={() => setExploringDataset(dataset)}
+                        className="flex items-center gap-1 px-2 py-1 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-slate-700 rounded-lg transition" title="Explore samples">
                         <Eye className="w-3.5 h-3.5" /> Explore
                       </button>
-
-                      {/* Export Full */}
-                      <button
-                        onClick={e => handleExportFull(dataset, e)}
+                      <button onClick={e => handleExportFull(dataset, e)}
                         disabled={exportingId === `full-${dataset.id}` || dataset.sample_count === 0}
-                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition"
-                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Full ZIP'}
-                      >
-                        {exportingId === `full-${dataset.id}`
-                          ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          : <Download className="w-3.5 h-3.5" />}
-                        Full ZIP
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Full ZIP">
+                        {exportingId === `full-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Full ZIP
                       </button>
-
-                      {/* Export Split */}
-                      <button
-                        onClick={e => handleExportSplit(dataset, e)}
+                      <button onClick={e => handleExportSplit(dataset, e)}
                         disabled={exportingId === `split-${dataset.id}` || dataset.sample_count === 0}
-                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition"
-                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Split ZIP'}
-                      >
-                        {exportingId === `split-${dataset.id}`
-                          ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          : <Download className="w-3.5 h-3.5" />}
-                        Split ZIP
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Split ZIP">
+                        {exportingId === `split-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Split ZIP
                       </button>
-
                       <div className="h-4 w-px bg-slate-700 mx-1" />
-
-                      {/* Expand Classes */}
-                      <button
-                        onClick={() => toggleClasses(dataset.id)}
-                        className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`}
-                        title="Quick Classes"
-                      >
+                      <button onClick={() => setExpandedClasses(prev => prev === dataset.id ? null : dataset.id)}
+                        className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quick Classes">
                         <Tags className="w-4 h-4" />
                       </button>
-
-                      {/* Expand Upload */}
-                      <button
-                        onClick={() => toggleUpload(dataset.id)}
-                        className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`}
-                        title="Upload Archive Stream"
-                      >
+                      <button onClick={() => setExpandedUpload(prev => prev === dataset.id ? null : dataset.id)}
+                        className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Upload & Import">
                         <Upload className="w-4 h-4" />
                       </button>
-
-                      {/* Edit Name */}
-                      <button
-                        onClick={() => { setEditingId(dataset.id); setEditName(dataset.name); }}
-                        className="p-1.5 text-gray-400 hover:text-white transition"
-                        title="Rename"
-                      >
+                      <button onClick={() => { setEditingId(dataset.id); setEditName(dataset.name); }}
+                        className="p-1.5 text-gray-400 hover:text-white transition" title="Rename">
                         <Edit2 className="w-4 h-4" />
                       </button>
-
-                      {/* Clear */}
-                      <button
-                        onClick={e => handleClear(dataset.id, e)}
-                        className="p-1.5 text-amber-500 hover:text-amber-400 transition"
-                        title="Clear Samples"
-                      >
+                      <button onClick={e => handleClear(dataset.id, e)}
+                        className="p-1.5 text-amber-500 hover:text-amber-400 transition" title="Clear Samples">
                         <RefreshCw className="w-4 h-4" />
                       </button>
-
-                      {/* Delete */}
-                      <button
-                        onClick={e => handleDelete(dataset.id, e)}
-                        className="p-1.5 text-red-500 hover:text-red-400 transition"
-                        title="Delete Dataset"
-                      >
+                      <button onClick={e => handleDelete(dataset.id, e)}
+                        className="p-1.5 text-red-500 hover:text-red-400 transition" title="Delete Dataset">
                         <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
@@ -994,35 +1106,20 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                 )}
               </div>
 
-              {/* Collapsible Section for Classes */}
+              {/* Collapsible Classes */}
               {expandedClasses === dataset.id && (
                 <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                  <ClassManager
-                    datasetId={dataset.id}
-                    onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }}
-                  />
+                  <ClassManager datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                 </div>
               )}
 
-              {/* Collapsible Section for Resumable Upload Streamer */}
+              {/* Collapsible Upload & Import */}
               {expandedUpload === dataset.id && (
                 <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                  <ChunkUploadStudio
-                    datasetId={dataset.id}
-                    taskType={task}
-                    onUploadSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }}
-                  />
-                  <div className="mt-4 pt-4 border-t border-slate-800">
-                    <p className="text-xs font-semibold text-slate-400 mb-2">Alternative Single-File Record Target:</p>
-                    <DataCollector
-                      datasetId={dataset.id}
-                      task={task}
-                      onSampleAdded={() => { fetchDatasets(); onDatasetChanged?.(); }}
-                    />
-                  </div>
+                  <DataImporter datasetId={dataset.id} task={task}
+                    onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                 </div>
               )}
-
             </div>
           ))}
         </div>

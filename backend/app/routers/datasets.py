@@ -1,3 +1,4 @@
+
 import io
 import os
 import uuid
@@ -14,8 +15,7 @@ from typing import List, Optional
 from app.services.shared_state import data_manager
 import aiofiles
 
-# 1. OPTIMIZED THREAD POOL: 4 workers will choke your server under high I/O concurrency.
-# Let Python dynamically scale workers based on CPU cores, up to a sensible maximum.
+# Optimized thread pool: scales with CPU cores
 _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4), thread_name_prefix="disk_io")
 
 router = APIRouter()
@@ -24,14 +24,15 @@ CHUNK_DIR = os.path.join(tempfile.gettempdir(), "edgecraft_chunks")
 os.makedirs(CHUNK_DIR, exist_ok=True)
 
 UPLOAD_TRACKER = {}
-WRITE_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB Sweet spot for NVMe drives
-ZIP_PROCESSING_BATCH_SIZE = 500     # Keeps RAM flat during extraction
+WRITE_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
+ZIP_PROCESSING_BATCH_SIZE = 500
+
 
 async def _run_in_executor(fn, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_DISK_EXECUTOR, fn, *args)
 
-# Helper function to safely delete files after a FileResponse finishes downloading
+
 def _cleanup_file(path: str):
     try:
         if os.path.exists(path):
@@ -39,16 +40,17 @@ def _cleanup_file(path: str):
     except Exception:
         pass
 
-# ── Dataset CRUD (Now Non-Blocking) ──────────────────────────────────────────
+
+# ── Dataset CRUD ──────────────────────────────────────────────────────────────
 
 @router.post("/create")
 async def create_dataset(name: str = Body(...), task: str = Body(...)):
-    # CRITICAL: CRUD operations interact with disk/DB. Offload them to avoid freezing the event loop!
     try:
         dataset = await _run_in_executor(data_manager.create_dataset, name, task)
         return {"status": "success", "dataset": dataset}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @router.get("/list_datasets")
 async def list_datasets(task: str = None):
@@ -58,12 +60,14 @@ async def list_datasets(task: str = None):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 @router.put("/rename/{dataset_id}")
 async def rename_dataset(dataset_id: str, new_name: str = Body(...)):
     success = await _run_in_executor(data_manager.rename_dataset, dataset_id, new_name)
     if success:
         return {"status": "success"}
     return {"status": "error", "message": "Dataset not found"}
+
 
 @router.delete("/dataset/{dataset_id}")
 async def delete_dataset(dataset_id: str):
@@ -72,10 +76,12 @@ async def delete_dataset(dataset_id: str):
         return {"status": "success"}
     return {"status": "error", "message": "Dataset not found"}
 
+
 @router.delete("/clear_dataset/{dataset_id}")
 async def clear_dataset(dataset_id: str):
     count = await _run_in_executor(data_manager.clear_dataset_samples, dataset_id)
     return {"status": "success", "message": f"Cleared {count} samples"}
+
 
 # ── Single-file upload ────────────────────────────────────────────────────────
 
@@ -94,6 +100,7 @@ async def upload_dataset_sample(
         return {"status": "success", "sample_id": sample_id}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 # ── Chunked Resumable ZIP upload Engine ───────────────────────────────────────
 
@@ -117,14 +124,14 @@ async def init_zip_upload(
         "file_size": file_size,
     }
     meta_path = os.path.join(upload_dir, "_meta.json")
-    
-    # Simple tiny write, synchronous is fine here but using executor keeps it pure
+
     def _write_meta():
         with open(meta_path, "w") as f:
             json.dump(meta, f)
-            
+
     await _run_in_executor(_write_meta)
     return {"status": "success", "upload_id": upload_id}
+
 
 @router.put("/upload_zip/chunk/{upload_id}/{chunk_index}")
 async def upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Request):
@@ -156,22 +163,23 @@ async def upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Reques
     UPLOAD_TRACKER[upload_id] = UPLOAD_TRACKER.get(upload_id, 0) + 1
     return {"status": "success", "chunk_index": chunk_index, "received": UPLOAD_TRACKER[upload_id]}
 
+
 @router.get("/upload_zip/status/{upload_id}")
 async def zip_upload_status(upload_id: str):
     upload_dir = os.path.join(CHUNK_DIR, upload_id)
     if not os.path.isdir(upload_dir):
         raise HTTPException(status_code=404, detail=f"Unknown upload session: {upload_id}")
 
-    # Use executor for disk scan
     def _scan():
         return sorted(
             int(name.split("_")[1])
             for name in os.listdir(upload_dir)
             if name.startswith("chunk_")
         )
-        
+
     received = await _run_in_executor(_scan)
     return {"status": "success", "upload_id": upload_id, "received_chunks": received}
+
 
 def _assemble_and_process_zip(upload_dir: str, meta: dict) -> int:
     total_chunks = meta["total_chunks"]
@@ -179,26 +187,26 @@ def _assemble_and_process_zip(upload_dir: str, meta: dict) -> int:
     task = meta["task"]
 
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
-    
-    # 1. Faster assembly with a massive 4MB copy buffer
+
+    # Assemble chunks into a single file
     with open(assembled_zip_path, "wb") as outfile:
         for i in range(total_chunks):
             chunk_path = os.path.join(upload_dir, f"chunk_{i:06d}")
             if not os.path.exists(chunk_path):
                 raise ValueError(f"Missing chunk index {i}")
-            
+
             with open(chunk_path, "rb") as infile:
                 shutil.copyfileobj(infile, outfile, length=WRITE_BUFFER_SIZE)
 
     valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav"}
     total_processed = 0
-    
-    # 2. BATCHED EXTRACT: Prevents multi-gigabyte memory inflation
+
+    # Batched extraction
     with zipfile.ZipFile(assembled_zip_path, 'r') as z:
         valid_items = [
-            info for info in z.infolist() 
-            if not info.is_dir() 
-            and not info.filename.startswith("__MACOSX") 
+            info for info in z.infolist()
+            if not info.is_dir()
+            and not info.filename.startswith("__MACOSX")
             and not info.filename.split("/")[-1].startswith(".")
         ]
 
@@ -213,10 +221,12 @@ def _assemble_and_process_zip(upload_dir: str, meta: dict) -> int:
         for info in valid_items:
             parts = info.filename.split("/")
             if has_common_root:
-                if len(parts) < 3: continue
+                if len(parts) < 3:
+                    continue
                 label = parts[1].strip()
             else:
-                if len(parts) < 2: continue
+                if len(parts) < 2:
+                    continue
                 label = parts[0].strip()
 
             filename = parts[-1]
@@ -226,19 +236,21 @@ def _assemble_and_process_zip(upload_dir: str, meta: dict) -> int:
 
             with z.open(info) as extracted_file:
                 content = extracted_file.read()
-                file_data_list.append((dataset_id, label, task, content, filename))
+                file_data_list.append({
+                    "label": label,
+                    "filename": filename,
+                    "content": content,
+                })
 
-            # Commit blocks in chunks (e.g., 500 files at a time) to keep RAM usage perfectly flat
             if len(file_data_list) >= ZIP_PROCESSING_BATCH_SIZE:
-                data_manager.bulk_add_samples(file_data_list)
+                data_manager.bulk_add_samples(dataset_id, task, file_data_list)
                 total_processed += len(file_data_list)
                 file_data_list.clear()
 
-        # Flush remaining items
         if file_data_list:
-            data_manager.bulk_add_samples(file_data_list)
+            data_manager.bulk_add_samples(dataset_id, task, file_data_list)
             total_processed += len(file_data_list)
-            
+
     shutil.rmtree(upload_dir, ignore_errors=True)
     return total_processed
 
@@ -255,11 +267,11 @@ async def finalize_zip_upload(
         raise HTTPException(status_code=404, detail="Upload target expired or missing")
 
     meta_path = os.path.join(upload_dir, "_meta.json")
-    
+
     def _read_meta():
         with open(meta_path, "r") as f:
             return json.load(f)
-            
+
     meta = await _run_in_executor(_read_meta)
 
     if meta["total_chunks"] != total_chunks:
@@ -267,13 +279,13 @@ async def finalize_zip_upload(
 
     try:
         count = await _run_in_executor(_assemble_and_process_zip, upload_dir, meta)
-        # Clear local tracker state upon completion
         UPLOAD_TRACKER.pop(upload_id, None)
         return {"status": "success", "count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Post-stream pipeline unpack crash: {str(e)}")
 
-# ── Samples & Metadata (Now Non-Blocking) ────────────────────────────────────
+
+# ── Samples & Metadata ────────────────────────────────────────────────────────
 
 @router.get("/list")
 async def list_samples(dataset_id: str = None):
@@ -283,6 +295,7 @@ async def list_samples(dataset_id: str = None):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
 @router.get("/stats")
 async def get_dataset_statistics():
     try:
@@ -290,6 +303,7 @@ async def get_dataset_statistics():
         return {"status": "success", **stats}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @router.post("/split/{dataset_id}")
 async def auto_split_dataset(
@@ -304,13 +318,14 @@ async def auto_split_dataset(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ── Export Engine (ZERO-RAM REWRITE via FileResponse & sendfile) ──────────────
+
+# ── Export Engine ─────────────────────────────────────────────────────────────
 
 def _build_export_zip(samples: list, dataset_name: str, mode: str) -> str:
-    """Builds the zip archive completely on disk using a fast temp file."""
+    """Builds the zip archive on disk."""
     temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
     temp_zip_path = temp_zip.name
-    temp_zip.close() 
+    temp_zip.close()
 
     with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED, False) as zip_file:
         for s in samples:
@@ -324,6 +339,7 @@ def _build_export_zip(samples: list, dataset_name: str, mode: str) -> str:
                 zip_file.writestr(arc_path, data)
     return temp_zip_path
 
+
 @router.get("/export/full/{dataset_id}")
 async def export_full(dataset_id: str, background_tasks: BackgroundTasks):
     samples = await _run_in_executor(data_manager.get_samples, dataset_id)
@@ -331,21 +347,19 @@ async def export_full(dataset_id: str, background_tasks: BackgroundTasks):
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Build file on disk inside a background thread pool
     zip_path = await _run_in_executor(_build_export_zip, samples, dataset['name'], "full")
-    
-    # Background task fires immediately after download finishes to delete the temp file
     background_tasks.add_task(_cleanup_file, zip_path)
 
     filename = f"{dataset['name'].replace(' ', '_')}_full.zip"
     return FileResponse(zip_path, media_type="application/zip", filename=filename)
+
 
 @router.get("/export/split/{dataset_id}")
 async def export_split(dataset_id: str, background_tasks: BackgroundTasks):
     samples = await _run_in_executor(data_manager.get_samples, dataset_id)
     dataset = await _run_in_executor(data_manager.datasets.get, dataset_id)
     if not dataset:
-        raise HTTPException(status_code=404, detail=f"Dataset not found")
+        raise HTTPException(status_code=404, detail="Dataset not found")
 
     zip_path = await _run_in_executor(_build_export_zip, samples, dataset['name'], "split")
     background_tasks.add_task(_cleanup_file, zip_path)
@@ -353,15 +367,19 @@ async def export_split(dataset_id: str, background_tasks: BackgroundTasks):
     filename = f"{dataset['name'].replace(' ', '_')}_split.zip"
     return FileResponse(zip_path, media_type="application/zip", filename=filename)
 
-# ── Dynamic Relabeling & Sync Changes ────────────────────────────────────────
+
+# ── Relabeling & Sample Management ───────────────────────────────────────────
 
 @router.patch("/sample/{sample_id}/split")
 async def update_sample_split(sample_id: str, split: str = Body(..., embed=True)):
     try:
         success = await _run_in_executor(data_manager.set_sample_split, sample_id, split)
-        if success: return {"status": "success"}
+        if success:
+            return {"status": "success"}
         return {"status": "error", "message": "Sample not found"}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.get("/image/{sample_id}")
 async def get_sample_image(sample_id: str):
@@ -374,41 +392,52 @@ async def get_sample_image(sample_id: str):
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
+
 @router.patch("/relabel/{sample_id}")
 async def relabel_sample(sample_id: str, label: str = Body(..., embed=True)):
     try:
         if await _run_in_executor(data_manager.relabel_sample, sample_id, label):
             return {"status": "success"}
         return {"status": "error", "message": "Sample not found"}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.get("/labels/{dataset_id}")
 async def get_dataset_labels(dataset_id: str):
     try:
         labels = await _run_in_executor(data_manager.get_dataset_labels, dataset_id)
         return {"status": "success", "labels": labels}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.post("/labels/{dataset_id}/add")
 async def add_label(dataset_id: str, label: str = Body(..., embed=True)):
     try:
         result = await _run_in_executor(data_manager.add_label, dataset_id, label)
         return {"status": "success", "label": result}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.post("/labels/{dataset_id}/rename")
 async def rename_label(dataset_id: str, old_label: str = Body(...), new_label: str = Body(...)):
     try:
         count = await _run_in_executor(data_manager.rename_label, dataset_id, old_label, new_label)
         return {"status": "success", "renamed": count}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.delete("/labels/{dataset_id}/{label}")
 async def delete_label(dataset_id: str, label: str):
     try:
         count = await _run_in_executor(data_manager.delete_label, dataset_id, label)
         return {"status": "success", "deleted": count}
-    except Exception as e: return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 @router.delete("/{sample_id}")
 async def delete_sample(sample_id: str):

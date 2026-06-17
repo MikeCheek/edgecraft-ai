@@ -1,3 +1,7 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// FILE: useApi.ts
+// ═══════════════════════════════════════════════════════════════════════════════
+
 import { useCallback, useState } from 'react'
 import axios, { AxiosInstance } from 'axios'
 import { ApiResponse } from '../types'
@@ -10,8 +14,6 @@ class APIClient {
 
   constructor() {
     this.client = axios.create({ baseURL: API_BASE, timeout: 30_000 })
-    // Chunk PUTs and finalize use fetch() directly — no axios needed for those.
-    // uploadClient is kept only for single-file upload.
     this.uploadClient = axios.create({ baseURL: API_BASE, timeout: 600_000 })
   }
 
@@ -52,7 +54,7 @@ class APIClient {
     return this.uploadClient.post<ApiResponse<any>>('/datasets/upload', fd)
   }
 
-  // ── Chunked ZIP upload (raw PUT — no multipart overhead) ──────────────────
+  // ── Chunked ZIP upload ────────────────────────────────────────────────────
 
   async initZipUpload(params: {
     dataset_id: string
@@ -66,11 +68,6 @@ class APIClient {
     return res.data
   }
 
-  /**
-   * Raw binary PUT — body is the chunk blob directly.
-   * No FormData, no multipart parsing: server reads request.stream().
-   * This is how S3, GCS, and every fast upload service works.
-   */
   async putZipChunk(
     uploadId: string,
     chunkIndex: number,
@@ -105,9 +102,8 @@ class APIClient {
     task: string
     total_chunks: number
   }): Promise<{ status: string; sample_ids?: string[]; count?: number; message?: string }> {
-    // Use fetch with a long timeout via AbortController (axios can't do per-request timeout in all envs)
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000) // 30 min
+    const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000)
     try {
       const res = await fetch(`${API_BASE}/datasets/upload_zip/finalize`, {
         method: 'POST',
@@ -195,6 +191,50 @@ class APIClient {
     a.href = url; a.download = `${name.replace(/\s+/g, '_')}_split.zip`
     document.body.appendChild(a); a.click(); document.body.removeChild(a)
     URL.revokeObjectURL(url)
+  }
+
+  // ── Remote Datasets (URL / Kaggle / HuggingFace) ────────────────────────────
+
+  async getRemoteTokenStatus(): Promise<{ status: string; kaggle_configured: boolean; huggingface_configured: boolean }> {
+    const res = await this.client.get('/remote_datasets/token_status')
+    return res.data
+  }
+
+  async searchKaggle(query: string, page: number = 1): Promise<{ status: string; datasets: any[] }> {
+    const res = await this.client.get('/remote_datasets/kaggle/search', { params: { query, page } })
+    return res.data
+  }
+
+  async searchHuggingFace(query: string, limit: number = 20): Promise<{ status: string; datasets: any[] }> {
+    const res = await this.client.get('/remote_datasets/huggingface/search', { params: { query, limit } })
+    return res.data
+  }
+
+  /**
+   * Start a remote download (URL, Kaggle, or HuggingFace).
+   * Returns an SSE EventSource that streams progress events.
+   * Events: { type: 'progress', downloaded: number, total: number } | { type: 'complete', count: number } | { type: 'error', detail: string }
+   */
+  createRemoteDownloadSSE(params: {
+    source: 'url' | 'kaggle' | 'huggingface'
+    url?: string
+    dataset_ref?: string
+    repo_id?: string
+    dataset_id: string
+    task: string
+  }): EventSource {
+    const query = new URLSearchParams()
+    query.set('source', params.source)
+    query.set('dataset_id', params.dataset_id)
+    query.set('task', params.task)
+    if (params.url) query.set('url', params.url)
+    if (params.dataset_ref) query.set('dataset_ref', params.dataset_ref)
+    if (params.repo_id) query.set('repo_id', params.repo_id)
+    return new EventSource(`${API_BASE}/remote_datasets/download_stream?${query.toString()}`)
+  }
+
+  async cancelRemoteDownload(downloadId: string): Promise<void> {
+    await this.client.post('/remote_datasets/cancel', { download_id: downloadId })
   }
 
   // ── Training ──────────────────────────────────────────────────────────────
@@ -295,3 +335,4 @@ export function useAPI() {
 
   return { request, error, loading, apiClient }
 }
+
