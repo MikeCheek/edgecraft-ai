@@ -24,28 +24,44 @@ class APIClient {
   // ── Datasets ──────────────────────────────────────────────────────────────
 
   async createDataset(name: string, task: string) {
-    return this.client.post<ApiResponse<any>>('/datasets/create', { name, task })
+    return this.client.post<ApiResponse<any>>('/datasets/create', {
+      name,
+      task
+    })
   }
 
   async listDatasets(task?: string) {
-    return this.client.get<ApiResponse<any>>('/datasets/list_datasets', { params: { task } })
+    return this.client.get<ApiResponse<any>>('/datasets/list_datasets', {
+      params: { task }
+    })
   }
 
   async renameDataset(datasetId: string, newName: string) {
-    return this.client.put<ApiResponse<any>>(`/datasets/rename/${datasetId}`, { new_name: newName })
+    return this.client.put<ApiResponse<any>>(`/datasets/rename/${datasetId}`, {
+      new_name: newName
+    })
   }
 
   async deleteDataset(datasetId: string) {
-    return this.client.delete<ApiResponse<any>>(`/datasets/dataset/${datasetId}`)
+    return this.client.delete<ApiResponse<any>>(
+      `/datasets/dataset/${datasetId}`
+    )
   }
 
   async clearDataset(datasetId: string) {
-    return this.client.delete<ApiResponse<any>>(`/datasets/clear_dataset/${datasetId}`)
+    return this.client.delete<ApiResponse<any>>(
+      `/datasets/clear_dataset/${datasetId}`
+    )
   }
 
   // ── Single-file upload ────────────────────────────────────────────────────
 
-  async uploadSample(datasetId: string, label: string, task: string, file: File) {
+  async uploadSample(
+    datasetId: string,
+    label: string,
+    task: string,
+    file: File
+  ) {
     const fd = new FormData()
     fd.append('dataset_id', datasetId)
     fd.append('label', label)
@@ -72,7 +88,7 @@ class APIClient {
     uploadId: string,
     chunkIndex: number,
     blob: Blob,
-    signal?: AbortSignal,
+    signal?: AbortSignal
   ): Promise<void> {
     const res = await fetch(
       `${API_BASE}/datasets/upload_zip/chunk/${uploadId}/${chunkIndex}`,
@@ -80,8 +96,8 @@ class APIClient {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: blob,
-        signal,
-      },
+        signal
+      }
     )
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText)
@@ -90,7 +106,7 @@ class APIClient {
   }
 
   async getZipUploadStatus(
-    uploadId: string,
+    uploadId: string
   ): Promise<{ status: string; upload_id: string; received_chunks: number[] }> {
     const res = await this.client.get(`/datasets/upload_zip/status/${uploadId}`)
     return res.data
@@ -101,7 +117,12 @@ class APIClient {
     dataset_id: string
     task: string
     total_chunks: number
-  }): Promise<{ status: string; sample_ids?: string[]; count?: number; message?: string }> {
+  }): Promise<{
+    status: string
+    sample_ids?: string[]
+    count?: number
+    message?: string
+  }> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000)
     try {
@@ -109,7 +130,7 @@ class APIClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(params),
-        signal: controller.signal,
+        signal: controller.signal
       })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       return await res.json()
@@ -125,7 +146,9 @@ class APIClient {
   // ── Samples ───────────────────────────────────────────────────────────────
 
   async listSamples(datasetId?: string) {
-    return this.client.get<ApiResponse<any>>('/datasets/list', { params: { dataset_id: datasetId } })
+    return this.client.get<ApiResponse<any>>('/datasets/list', {
+      params: { dataset_id: datasetId }
+    })
   }
 
   async getDatasetStats() {
@@ -137,7 +160,10 @@ class APIClient {
   }
 
   async relabelSample(sampleId: string, label: string) {
-    return this.client.patch<ApiResponse<any>>(`/datasets/relabel/${sampleId}`, { label })
+    return this.client.patch<ApiResponse<any>>(
+      `/datasets/relabel/${sampleId}`,
+      { label }
+    )
   }
 
   async getDatasetLabels(datasetId: string) {
@@ -145,75 +171,123 @@ class APIClient {
   }
 
   async getSampleImage(sampleId: string): Promise<string> {
-    const resp = await this.client.get(`/datasets/image/${sampleId}`, { responseType: 'blob' })
+    const resp = await this.client.get(`/datasets/image/${sampleId}`, {
+      responseType: 'blob'
+    })
     return URL.createObjectURL(resp.data as Blob)
   }
 
   async addLabel(datasetId: string, label: string) {
-    return this.client.post<ApiResponse<any>>(`/datasets/labels/${datasetId}/add`, { label })
+    return this.client.post<ApiResponse<any>>(
+      `/datasets/labels/${datasetId}/add`,
+      { label }
+    )
   }
 
   async renameLabel(datasetId: string, oldLabel: string, newLabel: string) {
-    return this.client.post<ApiResponse<any>>(`/datasets/labels/${datasetId}/rename`, {
-      old_label: oldLabel, new_label: newLabel,
-    })
+    return this.client.post<ApiResponse<any>>(
+      `/datasets/labels/${datasetId}/rename`,
+      {
+        old_label: oldLabel,
+        new_label: newLabel
+      }
+    )
   }
 
   async deleteLabel(datasetId: string, label: string) {
     return this.client.delete<ApiResponse<any>>(
-      `/datasets/labels/${datasetId}/${encodeURIComponent(label)}`,
+      `/datasets/labels/${datasetId}/${encodeURIComponent(label)}`
     )
   }
 
-  async autoSplitDataset(datasetId: string, trainPct: number, valPct: number, testPct: number) {
+  async autoSplitDataset(
+    datasetId: string,
+    trainPct: number,
+    valPct: number,
+    testPct: number
+  ) {
     return this.client.post<ApiResponse<any>>(`/datasets/split/${datasetId}`, {
-      train_pct: trainPct, val_pct: valPct, test_pct: testPct,
+      train_pct: trainPct,
+      val_pct: valPct,
+      test_pct: testPct
     })
   }
 
   async setSampleSplit(sampleId: string, split: string) {
-    return this.client.patch<ApiResponse<any>>(`/datasets/sample/${sampleId}/split`, { split })
+    return this.client.patch<ApiResponse<any>>(
+      `/datasets/sample/${sampleId}/split`,
+      { split }
+    )
   }
 
   async exportFullDataset(datasetId: string, name: string) {
-    const resp = await this.client.get(`/datasets/export/full/${datasetId}`, { responseType: 'blob' })
+    const resp = await this.client.get(`/datasets/export/full/${datasetId}`, {
+      responseType: 'blob'
+    })
     const url = URL.createObjectURL(resp.data as Blob)
     const a = document.createElement('a')
-    a.href = url; a.download = `${name.replace(/\s+/g, '_')}_full.zip`
-    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    a.href = url
+    a.download = `${name.replace(/\s+/g, '_')}_full.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
     URL.revokeObjectURL(url)
   }
 
   async exportSplitDataset(datasetId: string, name: string) {
-    const resp = await this.client.get(`/datasets/export/split/${datasetId}`, { responseType: 'blob' })
+    const resp = await this.client.get(`/datasets/export/split/${datasetId}`, {
+      responseType: 'blob'
+    })
     const url = URL.createObjectURL(resp.data as Blob)
     const a = document.createElement('a')
-    a.href = url; a.download = `${name.replace(/\s+/g, '_')}_split.zip`
-    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    a.href = url
+    a.download = `${name.replace(/\s+/g, '_')}_split.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
     URL.revokeObjectURL(url)
   }
 
   // ── Remote Datasets (URL / Kaggle / HuggingFace) ────────────────────────────
 
-  async getRemoteTokenStatus(): Promise<{ status: string; kaggle_configured: boolean; huggingface_configured: boolean }> {
+  async getRemoteTokenStatus(): Promise<{
+    status: string
+    kaggle_configured: boolean
+    huggingface_configured: boolean
+  }> {
     const res = await this.client.get('/remote_datasets/token_status')
     return res.data
   }
 
-  async searchKaggle(query: string, page: number = 1): Promise<{ status: string; datasets: any[] }> {
-    const res = await this.client.get('/remote_datasets/kaggle/search', { params: { query, page } })
+  async searchKaggle(
+    query: string,
+    page: number = 1
+  ): Promise<{ status: string; datasets: any[] }> {
+    const res = await this.client.get('/remote_datasets/kaggle/search', {
+      params: { query, page }
+    })
     return res.data
   }
 
-  async searchHuggingFace(query: string, limit: number = 20): Promise<{ status: string; datasets: any[] }> {
-    const res = await this.client.get('/remote_datasets/huggingface/search', { params: { query, limit } })
+  async searchHuggingFace(
+    query: string,
+    limit: number = 20
+  ): Promise<{ status: string; datasets: any[] }> {
+    const res = await this.client.get('/remote_datasets/huggingface/search', {
+      params: { query, limit }
+    })
     return res.data
   }
 
   /**
    * Start a remote download (URL, Kaggle, or HuggingFace).
    * Returns an SSE EventSource that streams progress events.
-   * Events: { type: 'progress', downloaded: number, total: number } | { type: 'complete', count: number } | { type: 'error', detail: string }
+// Events: { type: 'start', download_id: string }
+//       | { type: 'progress', downloaded: number, total: number }
+//       | { type: 'processing', message: string }
+//       | { type: 'complete', count: number }
+//       | { type: 'error', message: string }   // <-- was 'detail'
+//       | { type: 'canceled' }
    */
   createRemoteDownloadSSE(params: {
     source: 'url' | 'kaggle' | 'huggingface'
@@ -230,18 +304,23 @@ class APIClient {
     if (params.url) query.set('url', params.url)
     if (params.dataset_ref) query.set('dataset_ref', params.dataset_ref)
     if (params.repo_id) query.set('repo_id', params.repo_id)
-    return new EventSource(`${API_BASE}/remote_datasets/download_stream?${query.toString()}`)
+    return new EventSource(
+      `${API_BASE}/remote_datasets/download_stream?${query.toString()}`
+    )
   }
 
   async cancelRemoteDownload(downloadId: string): Promise<void> {
-    await this.client.post('/remote_datasets/cancel', { download_id: downloadId })
+    await this.client.post('/remote_datasets/cancel', {
+      download_id: downloadId
+    })
   }
 
   // ── Training ──────────────────────────────────────────────────────────────
 
   async startTraining(config: any) {
     return this.client.post<ApiResponse<any>>('/training/start', {
-      ...config, input_shape: config.input_shape || [224, 224, 3],
+      ...config,
+      input_shape: config.input_shape || [224, 224, 3]
     })
   }
 
@@ -272,20 +351,27 @@ class APIClient {
   }
 
   async getOptimizationStatus(optimizationId: string) {
-    return this.client.get<ApiResponse<any>>(`/optimization/status/${optimizationId}`)
+    return this.client.get<ApiResponse<any>>(
+      `/optimization/status/${optimizationId}`
+    )
   }
 
   async getOptimizationResult(optimizationId: string) {
-    return this.client.get<ApiResponse<any>>(`/optimization/result/${optimizationId}`)
+    return this.client.get<ApiResponse<any>>(
+      `/optimization/result/${optimizationId}`
+    )
   }
 
   async exportCArray(optimizationId: string) {
-    return this.client.post<ApiResponse<any>>(`/optimization/to-c-array/${optimizationId}`)
+    return this.client.post<ApiResponse<any>>(
+      `/optimization/to-c-array/${optimizationId}`
+    )
   }
 
   async evaluateBoard(optimizationId: string, board: string) {
     return this.client.post<ApiResponse<any>>('/optimization/evaluate-board', {
-      optimization_id: optimizationId, board,
+      optimization_id: optimizationId,
+      board
     })
   }
 
@@ -293,15 +379,29 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/optimization/llm-status')
   }
 
-  async getLLMSuggestions(trainingId: string, provider: 'ollama' | 'openrouter', modelName: string, apiKey?: string) {
+  async getLLMSuggestions(
+    trainingId: string,
+    provider: 'ollama' | 'openrouter',
+    modelName: string,
+    apiKey?: string
+  ) {
     return this.client.post<ApiResponse<any>>('/optimization/llm-suggest', {
-      training_id: trainingId, provider, model_name: modelName, api_key: apiKey,
+      training_id: trainingId,
+      provider,
+      model_name: modelName,
+      api_key: apiKey
     })
   }
 
-  async getLLMOptimizationAdvice(optimizationId: string, board: string, useLocalLLM = false) {
+  async getLLMOptimizationAdvice(
+    optimizationId: string,
+    board: string,
+    useLocalLLM = false
+  ) {
     return this.client.post<ApiResponse<any>>('/optimization/llm-optimize', {
-      optimization_id: optimizationId, board, use_local_llm: useLocalLLM,
+      optimization_id: optimizationId,
+      board,
+      use_local_llm: useLocalLLM
     })
   }
 }
@@ -322,7 +422,9 @@ export function useAPI() {
           setError(response.data.message || 'An error occurred')
           return null
         }
-        return response.data.data !== undefined ? response.data.data : response.data
+        return response.data.data !== undefined
+          ? response.data.data
+          : response.data
       } catch (err: any) {
         setError(err.message || 'Network error')
         return null
@@ -330,9 +432,8 @@ export function useAPI() {
         setLoading(false)
       }
     },
-    [],
+    []
   )
 
   return { request, error, loading, apiClient }
 }
-

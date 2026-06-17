@@ -1,5 +1,6 @@
 import io
 import os
+from tkinter import Image
 import uuid
 import tempfile
 import zipfile
@@ -253,6 +254,41 @@ def _assemble_and_process_zip(upload_dir: str, meta: dict) -> int:
     shutil.rmtree(upload_dir, ignore_errors=True)
     return total_processed
 
+def clean_dataset_directory(dataset_dir):
+    # TensorFlow supported formats
+    valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
+    removed_count = 0
+
+    for root, dirs, files in os.walk(dataset_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+
+            # 1. Remove hidden/system files immediately
+            if file.startswith('.') or file.lower() == 'thumbs.db':
+                print(f"Removing hidden file: {file_path}")
+                os.remove(file_path)
+                removed_count += 1
+                continue
+
+            # 2. Check if the extension is strictly valid
+            ext = os.path.splitext(file)[1].lower()
+            if ext not in valid_extensions:
+                print(f"Removing unsupported format: {file_path}")
+                os.remove(file_path)
+                removed_count += 1
+                continue
+
+            # 3. Open the file to verify header integrity (catches fake/corrupt images)
+            try:
+                with Image.open(file_path) as img:
+                    img.verify() # Reads the header, doesn't load whole image into memory
+            except Exception as e:
+                print(f"Removing corrupted image: {file_path} - {e}")
+                os.remove(file_path)
+                removed_count += 1
+
+    print(f"\nCleanup finished! Removed {removed_count} invalid files.")
+
 
 @router.post("/upload_zip/finalize")
 async def finalize_zip_upload(
@@ -272,6 +308,8 @@ async def finalize_zip_upload(
             return json.load(f)
 
     meta = await _run_in_executor(_read_meta)
+    
+    clean_dataset_directory(upload_dir)  # Clean the dataset directory before processing
 
     if meta["total_chunks"] != total_chunks:
         raise HTTPException(status_code=400, detail="Incomplete stream packet data loss detected")

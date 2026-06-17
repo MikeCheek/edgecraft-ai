@@ -136,7 +136,7 @@ async def cancel_download(req: CancelRequest):
 
 @router.get("/download_stream")
 async def download_stream(
-    source: str = Query(...),       # "url", "kaggle", "huggingface"
+    source: str = Query(...),  # "url", "kaggle", "huggingface"
     dataset_id: str = Query(...),
     task: str = Query(...),
     url: Optional[str] = Query(None),
@@ -145,42 +145,94 @@ async def download_stream(
 ):
     """SSE endpoint that streams download progress to the frontend."""
     download_id = str(uuid.uuid4())
-    _active_downloads[download_id] = {"cancelled": False}
+    _active_downloads[download_id] = {"canceled": False}
 
     async def event_generator():
         download_path = None
         download_dir = None
         try:
-            # Send download_id immediately
             yield _sse_event({"type": "start", "download_id": download_id})
 
+            # ------------------------------------------------------------------
+            # URL — async generator, yields (downloaded, total) per chunk
+            # ------------------------------------------------------------------
             if source == "url":
                 if not url:
                     yield _sse_event({"type": "error", "message": "URL is required"})
                     return
-                download_path, count = await _download_from_url(url, dataset_id, task, download_id)
-                yield _sse_event({"type": "complete", "count": count})
+                result: dict = {}
+                async for downloaded, total in _download_from_url_stream(url, dataset_id, task, download_id, result):
+                    yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
+                download_path = result.get("path")
+                yield _sse_event({"type": "processing", "message": "Extracting archive..."})
+                yield _sse_event({"type": "complete", "count": result.get("count", 0)})
 
+            # ------------------------------------------------------------------
+            # Kaggle — queue bridge
+            # ------------------------------------------------------------------
             elif source == "kaggle":
                 if not dataset_ref:
                     yield _sse_event({"type": "error", "message": "dataset_ref is required"})
                     return
-                download_dir, count = await _download_from_kaggle(dataset_ref, dataset_id, task, download_id)
+                loop = asyncio.get_running_loop()
+                queue: asyncio.Queue = asyncio.Queue()
+                fut = loop.run_in_executor(
+                    _EXECUTOR, _kaggle_download_thread,
+                    dataset_ref, dataset_id, task, download_id, loop, queue
+                )
+                count = 0
+                while True:
+                    item = await queue.get()
+                    if item is _SENTINEL:
+                        break
+                    if isinstance(item, tuple):
+                        if item[0] == "complete":
+                            _, count, download_dir = item
+                            yield _sse_event({"type": "processing", "message": "Extracting archive..."})
+                        elif item[0] == "error":
+                            raise ValueError(item[1])
+                        else:
+                            downloaded, total = item
+                            yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
+                await fut
                 yield _sse_event({"type": "complete", "count": count})
 
+            # ------------------------------------------------------------------
+            # HuggingFace — queue bridge
+            # ------------------------------------------------------------------
             elif source == "huggingface":
                 if not repo_id:
                     yield _sse_event({"type": "error", "message": "repo_id is required"})
                     return
-                download_dir, count = await _download_from_huggingface(repo_id, dataset_id, task, download_id)
+                loop = asyncio.get_running_loop()
+                queue: asyncio.Queue = asyncio.Queue()
+                fut = loop.run_in_executor(
+                    _EXECUTOR, _huggingface_download_thread,
+                    repo_id, dataset_id, task, download_id, loop, queue
+                )
+                count = 0
+                while True:
+                    item = await queue.get()
+                    if item is _SENTINEL:
+                        break
+                    if isinstance(item, tuple):
+                        if item[0] == "complete":
+                            _, count, download_dir = item
+                            yield _sse_event({"type": "processing", "message": "Extracting archive..."})
+                        elif item[0] == "error":
+                            raise ValueError(item[1])
+                        else:
+                            downloaded, total = item
+                            yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
+                await fut
                 yield _sse_event({"type": "complete", "count": count})
 
             else:
                 yield _sse_event({"type": "error", "message": f"Unknown source: {source}"})
 
         except ValueError as e:
-            if "cancelled" in str(e).lower():
-                yield _sse_event({"type": "cancelled", "message": "Download cancelled"})
+            if "canceled" in str(e).lower():
+                yield _sse_event({"type": "canceled", "message": "Download canceled"})
             else:
                 yield _sse_event({"type": "error", "message": str(e)})
         except Exception as e:
@@ -203,11 +255,30 @@ async def download_stream(
         },
     )
 
-
 # ─── Internal Download Implementations ────────────────────────────────────────
 
-async def _download_from_url(url: str, dataset_id: str, task: str, download_id: str) -> tuple:
-    """Download ZIP from URL with progress tracking. Returns (file_path, count)."""
+## Active downloads tracking (for cancellation)
+_active_downloads: dict[str, dict] = {}
+_SENTINEL = object()  # signals that a download thread is finished
+
+async def _run_in_executor(fn, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_EXECUTOR, fn, *args)
+
+def _sse_event(data: dict) -> str:
+    """Format a dict as an SSE data line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+# ---------------------------------------------------------------------------
+# URL: async generator — yields (downloaded, total) per chunk
+# ---------------------------------------------------------------------------
+async def _download_from_url_stream(
+    url: str, dataset_id: str, task: str, download_id: str, result: dict
+):
+    """
+    Async generator. Yields (downloaded_bytes, total_bytes) per chunk.
+    Stores final results in `result`: result["path"] and result["count"].
+    """
     import httpx
 
     download_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
@@ -215,26 +286,138 @@ async def _download_from_url(url: str, dataset_id: str, task: str, download_id: 
     async with httpx.AsyncClient(follow_redirects=True, timeout=600) as client:
         async with client.stream("GET", url) as response:
             if response.status_code != 200:
-                raise ValueError(f"Failed to download: HTTP {response.status_code}")
+                raise ValueError(f"HTTP {response.status_code}: {response.reason_phrase} — check URL is a direct download link")
 
             total = int(response.headers.get("content-length", 0))
             downloaded = 0
 
             with open(download_path, "wb") as f:
-                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                    if _active_downloads.get(download_id, {}).get("cancelled"):
-                        raise ValueError("Download cancelled by user")
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 256):
+                    if _active_downloads.get(download_id, {}).get("canceled"):
+                        raise ValueError("Download canceled by user")
                     f.write(chunk)
                     downloaded += len(chunk)
-                    # Update progress in tracker for SSE polling if needed
                     _active_downloads[download_id]["downloaded"] = downloaded
                     _active_downloads[download_id]["total"] = total
+                    yield downloaded, total  # <-- this is what was missing
 
     if not zipfile.is_zipfile(download_path):
         raise ValueError("Downloaded file is not a valid ZIP archive.")
 
     count = await _run_in_executor(_process_zip_to_dataset, download_path, dataset_id, task, download_id)
-    return (download_path, count)
+    result["path"] = download_path
+    result["count"] = count
+
+# ---------------------------------------------------------------------------
+# Kaggle: sync thread worker with asyncio queue bridge
+# ---------------------------------------------------------------------------
+def _kaggle_download_thread(
+    dataset_ref: str, dataset_id: str, task: str, download_id: str,
+    loop: asyncio.AbstractEventLoop, queue: asyncio.Queue
+):
+    """Runs in executor. Pushes (downloaded, total) progress + sentinel into queue."""
+    import threading
+
+    def _push(item):
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    try:
+        import kaggle  # type: ignore
+        kaggle.api.authenticate()
+
+        try:
+            meta = kaggle.api.dataset_metadata(dataset_ref)
+            total = getattr(meta, "totalBytes", 0) or 0
+        except Exception:
+            total = 0
+
+        download_dir = os.path.join(DOWNLOAD_DIR, download_id)
+        os.makedirs(download_dir, exist_ok=True)
+
+        stop_polling = threading.Event()
+
+        def _poll():
+            while not stop_polling.is_set():
+                try:
+                    sz = sum(
+                        os.path.getsize(os.path.join(dp, f))
+                        for dp, _, fns in os.walk(download_dir)
+                        for f in fns
+                    )
+                    _push((sz, total))
+                except Exception:
+                    pass
+                stop_polling.wait(timeout=1.0)
+
+        poller = threading.Thread(target=_poll, daemon=True)
+        poller.start()
+        try:
+            kaggle.api.dataset_download_files(dataset_ref, path=download_dir, unzip=False, quiet=True)
+        finally:
+            stop_polling.set()
+            poller.join(timeout=2)
+
+        if _active_downloads.get(download_id, {}).get("canceled"):
+            raise ValueError("Download canceled by user")
+
+        count = _process_zip_to_dataset(download_dir, dataset_id, task, download_id)
+        _push(("complete", count, download_dir))
+    except Exception as exc:
+        _push(("error", str(exc)))
+    finally:
+        _push(_SENTINEL)
+
+# ---------------------------------------------------------------------------
+# HuggingFace: sync thread worker with asyncio queue bridge
+# ---------------------------------------------------------------------------
+def _huggingface_download_thread(
+    repo_id: str, dataset_id: str, task: str, download_id: str,
+    loop: asyncio.AbstractEventLoop, queue: asyncio.Queue
+):
+    """Runs in executor. Pushes (downloaded, 0) progress + sentinel into queue."""
+    import threading
+
+    def _push(item):
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        download_dir = os.path.join(DOWNLOAD_DIR, download_id)
+        os.makedirs(download_dir, exist_ok=True)
+
+        stop_polling = threading.Event()
+
+        def _poll():
+            while not stop_polling.is_set():
+                try:
+                    sz = sum(
+                        os.path.getsize(os.path.join(dp, f))
+                        for dp, _, fns in os.walk(download_dir)
+                        for f in fns
+                    )
+                    _push((sz, 0))  # total unknown until complete
+                except Exception:
+                    pass
+                stop_polling.wait(timeout=1.0)
+
+        poller = threading.Thread(target=_poll, daemon=True)
+        poller.start()
+        try:
+            snapshot_download(repo_id=repo_id, local_dir=download_dir, repo_type="dataset")
+        finally:
+            stop_polling.set()
+            poller.join(timeout=2)
+
+        if _active_downloads.get(download_id, {}).get("canceled"):
+            raise ValueError("Download canceled by user")
+
+        count = _process_zip_to_dataset(download_dir, dataset_id, task, download_id)
+        _push(("complete", count, download_dir))
+    except Exception as exc:
+        _push(("error", str(exc)))
+    finally:
+        _push(_SENTINEL)
 
 
 async def _download_from_kaggle(dataset_ref: str, dataset_id: str, task: str, download_id: str) -> tuple:

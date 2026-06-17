@@ -393,7 +393,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     setStatus(s);
     dispatch({ type: 'SET_TRAINING', payload: s });
     if (s.status === 'running' || s.status === 'initialized') {
-      pollRef.current = setTimeout(() => pollStatus(id), 1500);
+      pollRef.current = setTimeout(() => pollStatus(id), 15000);
     } else if (s.status === 'completed') {
       fetchPastSessions();
       onTrainingComplete?.();
