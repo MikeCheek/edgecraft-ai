@@ -31,6 +31,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(datasets.router, prefix="/api/datasets", tags=["Datasets"])
+app.include_router(remote_datasets.router, prefix="/api/remote_datasets", tags=["Remote Datasets"])
 app.include_router(training.router, prefix="/api/training", tags=["Training"])
 app.include_router(optimization.router, prefix="/api/optimization", tags=["Optimization"])
 app.include_router(remote_datasets.router, prefix="/api/remote_datasets", tags=["Remote Datasets"])

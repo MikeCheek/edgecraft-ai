@@ -4,12 +4,12 @@ import shutil
 import tempfile
 import zipfile
 import asyncio
-import logging
+import json
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Dict
+from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -27,9 +27,8 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".wav"}
 ZIP_PROCESSING_BATCH_SIZE = 500
 
-# ─── Active Downloads Tracking ────────────────────────────────────────────────
-
-_active_downloads: Dict[str, dict] = {}  # download_id -> {cancelled: bool}
+# Active downloads tracking (for cancellation)
+_active_downloads: dict[str, dict] = {}
 
 
 async def _run_in_executor(fn, *args):
@@ -37,10 +36,17 @@ async def _run_in_executor(fn, *args):
     return await loop.run_in_executor(_EXECUTOR, fn, *args)
 
 
+def _sse_event(data: dict) -> str:
+    """Format a dict as an SSE data line."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
 # ─── Shared Processing Logic ─────────────────────────────────────────────────
 
 def _process_zip_to_dataset(zip_path: str, dataset_id: str, task: str, download_id: str = None) -> int:
-    """Extract a zip file and ingest samples into the data_manager."""
+    """Extract a zip file and ingest samples into the data_manager.
+    Uses the SAME bulk_add_samples signature as datasets.py: list of tuples.
+    """
     total_processed = 0
 
     with zipfile.ZipFile(zip_path, 'r') as z:
@@ -81,19 +87,16 @@ def _process_zip_to_dataset(zip_path: str, dataset_id: str, task: str, download_
 
             with z.open(info) as extracted_file:
                 content = extracted_file.read()
-                file_data_list.append({
-                    "label": label,
-                    "filename": filename,
-                    "content": content,
-                })
+                # Match datasets.py signature: tuple (dataset_id, label, task, content, filename)
+                file_data_list.append((dataset_id, label, task, content, filename))
 
             if len(file_data_list) >= ZIP_PROCESSING_BATCH_SIZE:
-                data_manager.bulk_add_samples(dataset_id, task, file_data_list)
+                data_manager.bulk_add_samples(file_data_list)
                 total_processed += len(file_data_list)
                 file_data_list.clear()
 
         if file_data_list:
-            data_manager.bulk_add_samples(dataset_id, task, file_data_list)
+            data_manager.bulk_add_samples(file_data_list)
             total_processed += len(file_data_list)
 
     return total_processed
@@ -115,7 +118,7 @@ async def get_token_status():
     }
 
 
-# ─── Cancel Endpoint ──────────────────────────────────────────────────────────
+# ─── Cancel Download ──────────────────────────────────────────────────────────
 
 class CancelRequest(BaseModel):
     download_id: str
@@ -129,186 +132,69 @@ async def cancel_download(req: CancelRequest):
     return {"status": "error", "message": "Download not found or already completed"}
 
 
-# ─── SSE Download Stream (unified endpoint with progress) ────────────────────
+# ─── SSE Download Stream (URL / Kaggle / HuggingFace) ─────────────────────────
 
 @router.get("/download_stream")
 async def download_stream(
-    source: str = Query(...),          # "url" | "kaggle" | "huggingface"
+    source: str = Query(...),       # "url", "kaggle", "huggingface"
     dataset_id: str = Query(...),
     task: str = Query(...),
     url: Optional[str] = Query(None),
     dataset_ref: Optional[str] = Query(None),
     repo_id: Optional[str] = Query(None),
 ):
-    """SSE endpoint that streams download progress back to the frontend."""
+    """SSE endpoint that streams download progress to the frontend."""
     download_id = str(uuid.uuid4())
     _active_downloads[download_id] = {"cancelled": False}
 
-    async def full_event_stream():
-        zip_path = None
+    async def event_generator():
+        download_path = None
+        download_dir = None
         try:
-            # Send download_id first
-            yield f"data: {_sse_json('started', download_id)}\n\n"
+            # Send download_id immediately
+            yield _sse_event({"type": "start", "download_id": download_id})
 
             if source == "url":
                 if not url:
-                    yield f"data: {_sse_json('error', download_id, message='URL is required')}\n\n"
+                    yield _sse_event({"type": "error", "message": "URL is required"})
                     return
-
-                dl_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
-                async with httpx.AsyncClient(follow_redirects=True, timeout=600) as client:
-                    async with client.stream("GET", url) as response:
-                        if response.status_code != 200:
-                            yield f"data: {_sse_json('error', download_id, message=f'HTTP {response.status_code}')}\n\n"
-                            return
-
-                        total = int(response.headers.get("content-length", 0))
-                        downloaded = 0
-
-                        with open(dl_path, "wb") as f:
-                            async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
-                                if _active_downloads.get(download_id, {}).get("cancelled"):
-                                    yield f"data: {_sse_json('error', download_id, message='Download cancelled')}\n\n"
-                                    return
-
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                yield f"data: {_sse_json('progress', download_id, downloaded=downloaded, total=total)}\n\n"
-
-                if not zipfile.is_zipfile(dl_path):
-                    yield f"data: {_sse_json('error', download_id, message='Downloaded file is not a valid ZIP')}\n\n"
-                    return
-                zip_path = dl_path
+                download_path, count = await _download_from_url(url, dataset_id, task, download_id)
+                yield _sse_event({"type": "complete", "count": count})
 
             elif source == "kaggle":
                 if not dataset_ref:
-                    yield f"data: {_sse_json('error', download_id, message='dataset_ref is required')}\n\n"
+                    yield _sse_event({"type": "error", "message": "dataset_ref is required"})
                     return
-
-                yield f"data: {_sse_json('progress', download_id, downloaded=0, total=0)}\n\n"
-
-                username = os.environ.get("KAGGLE_USERNAME")
-                key = os.environ.get("KAGGLE_KEY")
-                if not username or not key:
-                    yield f"data: {_sse_json('error', download_id, message='Kaggle credentials not configured')}\n\n"
-                    return
-
-                kaggle_dir = os.path.join(DOWNLOAD_DIR, f"kaggle_{download_id}")
-                os.makedirs(kaggle_dir, exist_ok=True)
-
-                def _kaggle_dl():
-                    os.environ["KAGGLE_USERNAME"] = username
-                    os.environ["KAGGLE_KEY"] = key
-                    from kaggle.api.kaggle_api_extended import KaggleApi
-                    api = KaggleApi()
-                    api.authenticate()
-                    api.dataset_download_files(dataset_ref, path=kaggle_dir, unzip=False)
-                    zips = [f for f in os.listdir(kaggle_dir) if f.endswith(".zip")]
-                    if not zips:
-                        raise ValueError("No zip file found after Kaggle download")
-                    return os.path.join(kaggle_dir, zips[0])
-
-                zip_path = await _run_in_executor(_kaggle_dl)
-
-                if _active_downloads.get(download_id, {}).get("cancelled"):
-                    yield f"data: {_sse_json('error', download_id, message='Download cancelled')}\n\n"
-                    return
-
-                # Report size after download
-                file_size = os.path.getsize(zip_path)
-                yield f"data: {_sse_json('progress', download_id, downloaded=file_size, total=file_size)}\n\n"
+                download_dir, count = await _download_from_kaggle(dataset_ref, dataset_id, task, download_id)
+                yield _sse_event({"type": "complete", "count": count})
 
             elif source == "huggingface":
                 if not repo_id:
-                    yield f"data: {_sse_json('error', download_id, message='repo_id is required')}\n\n"
+                    yield _sse_event({"type": "error", "message": "repo_id is required"})
                     return
-
-                yield f"data: {_sse_json('progress', download_id, downloaded=0, total=0)}\n\n"
-
-                token = os.environ.get("HUGGINGFACE_TOKEN")
-                hf_dir = os.path.join(DOWNLOAD_DIR, f"hf_{download_id}")
-                os.makedirs(hf_dir, exist_ok=True)
-
-                def _hf_dl():
-                    from huggingface_hub import snapshot_download
-                    local_path = snapshot_download(
-                        repo_id=repo_id,
-                        repo_type="dataset",
-                        local_dir=hf_dir,
-                        token=token if token else None,
-                    )
-
-                    # Look for zip files
-                    for root, dirs, files in os.walk(local_path):
-                        for f in files:
-                            if f.endswith(".zip"):
-                                return os.path.join(root, f)
-
-                    # If no zip, assemble from valid files
-                    temp_zip_path = os.path.join(hf_dir, "assembled.zip")
-                    found_files = []
-                    for root, dirs, files in os.walk(local_path):
-                        for f in files:
-                            ext = os.path.splitext(f)[1].lower()
-                            if ext in VALID_EXTENSIONS:
-                                full_path = os.path.join(root, f)
-                                rel_path = os.path.relpath(full_path, local_path)
-                                found_files.append((full_path, rel_path))
-
-                    if not found_files:
-                        raise ValueError("No valid image/audio files found in HuggingFace dataset")
-
-                    with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                        for full_path, rel_path in found_files:
-                            zf.write(full_path, rel_path)
-
-                    return temp_zip_path
-
-                zip_path = await _run_in_executor(_hf_dl)
-
-                if _active_downloads.get(download_id, {}).get("cancelled"):
-                    yield f"data: {_sse_json('error', download_id, message='Download cancelled')}\n\n"
-                    return
-
-                file_size = os.path.getsize(zip_path)
-                yield f"data: {_sse_json('progress', download_id, downloaded=file_size, total=file_size)}\n\n"
+                download_dir, count = await _download_from_huggingface(repo_id, dataset_id, task, download_id)
+                yield _sse_event({"type": "complete", "count": count})
 
             else:
-                yield f"data: {_sse_json('error', download_id, message=f'Unknown source: {source}')}\n\n"
-                return
+                yield _sse_event({"type": "error", "message": f"Unknown source: {source}"})
 
-            # ── Phase 2: Processing ──────────────────────────────────────
-            yield f"data: {_sse_json('processing', download_id, message='Extracting and importing samples...')}\n\n"
-
-            count = await _run_in_executor(
-                _process_zip_to_dataset, zip_path, dataset_id, task, download_id
-            )
-
-            yield f"data: {_sse_json('complete', download_id, count=count)}\n\n"
-
+        except ValueError as e:
+            if "cancelled" in str(e).lower():
+                yield _sse_event({"type": "cancelled", "message": "Download cancelled"})
+            else:
+                yield _sse_event({"type": "error", "message": str(e)})
         except Exception as e:
-            error_msg = str(e)
-            if "cancelled" in error_msg.lower():
-                yield f"data: {_sse_json('error', download_id, message='Download cancelled')}\n\n"
-            else:
-                logger.exception(f"Download stream error [{download_id}]")
-                yield f"data: {_sse_json('error', download_id, message=error_msg)}\n\n"
+            logger.exception(f"Download stream error ({source})")
+            yield _sse_event({"type": "error", "message": str(e)})
         finally:
             _active_downloads.pop(download_id, None)
-            # Cleanup
-            if zip_path and os.path.exists(zip_path):
-                try:
-                    os.remove(zip_path)
-                except Exception:
-                    pass
-            # Cleanup Kaggle/HF directories
-            for prefix in ("kaggle_", "hf_"):
-                d = os.path.join(DOWNLOAD_DIR, f"{prefix}{download_id}")
-                if os.path.isdir(d):
-                    shutil.rmtree(d, ignore_errors=True)
+            if download_path and os.path.exists(download_path):
+                os.remove(download_path)
+            if download_dir and os.path.exists(download_dir):
+                shutil.rmtree(download_dir, ignore_errors=True)
 
     return StreamingResponse(
-        full_event_stream(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -318,14 +204,138 @@ async def download_stream(
     )
 
 
-def _sse_json(event_type: str, download_id: str, **kwargs) -> str:
-    """Build a JSON string for an SSE data payload."""
-    import json
-    payload = {"type": event_type, "download_id": download_id, **kwargs}
-    return json.dumps(payload)
+# ─── Internal Download Implementations ────────────────────────────────────────
+
+async def _download_from_url(url: str, dataset_id: str, task: str, download_id: str) -> tuple:
+    """Download ZIP from URL with progress tracking. Returns (file_path, count)."""
+    import httpx
+
+    download_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=600) as client:
+        async with client.stream("GET", url) as response:
+            if response.status_code != 200:
+                raise ValueError(f"Failed to download: HTTP {response.status_code}")
+
+            total = int(response.headers.get("content-length", 0))
+            downloaded = 0
+
+            with open(download_path, "wb") as f:
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                    if _active_downloads.get(download_id, {}).get("cancelled"):
+                        raise ValueError("Download cancelled by user")
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    # Update progress in tracker for SSE polling if needed
+                    _active_downloads[download_id]["downloaded"] = downloaded
+                    _active_downloads[download_id]["total"] = total
+
+    if not zipfile.is_zipfile(download_path):
+        raise ValueError("Downloaded file is not a valid ZIP archive.")
+
+    count = await _run_in_executor(_process_zip_to_dataset, download_path, dataset_id, task, download_id)
+    return (download_path, count)
 
 
-# ─── Kaggle Search (non-streaming) ───────────────────────────────────────────
+async def _download_from_kaggle(dataset_ref: str, dataset_id: str, task: str, download_id: str) -> tuple:
+    """Download from Kaggle. Returns (dir_path, count)."""
+    username = os.environ.get("KAGGLE_USERNAME")
+    key = os.environ.get("KAGGLE_KEY")
+    if not username or not key:
+        raise ValueError("Kaggle credentials not configured in .env")
+
+    download_dir = os.path.join(DOWNLOAD_DIR, f"kaggle_{download_id}")
+    os.makedirs(download_dir, exist_ok=True)
+
+    def _download():
+        os.environ["KAGGLE_USERNAME"] = username
+        os.environ["KAGGLE_KEY"] = key
+        try:
+            from kaggle.api.kaggle_api_extended import KaggleApi
+        except ImportError:
+            raise ValueError("kaggle package not installed. Run: pip install kaggle")
+        api = KaggleApi()
+        api.authenticate()
+        api.dataset_download_files(dataset_ref, path=download_dir, unzip=False)
+        zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
+        if not zips:
+            raise ValueError("No zip file found after Kaggle download")
+        return os.path.join(download_dir, zips[0])
+
+    if _active_downloads.get(download_id, {}).get("cancelled"):
+        raise ValueError("Download cancelled by user")
+
+    zip_path = await _run_in_executor(_download)
+
+    if _active_downloads.get(download_id, {}).get("cancelled"):
+        raise ValueError("Download cancelled by user")
+
+    count = await _run_in_executor(_process_zip_to_dataset, zip_path, dataset_id, task, download_id)
+    return (download_dir, count)
+
+
+async def _download_from_huggingface(repo_id: str, dataset_id: str, task: str, download_id: str) -> tuple:
+    """Download from HuggingFace. Returns (dir_path, count)."""
+    token = os.environ.get("HUGGINGFACE_TOKEN")
+    download_dir = os.path.join(DOWNLOAD_DIR, f"hf_{download_id}")
+    os.makedirs(download_dir, exist_ok=True)
+
+    def _download():
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            raise ValueError("huggingface_hub package not installed. Run: pip install huggingface_hub")
+
+        local_path = snapshot_download(
+            repo_id=repo_id,
+            repo_type="dataset",
+            local_dir=download_dir,
+            token=token if token else None,
+        )
+
+        # Look for zip files first
+        zip_files = []
+        for root, dirs, files in os.walk(local_path):
+            for f in files:
+                if f.endswith(".zip"):
+                    zip_files.append(os.path.join(root, f))
+
+        if zip_files:
+            return zip_files[0]
+
+        # No zip — assemble one from valid files
+        temp_zip_path = os.path.join(download_dir, "assembled.zip")
+        found_files = []
+        for root, dirs, files in os.walk(local_path):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in VALID_EXTENSIONS:
+                    full_path = os.path.join(root, f)
+                    rel_path = os.path.relpath(full_path, local_path)
+                    found_files.append((full_path, rel_path))
+
+        if not found_files:
+            raise ValueError("No valid image/audio files found in the HuggingFace dataset")
+
+        with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for full_path, rel_path in found_files:
+                zf.write(full_path, rel_path)
+
+        return temp_zip_path
+
+    if _active_downloads.get(download_id, {}).get("cancelled"):
+        raise ValueError("Download cancelled by user")
+
+    zip_path = await _run_in_executor(_download)
+
+    if _active_downloads.get(download_id, {}).get("cancelled"):
+        raise ValueError("Download cancelled by user")
+
+    count = await _run_in_executor(_process_zip_to_dataset, zip_path, dataset_id, task, download_id)
+    return (download_dir, count)
+
+
+# ─── Kaggle Search ────────────────────────────────────────────────────────────
 
 @router.get("/kaggle/search")
 async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: int = 1, page_size: int = 20):
@@ -339,32 +349,53 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
         def _search():
             os.environ["KAGGLE_USERNAME"] = username
             os.environ["KAGGLE_KEY"] = key
-            from kaggle.api.kaggle_api_extended import KaggleApi
+            try:
+                from kaggle.api.kaggle_api_extended import KaggleApi
+            except ImportError as ie:                raise ValueError(f"kaggle package not installed: {ie}. Run: pip install kaggle")
+
             api = KaggleApi()
             api.authenticate()
-            results = api.dataset_list(search=query, page=page)
+
+            try:
+                results = api.dataset_list(search=query, page=page)
+            except TypeError:
+                # Fallback for older kaggle API versions
+                results = api.dataset_list(search=query)
+
             datasets = []
             for ds in results[:page_size]:
-                datasets.append({
-                    "ref": str(ds.ref),
-                    "title": ds.title,
-                    "size": ds.totalBytes if hasattr(ds, 'totalBytes') else 0,
-                    "last_updated": str(ds.lastUpdated) if hasattr(ds, 'lastUpdated') else "",
-                    "download_count": ds.downloadCount if hasattr(ds, 'downloadCount') else 0,
-                    "description": ds.subtitle if hasattr(ds, 'subtitle') else "",
-                })
+                try:
+                    ref = str(ds.ref) if hasattr(ds, 'ref') else str(ds)
+                    title = getattr(ds, 'title', ref)
+                    size = getattr(ds, 'totalBytes', 0) or 0
+                    last_updated = str(getattr(ds, 'lastUpdated', ''))
+                    download_count = getattr(ds, 'downloadCount', 0) or 0
+                    description = getattr(ds, 'subtitle', '') or ''
+                    datasets.append({
+                        "ref": ref,
+                        "title": title,
+                        "size": size,
+                        "last_updated": last_updated,
+                        "download_count": download_count,
+                        "description": description,
+                    })
+                except Exception as attr_err:
+                    logger.warning(f"Skipping Kaggle result due to attribute error: {attr_err}")
+                    continue
             return datasets
 
         datasets = await _run_in_executor(_search)
         return {"status": "success", "datasets": datasets}
     except HTTPException:
         raise
+    except ValueError as ve:
+        raise HTTPException(status_code=500, detail=str(ve))
     except Exception as e:
         logger.exception("Kaggle search error")
-        raise HTTPException(status_code=500, detail=f"Kaggle search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Kaggle search failed: {type(e).__name__}: {str(e)}")
 
 
-# ─── HuggingFace Search (non-streaming) ──────────────────────────────────────
+# ─── HuggingFace Search ───────────────────────────────────────────────────────
 
 @router.get("/huggingface/search")
 async def search_huggingface_datasets(query: str = Query(..., min_length=1), limit: int = 20):
@@ -373,24 +404,64 @@ async def search_huggingface_datasets(query: str = Query(..., min_length=1), lim
 
     try:
         def _search():
-            from huggingface_hub import HfApi
+            try:
+                from huggingface_hub import HfApi
+            except ImportError as ie:
+                raise ValueError(f"huggingface_hub package not installed: {ie}. Run: pip install huggingface_hub")
+
             api = HfApi(token=token if token else None)
-            results = api.list_datasets(search=query, limit=limit, sort="downloads", direction=-1)
+
+            try:
+                results = list(api.list_datasets(search=query, limit=limit, sort="downloads", direction=-1))
+            except TypeError:
+                # Fallback for different API versions
+                results = list(api.list_datasets(search=query, limit=limit))
+
             datasets = []
             for ds in results:
-                datasets.append({
-                    "id": ds.id,
-                    "author": ds.author if hasattr(ds, 'author') and ds.author else (ds.id.split("/")[0] if "/" in ds.id else ""),
-                    "title": ds.id.split("/")[-1] if "/" in ds.id else ds.id,
-                    "downloads": ds.downloads if hasattr(ds, 'downloads') else 0,
-                    "last_modified": str(ds.last_modified) if hasattr(ds, 'last_modified') and ds.last_modified else "",
-                    "tags": (ds.tags[:5] if ds.tags else []) if hasattr(ds, 'tags') else [],
-                    "description": "",
-                })
+                try:
+                    ds_id = getattr(ds, 'id', str(ds))
+                    author = getattr(ds, 'author', '')
+                    if not author and '/' in ds_id:
+                        author = ds_id.split('/')[0]
+                    title = ds_id.split('/')[-1] if '/' in ds_id else ds_id
+                    downloads = getattr(ds, 'downloads', 0) or 0
+                    last_modified = str(getattr(ds, 'last_modified', '')) if getattr(ds, 'last_modified', None) else ''
+                    tags = getattr(ds, 'tags', []) or []
+                    datasets.append({
+                        "id": ds_id,
+                        "author": author or '',
+                        "title": title,
+                        "downloads": downloads,
+                        "last_modified": last_modified,
+                        "tags": tags[:5],
+                        "description": "",
+                    })
+                except Exception as attr_err:
+                    logger.warning(f"Skipping HF result due to attribute error: {attr_err}")
+                    continue
             return datasets
 
         datasets = await _run_in_executor(_search)
         return {"status": "success", "datasets": datasets}
+    except ValueError as ve:
+        raise HTTPException(status_code=500, detail=str(ve))
     except Exception as e:
         logger.exception("HuggingFace search error")
-        raise HTTPException(status_code=500, detail=f"HuggingFace search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"HuggingFace search failed: {type(e).__name__}: {str(e)}")
+
+
+# ─── Download Progress Polling (alternative to SSE for simple clients) ────────
+
+@router.get("/progress/{download_id}")
+async def get_download_progress(download_id: str):
+    """Poll download progress for a given download_id."""
+    info = _active_downloads.get(download_id)
+    if not info:
+        return {"status": "not_found"}
+    return {
+        "status": "active",
+        "downloaded": info.get("downloaded", 0),
+        "total": info.get("total", 0),
+        "cancelled": info.get("cancelled", False),
+    }

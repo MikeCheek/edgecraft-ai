@@ -1,4 +1,3 @@
-
 import io
 import os
 import uuid
@@ -442,5 +441,5 @@ async def delete_label(dataset_id: str, label: str):
 @router.delete("/{sample_id}")
 async def delete_sample(sample_id: str):
     if await _run_in_executor(data_manager.delete_sample, sample_id):
-        return {"status": "success"}
+        return {"status": "success"}    
     return {"status": "error", "message": "Sample not found"}
