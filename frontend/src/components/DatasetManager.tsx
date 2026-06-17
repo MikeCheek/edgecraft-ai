@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
   Eye, Tag, ChevronDown, ChevronUp, AlertTriangle, Image as ImageIcon,
-  FolderPlus, Tags, Download,
+  FolderPlus, Tags, Download, Upload, Loader2
 } from 'lucide-react';
 import { useAPI } from '../hooks/useAPI';
 import { DataCollector } from './DataCollector';
@@ -13,7 +13,9 @@ interface DatasetManagerProps {
   onDatasetChanged?: () => void;
 }
 
-// ??? Sample Card ??????????????????????????????????????????????????????????????
+// ============================================================================
+// Sample Card Component
+// ============================================================================
 
 interface SampleCardProps {
   sample: DatasetSample;
@@ -45,6 +47,7 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
   };
 
   const handleDelete = async () => {
+    if (!window.confirm("Are you sure you want to delete this sample?")) return;
     setDeleting(true);
     await onDelete(sample.id);
   };
@@ -167,7 +170,9 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
   );
 }
 
-// ??? Class Manager Panel ??????????????????????????????????????????????????????
+// ============================================================================
+// Class Manager Panel Component
+// ============================================================================
 
 interface ClassManagerProps {
   datasetId: string;
@@ -199,7 +204,7 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
       setSampleCounts(counts);
     }
     setLoading(false);
-  }, [datasetId]);
+  }, [datasetId, request, apiClient]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -315,7 +320,187 @@ function ClassManager({ datasetId, onChanged }: ClassManagerProps) {
   );
 }
 
-// ??? Dataset Explorer Modal ???????????????????????????????????????????????????
+// ============================================================================
+// Resumable Multi-Part Chunk Upload Controller
+// ============================================================================
+
+interface ChunkUploadStudioProps {
+  datasetId: string;
+  taskType: string;
+  onUploadSuccess: () => void;
+}
+
+function ChunkUploadStudio({ datasetId, taskType, onUploadSuccess }: ChunkUploadStudioProps) {
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusText, setStatusText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB Chunks
+  const MAX_CONCURRENT_UPLOADS = 3;
+
+  const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setProgress(0);
+    setError(null);
+    setStatusText('Initializing secure remote multi-part upload stream context...');
+
+    try {
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+      const initRes = await fetch('http://127.0.0.1:8000/api/datasets/upload_zip/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dataset_id: datasetId,
+          task: taskType,
+          filename: file.name,
+          total_chunks: totalChunks,
+          file_size: file.size
+        })
+      });
+
+      const initData = await initRes.json();
+      if (initData.status !== 'success') throw new Error(initData.message || 'Initialization failed');
+      const { upload_id } = initData;
+
+      setStatusText(`Streaming blocks... 0 of ${totalChunks} uploaded`);
+      let completedChunks = 0;
+      let activeUploads = 0;
+      let currentChunkIndex = 0;
+
+      await new Promise<void>((resolve, reject) => {
+        const uploadNext = () => {
+          if (currentChunkIndex >= totalChunks && activeUploads === 0) {
+            resolve();
+            return;
+          }
+
+          while (activeUploads < MAX_CONCURRENT_UPLOADS && currentChunkIndex < totalChunks) {
+            const index = currentChunkIndex;
+            currentChunkIndex++;
+            activeUploads++;
+
+            const start = index * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunkSlice = file.slice(start, end);
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+              try {
+                const arrayBuffer = event.target?.result as ArrayBuffer;
+
+                const chunkRes = await fetch(`http://127.0.0.1:8000/api/datasets/upload_zip/chunk/${upload_id}/${index}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/octet-stream' },
+                  body: arrayBuffer
+                });
+
+                if (!chunkRes.ok) throw new Error(`Chunk error on index sequence: ${index}`);
+
+                completedChunks++;
+                setProgress(Math.round((completedChunks / totalChunks) * 100));
+                setStatusText(`Streaming binary array blocks... ${completedChunks} of ${totalChunks} complete`);
+
+                activeUploads--;
+                uploadNext();
+              } catch (err: any) {
+                reject(err);
+              }
+            };
+            reader.onerror = () => reject(new Error("Local file slicing disk access breach."));
+            reader.readAsArrayBuffer(chunkSlice);
+          }
+        };
+
+        uploadNext();
+      });
+
+      setStatusText('Reassembling multi-gigabyte disk buffer and running database unpack pipeline...');
+      const finalizeRes = await fetch('http://127.0.0.1:8000/api/datasets/upload_zip/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          upload_id,
+          dataset_id: datasetId,
+          task: taskType,
+          total_chunks: totalChunks
+        })
+      });
+
+      const finalizeData = await finalizeRes.json();
+      if (!finalizeRes.ok) throw new Error(finalizeData.detail || 'Post-stream payload unpack execution crash');
+
+      setStatusText(`Successfully compiled data structural mappings! Imported ${finalizeData.count} samples.`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      onUploadSuccess();
+
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Stream processing framework pipeline crashed.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="p-4 bg-slate-900 rounded-xl border border-slate-700/60 mt-2">
+      <div className="flex items-center gap-2 mb-4">
+        <Upload size={18} className="text-indigo-400" />
+        <h4 className="text-sm font-semibold text-slate-200">Resumable Gigabyte ZIP Streamer</h4>
+      </div>
+
+      {!uploading && (
+        <div
+          onClick={() => fileInputRef.current?.click()}
+          className="border border-dashed border-slate-700 hover:border-indigo-500 cursor-pointer rounded-lg p-5 text-center bg-slate-950/20 transition group"
+        >
+          <Upload className="mx-auto mb-2 text-slate-500 group-hover:text-indigo-400 transition" size={24} />
+          <span className="block text-xs font-medium mb-0.5">Select ZIP Package</span>
+          <span className="text-[10px] text-slate-500">Supports massive datasets up to 10GB+ smoothly</span>
+          <input type="file" ref={fileInputRef} onChange={handleZipUpload} accept=".zip" className="hidden" />
+        </div>
+      )}
+
+      {uploading && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between text-xs font-medium text-slate-300">
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="animate-spin text-indigo-400" size={14} />
+              Streaming ArrayBuffers...
+            </span>
+            <span>{progress}%</span>
+          </div>
+          <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden">
+            <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      )}
+
+      {statusText && (
+        <div className="mt-3 p-2 bg-slate-950/60 rounded border border-slate-800 text-[11px] font-mono text-slate-300 flex items-center gap-2">
+          {!error && !uploading ? <Check className="text-emerald-400 shrink-0" size={14} /> : <Loader2 className="animate-spin text-indigo-400 shrink-0" size={14} />}
+          <span>{statusText}</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-3 p-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] rounded flex gap-2">
+          <AlertTriangle size={14} className="shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Dataset Explorer Modal Component
+// ============================================================================
 
 interface ExplorerProps {
   dataset: DatasetInfo;
@@ -348,7 +533,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     if (rawSamples?.samples) setSamples(rawSamples.samples);
     if (rawLabels?.labels) setAllLabels(rawLabels.labels);
     setIsLoading(false);
-  }, [dataset.id]);
+  }, [dataset.id, request, apiClient]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -395,7 +580,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="w-full max-w-5xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden animate-slideIn">
+      <div className="w-full max-w-5xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 bg-slate-800/50">
@@ -539,7 +724,9 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   );
 }
 
-// ??? Main DatasetManager ??????????????????????????????????????????????????????
+// ============================================================================
+// Main DatasetManager Component
+// ============================================================================
 
 export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) {
   const { request, apiClient, error } = useAPI();
@@ -569,7 +756,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     setSelectedId(null);
     setExpandedUpload(null);
     setExpandedClasses(null);
-  }, [task]);
+  }, [task, fetchDatasets]);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -586,7 +773,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!window.confirm('Delete this dataset and all its samples?')) return;
+    if (!window.confirm('Delete this dataset and all its samples permanently?')) return;
     await request(() => apiClient.deleteDataset(id));
     if (selectedId === id) setSelectedId(null);
     if (expandedUpload === id) setExpandedUpload(null);
@@ -614,7 +801,10 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     e.stopPropagation();
     setExportingId(`full-${dataset.id}`);
     try {
-      await apiClient.exportFullDataset(dataset.id, dataset.name);
+      // Force direct browser download standard via URL redirection if dynamic blob compilation finishes
+      window.location.href = `${apiBase}/datasets/export/full/${dataset.id}`;
+    } catch (err) {
+      console.error(err);
     } finally {
       setExportingId(null);
     }
@@ -624,7 +814,9 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     e.stopPropagation();
     setExportingId(`split-${dataset.id}`);
     try {
-      await apiClient.exportSplitDataset(dataset.id, dataset.name);
+      window.location.href = `${apiBase}/datasets/export/split/${dataset.id}`;
+    } catch (err) {
+      console.error(err);
     } finally {
       setExportingId(null);
     }
@@ -730,7 +922,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         onClick={e => handleExportFull(dataset, e)}
                         disabled={exportingId === `full-${dataset.id}` || dataset.sample_count === 0}
                         className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition"
-                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Full ZIP (organized by class)'}
+                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Full ZIP'}
                       >
                         {exportingId === `full-${dataset.id}`
                           ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -742,8 +934,8 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                       <button
                         onClick={e => handleExportSplit(dataset, e)}
                         disabled={exportingId === `split-${dataset.id}` || dataset.sample_count === 0}
-                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-blue-400 hover:text-blue-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition"
-                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Split ZIP (organized by train/val/test/class)'}
+                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition"
+                        title={dataset.sample_count === 0 ? 'No samples to export' : 'Download Split ZIP'}
                       >
                         {exportingId === `split-${dataset.id}`
                           ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -751,64 +943,60 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         Split ZIP
                       </button>
 
-                      {/* Classes */}
+                      <div className="h-4 w-px bg-slate-700 mx-1" />
+
+                      {/* Expand Classes */}
                       <button
                         onClick={() => toggleClasses(dataset.id)}
-                        className={`flex items-center gap-1 px-2 py-1 text-xs rounded-lg transition ${expandedClasses === dataset.id
-                          ? 'text-purple-300 bg-purple-900/30 hover:bg-purple-900/50'
-                          : 'text-purple-400 hover:text-purple-300 hover:bg-slate-700'
-                          }`}
-                        title="Manage classes"
+                        className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`}
+                        title="Quick Classes"
                       >
-                        <Tags className="w-3.5 h-3.5" /> Classes
+                        <Tags className="w-4 h-4" />
                       </button>
 
-                      {/* Upload toggle */}
+                      {/* Expand Upload */}
                       <button
                         onClick={() => toggleUpload(dataset.id)}
-                        className="flex items-center gap-1 px-2 py-1 text-xs text-purple-400 hover:text-purple-300 hover:bg-slate-700 rounded-lg transition"
-                        title="Upload samples"
+                        className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`}
+                        title="Upload Archive Stream"
                       >
-                        <Plus className="w-3.5 h-3.5" />
-                        {expandedUpload === dataset.id
-                          ? <ChevronUp className="w-3.5 h-3.5" />
-                          : <ChevronDown className="w-3.5 h-3.5" />}
+                        <Upload className="w-4 h-4" />
                       </button>
 
-                      {/* Rename */}
+                      {/* Edit Name */}
                       <button
                         onClick={() => { setEditingId(dataset.id); setEditName(dataset.name); }}
-                        className="p-1.5 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition"
+                        className="p-1.5 text-gray-400 hover:text-white transition"
                         title="Rename"
                       >
-                        <Edit2 className="w-3.5 h-3.5" />
+                        <Edit2 className="w-4 h-4" />
                       </button>
 
                       {/* Clear */}
                       <button
                         onClick={e => handleClear(dataset.id, e)}
-                        className="p-1.5 text-yellow-500 hover:text-yellow-400 hover:bg-slate-700 rounded-lg transition"
-                        title="Clear all samples"
+                        className="p-1.5 text-amber-500 hover:text-amber-400 transition"
+                        title="Clear Samples"
                       >
-                        <RefreshCw className="w-3.5 h-3.5" />
+                        <RefreshCw className="w-4 h-4" />
                       </button>
 
                       {/* Delete */}
                       <button
                         onClick={e => handleDelete(dataset.id, e)}
-                        className="p-1.5 text-red-500 hover:text-red-400 hover:bg-slate-700 rounded-lg transition"
-                        title="Delete dataset"
+                        className="p-1.5 text-red-500 hover:text-red-400 transition"
+                        title="Delete Dataset"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
                   </>
                 )}
               </div>
 
-              {/* Collapsible class manager */}
+              {/* Collapsible Section for Classes */}
               {expandedClasses === dataset.id && (
-                <div className="border-t border-slate-700 px-4 py-4 bg-slate-900/40 animate-slideIn">
+                <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                   <ClassManager
                     datasetId={dataset.id}
                     onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }}
@@ -816,16 +1004,25 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                 </div>
               )}
 
-              {/* Collapsible upload panel */}
+              {/* Collapsible Section for Resumable Upload Streamer */}
               {expandedUpload === dataset.id && (
-                <div className="border-t border-slate-700 px-4 py-4 bg-slate-900/40 animate-slideIn">
-                  <DataCollector
+                <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
+                  <ChunkUploadStudio
                     datasetId={dataset.id}
-                    task={task}
-                    onSampleAdded={() => { fetchDatasets(); onDatasetChanged?.(); }}
+                    taskType={task}
+                    onUploadSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }}
                   />
+                  <div className="mt-4 pt-4 border-t border-slate-800">
+                    <p className="text-xs font-semibold text-slate-400 mb-2">Alternative Single-File Record Target:</p>
+                    <DataCollector
+                      datasetId={dataset.id}
+                      task={task}
+                      onSampleAdded={() => { fetchDatasets(); onDatasetChanged?.(); }}
+                    />
+                  </div>
                 </div>
               )}
+
             </div>
           ))}
         </div>
