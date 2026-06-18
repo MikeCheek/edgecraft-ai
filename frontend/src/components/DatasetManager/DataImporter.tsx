@@ -413,14 +413,14 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
                     <p className="text-xs font-medium text-white truncate">{ds.title}</p>
                     <p className="text-[10px] text-gray-500 truncate">{formatBytes(ds.size)} • {(ds.download_count ?? 0).toLocaleString()} downloads • {ds.ref}</p>
                   </div>
-                  // External link button
+                  {/* // External link button */}
                   <a href={`https://www.kaggle.com/datasets/${ds.ref}`} target="_blank" rel="noopener noreferrer"
                     className="shrink-0 px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] rounded-md transition"
                     title="Open on Kaggle">
                     <ExternalLink className="w-3 h-3" />
                   </a>
 
-// Details button (opens a modal/popover showing description, size, date, downloads)
+                  {/* // Details button (opens a modal/popover showing description, size, date, downloads) */}
                   <button onClick={() => setDetailsDataset(ds)}
                     className="shrink-0 px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white text-[10px] rounded-md transition"
                     title="Dataset details">

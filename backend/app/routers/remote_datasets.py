@@ -319,6 +319,9 @@ async def _download_from_url_stream(
 # ---------------------------------------------------------------------------
 # Kaggle: sync thread worker with asyncio queue bridge
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Kaggle: sync thread worker with asyncio queue bridge
+# ---------------------------------------------------------------------------
 def _kaggle_download_thread(
     dataset_ref: str, dataset_id: str, task: str, download_id: str,
     loop: asyncio.AbstractEventLoop, queue: asyncio.Queue
@@ -330,11 +333,26 @@ def _kaggle_download_thread(
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
     try:
-        import kaggle  # type: ignore
-        kaggle.api.authenticate()
+        # 1. FIX: Set credentials explicitly before touching the Kaggle library
+        username = os.environ.get("KAGGLE_USERNAME")
+        key = os.environ.get("KAGGLE_KEY")
+        if not username or not key:
+            raise ValueError("Kaggle credentials not configured in .env")
+
+        os.environ["KAGGLE_USERNAME"] = username
+        os.environ["KAGGLE_KEY"] = key
 
         try:
-            meta = kaggle.api.dataset_metadata(dataset_ref)
+            from kaggle.api.kaggle_api_extended import KaggleApi
+        except ImportError:
+            raise ValueError("kaggle package not installed. Run: pip install kaggle")
+
+        # 2. FIX: Use KaggleApi instance to prevent global state issues
+        api = KaggleApi()
+        api.authenticate()
+
+        try:
+            meta = api.dataset_metadata(dataset_ref)
             total = getattr(meta, "totalBytes", 0) or 0
         except Exception:
             total = 0
@@ -360,7 +378,7 @@ def _kaggle_download_thread(
         poller = threading.Thread(target=_poll, daemon=True)
         poller.start()
         try:
-            kaggle.api.dataset_download_files(dataset_ref, path=download_dir, unzip=False, quiet=True)
+            api.dataset_download_files(dataset_ref, path=download_dir, unzip=False, quiet=True)
         finally:
             stop_polling.set()
             poller.join(timeout=2)
@@ -369,7 +387,7 @@ def _kaggle_download_thread(
             raise ValueError("Download canceled by user")
 
         zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
-        if not zips: raise ValueError("No zip file found")
+        if not zips: raise ValueError("No zip file found in Kaggle download")
         zip_path = os.path.join(download_dir, zips[0])
         
         _active_downloads[download_id]["zip_path"] = zip_path
@@ -389,6 +407,8 @@ def _huggingface_download_thread(
 ):
     """Runs in executor. Pushes (downloaded, 0) progress + sentinel into queue."""
     import threading
+    import zipfile
+    import shutil
 
     def _push(item):
         loop.call_soon_threadsafe(queue.put_nowait, item)
@@ -417,7 +437,13 @@ def _huggingface_download_thread(
         poller = threading.Thread(target=_poll, daemon=True)
         poller.start()
         try:
-            snapshot_download(repo_id=repo_id, local_dir=download_dir, repo_type="dataset")
+            snapshot_download(
+                repo_id=repo_id, 
+                local_dir=download_dir, 
+                repo_type="dataset", 
+                token=os.environ.get("HUGGINGFACE_TOKEN", None), 
+                local_dir_use_symlinks=False
+            )
         finally:
             stop_polling.set()
             poller.join(timeout=2)
@@ -425,10 +451,21 @@ def _huggingface_download_thread(
         if _active_downloads.get(download_id, {}).get("canceled"):
             raise ValueError("Download canceled by user")
 
-        zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
-        if not zips: raise ValueError("No zip file found")
-        zip_path = os.path.join(download_dir, zips[0])
-        
+        # 1. FIX: HF downloads raw files. We need to zip them for `zip_processor.py`.
+        zip_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(download_dir):
+                # Ignore .git and .cache folders that huggingface_hub creates
+                if ".git" in root or ".cache" in root:
+                    continue
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, download_dir)
+                    zf.write(file_path, arcname)
+
+        # 2. FIX: Clean up the raw HuggingFace directory to save space 
+        shutil.rmtree(download_dir, ignore_errors=True)
+
         _active_downloads[download_id]["zip_path"] = zip_path
         tree = scan_zip_tree(zip_path)
         _push(("ready_to_map", tree, download_id))
@@ -436,105 +473,6 @@ def _huggingface_download_thread(
         _push(("error", str(exc)))
     finally:
         _push(_SENTINEL)
-
-
-async def _download_from_kaggle(dataset_ref: str, dataset_id: str, task: str, download_id: str) -> tuple:
-    """Download from Kaggle. Returns (dir_path, count)."""
-    username = os.environ.get("KAGGLE_USERNAME")
-    key = os.environ.get("KAGGLE_KEY")
-    if not username or not key:
-        raise ValueError("Kaggle credentials not configured in .env")
-
-    download_dir = os.path.join(DOWNLOAD_DIR, f"kaggle_{download_id}")
-    os.makedirs(download_dir, exist_ok=True)
-
-    def _download():
-        os.environ["KAGGLE_USERNAME"] = username
-        os.environ["KAGGLE_KEY"] = key
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-        except ImportError:
-            raise ValueError("kaggle package not installed. Run: pip install kaggle")
-        api = KaggleApi()
-        api.authenticate()
-        api.dataset_download_files(dataset_ref, path=download_dir, unzip=False)
-        zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
-        if not zips:
-            raise ValueError("No zip file found after Kaggle download")
-        return os.path.join(download_dir, zips[0])
-
-    if _active_downloads.get(download_id, {}).get("cancelled"):
-        raise ValueError("Download cancelled by user")
-
-    zip_path = await _run_in_executor(_download)
-
-    if _active_downloads.get(download_id, {}).get("cancelled"):
-        raise ValueError("Download cancelled by user")
-
-    count = await _run_in_executor(_process_zip_to_dataset, zip_path, dataset_id, task, download_id)
-    return (download_dir, count)
-
-
-async def _download_from_huggingface(repo_id: str, dataset_id: str, task: str, download_id: str) -> tuple:
-    """Download from HuggingFace. Returns (dir_path, count)."""
-    token = os.environ.get("HUGGINGFACE_TOKEN")
-    download_dir = os.path.join(DOWNLOAD_DIR, f"hf_{download_id}")
-    os.makedirs(download_dir, exist_ok=True)
-
-    def _download():
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError:
-            raise ValueError("huggingface_hub package not installed. Run: pip install huggingface_hub")
-
-        local_path = snapshot_download(
-            repo_id=repo_id,
-            repo_type="dataset",
-            local_dir=download_dir,
-            token=token if token else None,
-        )
-
-        # Look for zip files first
-        zip_files = []
-        for root, dirs, files in os.walk(local_path):
-            for f in files:
-                if f.endswith(".zip"):
-                    zip_files.append(os.path.join(root, f))
-
-        if zip_files:
-            return zip_files[0]
-
-        # No zip — assemble one from valid files
-        temp_zip_path = os.path.join(download_dir, "assembled.zip")
-        found_files = []
-        for root, dirs, files in os.walk(local_path):
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                if ext in VALID_EXTENSIONS:
-                    full_path = os.path.join(root, f)
-                    rel_path = os.path.relpath(full_path, local_path)
-                    found_files.append((full_path, rel_path))
-
-        if not found_files:
-            raise ValueError("No valid image/audio files found in the HuggingFace dataset")
-
-        with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for full_path, rel_path in found_files:
-                zf.write(full_path, rel_path)
-
-        return temp_zip_path
-
-    if _active_downloads.get(download_id, {}).get("cancelled"):
-        raise ValueError("Download cancelled by user")
-
-    zip_path = await _run_in_executor(_download)
-
-    if _active_downloads.get(download_id, {}).get("cancelled"):
-        raise ValueError("Download cancelled by user")
-
-    count = await _run_in_executor(_process_zip_to_dataset, zip_path, dataset_id, task, download_id)
-    return (download_dir, count)
-
 
 # ─── Kaggle Search ────────────────────────────────────────────────────────────
 
@@ -552,7 +490,8 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
             os.environ["KAGGLE_KEY"] = key
             try:
                 from kaggle.api.kaggle_api_extended import KaggleApi
-            except ImportError as ie:                raise ValueError(f"kaggle package not installed: {ie}. Run: pip install kaggle")
+            except ImportError as ie:                
+                raise ValueError(f"kaggle package not installed: {ie}. Run: pip install kaggle")
 
             api = KaggleApi()
             api.authenticate()

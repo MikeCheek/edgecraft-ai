@@ -5,7 +5,6 @@ import time
 import random
 import contextlib
 from typing import Dict, List, Optional
-from app.utils.profiler import profile_sync
 
 class DataManager:
     """Persistent data management for datasets"""
@@ -168,7 +167,6 @@ class DataManager:
         self._save_metadata()
         return sample_id
     
-    @profile_sync
     def bulk_add_samples(
         self, dataset_id: str, task: str, items: List[dict]
     ) -> List[str]:

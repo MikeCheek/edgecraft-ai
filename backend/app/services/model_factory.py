@@ -11,7 +11,7 @@ class ModelFactory:
     LLM-advisor suggestions can actually be applied without editing code.
     """
 
-    # ------------------------------------------------------------------ image
+    # ─── Image Models ─────────────────────────────────────────────────────────
 
     @staticmethod
     def create_image_classification_model(
@@ -21,9 +21,12 @@ class ModelFactory:
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
         trainable_layers: int = 0,  # 0 = unfreeze all, >0 = unfreeze last N layers
-        augmentation: dict = {},
+        augmentation: dict = None,
     ) -> keras.Model:
         """Create image classification model with optional regularisation."""
+        if augmentation is None:
+            augmentation = {}
+            
         # 1. Prepare Data Augmentation Block (Runs on GPU during training, zero overhead on Edge)
         aug_layers = []
         if augmentation:
@@ -114,7 +117,7 @@ class ModelFactory:
 
         return model
 
-    # ------------------------------------------------------------------- VWW
+    # ─── Visual Wake Words ────────────────────────────────────────────────────
 
     @staticmethod
     def create_visual_wake_words_model(
@@ -140,7 +143,7 @@ class ModelFactory:
         ])
         return model
 
-    # ------------------------------------------------------------------ audio
+    # ─── Audio Models ─────────────────────────────────────────────────────────
 
     @staticmethod
     def create_audio_classification_model(
@@ -223,7 +226,7 @@ class ModelFactory:
             ])
         return model
 
-    # ----------------------------------------------------------------- router
+    # ─── Router ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def create_model(
@@ -244,26 +247,26 @@ class ModelFactory:
             "IMAGE_CLASSIFICATION": lambda: ModelFactory.create_image_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
+                trainable_layers=trainable_layers, augmentation=augmentation,
             ),
             "OBJECT_DETECTION": lambda: ModelFactory.create_image_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
+                trainable_layers=trainable_layers, augmentation=augmentation,
             ),
             "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(
                 input_shape=input_shape, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
+                # Removed trainable_layers and augmentation to prevent TypeErrors
             ),
             "KEYWORD_SPOTTING": lambda: ModelFactory.create_keyword_spotting_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
+                # Removed trainable_layers and augmentation to prevent TypeErrors
             ),
             "AUDIO_CLASSIFICATION": lambda: ModelFactory.create_audio_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
+                # Removed trainable_layers and augmentation to prevent TypeErrors
             ),
         }
         if task not in factories:

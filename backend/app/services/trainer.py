@@ -286,10 +286,11 @@ class Trainer:
         return train_ds, val_ds
 
     def _build_audio_pipeline(
-        self, train_dir: str, val_dir: str, batch_size: int, task: str, class_names: list
+        self, train_dir: str, val_dir: str, batch_size: int, task: str, class_names: list, input_shape: tuple
     ):
         """Audio is small enough to load fully into RAM; still prefetch."""
         class_map = {name: idx for idx, name in enumerate(class_names)}
+        expected_features, max_time_steps = input_shape
 
         def _load(split_dir):
             features, labels = [], []
@@ -301,17 +302,40 @@ class Trainer:
                     if file.endswith((".wav", ".mp3")):
                         with open(os.path.join(class_dir, file), "rb") as f:
                             audio_data = f.read()
+                        
                         mfcc = DataProcessor.preprocess_audio(audio_data, task)
+                        
+                        # --- START AUDIO SHAPE FIX ---
+                        # mfcc shape is typically (num_features, time_steps) e.g., (64, T)
+                        current_features, current_time_steps = mfcc.shape
+                        
+                        if current_time_steps > max_time_steps:
+                            # Truncate: slice the time dimension down to max_time_steps
+                            mfcc = mfcc[:, :max_time_steps]
+                        elif current_time_steps < max_time_steps:
+                            # Pad: add zeros to the end of the time axis (axis 1)
+                            pad_width = max_time_steps - current_time_steps
+                            mfcc = np.pad(mfcc, pad_width=((0, 0), (0, pad_width)), mode='constant')
+                            
+                        # Double-check the feature dimension matches the expectation to avoid weird crashes
+                        if current_features != expected_features:
+                            print(f"Skipping {file}: Expected {expected_features} features, got {current_features}")
+                            continue
+                        # --- END AUDIO SHAPE FIX ---
+
                         features.append(np.expand_dims(mfcc, axis=-1))
                         labels.append(class_map[class_name])
+                        
             return np.array(features), np.array(labels)
 
         X_train, y_train = _load(train_dir)
         X_val, y_val = _load(val_dir)
 
-        train_idx = np.arange(len(X_train))
-        np.random.shuffle(train_idx)
-        X_train, y_train = X_train[train_idx], y_train[train_idx]
+        # Check if arrays are empty before shuffling to prevent exceptions
+        if len(X_train) > 0:
+            train_idx = np.arange(len(X_train))
+            np.random.shuffle(train_idx)
+            X_train, y_train = X_train[train_idx], y_train[train_idx]
 
         train_ds = (
             tf.data.Dataset.from_tensor_slices((X_train, y_train))
@@ -353,13 +377,20 @@ class Trainer:
                 model_input_shape = tuple(session["input_shape"])
 
             elif task in ["AUDIO_CLASSIFICATION", "KEYWORD_SPOTTING"]:
-                train_ds, val_ds = self._build_audio_pipeline(
-                    train_dir, val_dir, session["batch_size"], task, classes
-                )
                 audio_params = DataProcessor.AUDIO_PARAMS.get(
                     task, DataProcessor.AUDIO_PARAMS["KEYWORD_SPOTTING"]
                 )
-                model_input_shape = (audio_params["n_mfcc"], 101)
+                
+                # Fetch shape from session, fallback to audio defaults if missing
+                if session.get("input_shape"):
+                    model_input_shape = tuple(session["input_shape"])
+                else:
+                    model_input_shape = (audio_params["n_mfcc"], 101)
+                
+                # Pass the exact model_input_shape to the pipeline builder
+                train_ds, val_ds = self._build_audio_pipeline(
+                    train_dir, val_dir, session["batch_size"], task, classes, model_input_shape
+                )
             else:
                 raise ValueError(f"Unknown task: {task}")
 
