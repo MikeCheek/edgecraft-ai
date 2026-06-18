@@ -10,6 +10,7 @@ interface AppState {
   datasetStats: DatasetStatistics;
   isLoading: boolean;
   error?: string;
+  llmModel: string;
 }
 
 type Action =
@@ -21,9 +22,10 @@ type Action =
   | { type: 'UPDATE_DATASET_STATS'; payload: DatasetStatistics }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload?: string }
-  | { type: 'RESET' };
+  | { type: 'SET_LLM_MODEL'; payload: string }
+  | { type: 'RESET' }
 
-const initialState: AppState = { trainedModels: [], datasetStats: { total_samples: 0, by_task: {}, by_label: {} }, isLoading: false };
+const initialState: AppState = { trainedModels: [], datasetStats: { total_samples: 0, by_task: {}, by_label: {} }, isLoading: false, llmModel: 'openrouter/free' };
 
 function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -35,6 +37,7 @@ function appReducer(state: AppState, action: Action): AppState {
     case 'UPDATE_DATASET_STATS': return { ...state, datasetStats: action.payload };
     case 'SET_LOADING': return { ...state, isLoading: action.payload };
     case 'SET_ERROR': return { ...state, error: action.payload };
+    case 'SET_LLM_MODEL': return { ...state, llmModel: action.payload };
     case 'RESET': return initialState;
     default: return state;
   }

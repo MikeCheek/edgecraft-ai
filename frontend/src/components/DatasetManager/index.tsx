@@ -197,7 +197,16 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                   ) : (
                     <>
                       <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-white truncate">{dataset.name}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold text-white truncate">{dataset.name}</p>
+
+                          {/* Badge indicating the dataset was originally created under a different compatible task */}
+                          {dataset.task !== task && (
+                            <span className="px-2 py-0.5 text-[9px] uppercase tracking-wider font-semibold bg-slate-700/50 text-gray-400 rounded-full border border-slate-600 truncate max-w-[120px]" title={`Original Task: ${dataset.task.replace(/_/g, ' ')}`}>
+                              {dataset.task.replace(/_/g, ' ')}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-gray-400">{dataset.sample_count} samples</p>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">

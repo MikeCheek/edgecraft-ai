@@ -406,14 +406,12 @@ class APIClient {
   async getLLMSuggestions(
     trainingId: string,
     provider: 'ollama' | 'openrouter',
-    modelName: string,
-    apiKey?: string
+    modelName: string
   ) {
     return this.client.post<ApiResponse<any>>('/optimization/llm-suggest', {
       training_id: trainingId,
       provider,
-      model_name: modelName,
-      api_key: apiKey
+      model_name: modelName
     })
   }
 

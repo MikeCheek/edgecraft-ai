@@ -29,14 +29,14 @@ class BoardEvaluationRequest(BaseModel):
 
 class LLMSuggestRequest(BaseModel):
     training_id: str
-    provider: Optional[str] = "ollama"
-    model_name: Optional[str] = "llama3"
-    api_key: Optional[str] = None
+    provider: str = "openrouter"
+    model_name: str = "openrouter/free"
 
 class LLMOptimizeRequest(BaseModel):
     optimization_id: str
     board: str
-    use_local_llm: bool = False     # opt-in to real LLM
+    provider: str = "openrouter"
+    model_name: str = "openrouter/free"
 # -----------------------
 
 @router.post("/quantize")
@@ -128,13 +128,12 @@ async def get_llm_suggestions(request: LLMSuggestRequest):
         
         advisor = LLMAdvisor()
         
-        print(f"LLM Suggestion Request: training_id={request.training_id}, provider={request.provider}, model_name={request.model_name}, api_key={'***' if request.api_key else None}")
+        print(f"LLM Suggestion Request: training_id={request.training_id}, provider={request.provider}, model_name={request.model_name}")
         
         suggestions = await advisor.generate_suggestions(
             context=session_context,
             provider=request.provider,
             model_name=request.model_name,
-            api_key=request.api_key
         )
         return {"status": "success", "suggestions": suggestions}
     except Exception as e:

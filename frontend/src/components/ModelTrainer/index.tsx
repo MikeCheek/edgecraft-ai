@@ -63,6 +63,15 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [status, setStatus] = useState<TrainingStatus | null>(null);
   const [isStarting, setIsStarting] = useState(false);
 
+  // Advanced options
+  const [trainableLayers, setTrainableLayers] = useState(0); // 0 = All
+  const [freezeEpochs, setFreezeEpochs] = useState(0);
+  const [augmentation, setAugmentation] = useState({
+    horizontal_flip: false,
+    random_rotation: 0,
+    random_crop: false
+  });
+
   // Past trainings
   const [pastSessions, setPastSessions] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
@@ -177,6 +186,13 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         early_stopping_monitor: esMonitor,
         dropout_rate: dropoutRate,
         l2_reg: l2Reg,
+        trainable_layers: trainableLayers,
+        freeze_epochs: freezeEpochs,
+        augmentation: {
+          horizontal_flip: augmentation.horizontal_flip,
+          random_rotation: augmentation.random_rotation,
+          random_crop: augmentation.random_crop
+        }
       })
     );
     setIsStarting(false);
@@ -462,6 +478,43 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Advanced Regularization & Fine-Tuning */}
+            <div className="grid grid-cols-2 gap-4 mt-4">
+              <div>
+                <label className="block text-sm text-gray-300">Dropout Rate</label>
+                <input type="number" step="0.1" value={dropoutRate} onChange={e => setDropoutRate(parseFloat(e.target.value))} className="w-full bg-slate-800 rounded p-2" />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300">L2 Regularization</label>
+                <input type="number" step="0.0001" value={l2Reg} onChange={e => setL2Reg(parseFloat(e.target.value))} className="w-full bg-slate-800 rounded p-2" />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300">Trainable Layers (0=All)</label>
+                <input type="number" value={trainableLayers} onChange={e => setTrainableLayers(parseInt(e.target.value))} className="w-full bg-slate-800 rounded p-2" />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-300">Freeze Encoder Epochs</label>
+                <input type="number" value={freezeEpochs} onChange={e => setFreezeEpochs(parseInt(e.target.value))} className="w-full bg-slate-800 rounded p-2" />
+              </div>
+            </div>
+
+            {/* Augmentation Toggles */}
+            <div className="mt-4 p-4 border border-slate-700 rounded-lg">
+              <h4 className="text-sm font-bold text-gray-400 mb-2">Data Augmentation</h4>
+              <label className="flex items-center gap-2 text-sm text-gray-300">
+                <input type="checkbox" checked={augmentation.horizontal_flip} onChange={e => setAugmentation({ ...augmentation, horizontal_flip: e.target.checked })} />
+                Horizontal Flip
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-300 mt-2">
+                <input type="checkbox" checked={augmentation.random_crop} onChange={e => setAugmentation({ ...augmentation, random_crop: e.target.checked })} />
+                Random Crop (Zoom)
+              </label>
+              <div className="mt-2">
+                <label className="block text-sm text-gray-300">Random Rotation (%)</label>
+                <input type="number" step="0.1" value={augmentation.random_rotation} onChange={e => setAugmentation({ ...augmentation, random_rotation: parseFloat(e.target.value) })} className="w-full bg-slate-800 rounded p-2" />
+              </div>
             </div>
 
             {/* -- Input Shape -- */}

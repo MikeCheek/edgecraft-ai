@@ -20,6 +20,12 @@ class TrainingRequest(BaseModel):
     early_stopping: bool = False
     early_stopping_patience: int = 5
     early_stopping_monitor: str = "val_loss"
+    
+    dropout_rate: float = 0.0
+    l2_reg: float = 0.0
+    trainable_layers: int = 0  # 0 = unfreeze all, >0 = unfreeze last N layers
+    freeze_encoder_epochs: int = 0
+    augmentation: dict = {}
 
 @router.post("/start")
 async def start_training(request: TrainingRequest, background_tasks: BackgroundTasks):

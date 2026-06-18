@@ -1,9 +1,23 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { DataCollector, ModelTrainer, OptimizationStudio, BoardAdvisor, LLMAdvisor, DashboardOverview, DatasetManager } from './components';
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
 import { TinyMLTask, TargetBoard } from './types';
-import { BarChart3, Code2, Zap, LayoutDashboard, Database, BrainCircuit, Cpu, Settings2, Activity, Lightbulb } from 'lucide-react';
+import {
+  BarChart3,
+  Code2,
+  Zap,
+  LayoutDashboard,
+  Database,
+  BrainCircuit,
+  Cpu,
+  Settings2,
+  Activity,
+  Lightbulb,
+  ChevronDown,
+  Check,
+  CpuIcon
+} from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 
 export default function App() {
@@ -14,6 +28,28 @@ export default function App() {
   const [selectedTask, setSelectedTask] = useState<TinyMLTask>('IMAGE_CLASSIFICATION');
   const [selectedBoard, setSelectedBoard] = useState<TargetBoard>('ESP32_S3_N16R8');
   const [activeTab, setActiveTab] = useState<'dashboard' | 'collect' | 'train' | 'optimize' | 'deploy'>('dashboard');
+
+  // Local UI State for the custom Global Config dropdown
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const openRouterModels = [
+    { id: 'openrouter/free', label: 'OpenRouter Free', specs: 'Automatic selection' },
+    { id: 'google/gemini-2.0-flash-lite-preview-02-05:free', label: 'Gemini Flash Lite (Free)', specs: 'Google - Fast & Accurate' },
+    { id: 'meta-llama/llama-3.1-8b-instruct:free', label: 'Llama 3.1 8B (Free)', specs: 'Meta - Open Source Core' },
+    { id: 'qwen/qwen-2.5-7b-instruct:free', label: 'Qwen 2.5 7B (Free)', specs: 'Alibaba - Strong coding/logic' },
+  ];
+
+  // Close dropdown if user clicks outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsConfigOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const fetchStatsAndModels = async () => {
     const rawStats = await request(() => apiClient.getDatasetStats());
@@ -28,11 +64,33 @@ export default function App() {
 
   useEffect(() => { if (isHealthy) fetchStatsAndModels(); }, [isHealthy]);
 
-  const handleTaskSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const task = e.target.value as TinyMLTask;
+  const handleTaskChange = (task: TinyMLTask) => {
     setSelectedTask(task);
     dispatch({ type: 'SET_TASK', payload: task });
   };
+
+  const handleBoardChange = (board: TargetBoard) => {
+    setSelectedBoard(board);
+    dispatch({ type: 'SET_BOARD', payload: board });
+  };
+
+  // Human readable lookups for modern item formatting
+  const taskOptions: { id: TinyMLTask; label: string; desc: string }[] = [
+    { id: 'IMAGE_CLASSIFICATION', label: 'Image Classification', desc: 'Categorize whole images' },
+    { id: 'OBJECT_DETECTION', label: 'Object Detection', desc: 'Locate and classify items' },
+    { id: 'VISUAL_WAKE_WORDS', label: 'Visual Wake Words', desc: 'Binary presence detector (96x96)' },
+    { id: 'KEYWORD_SPOTTING', label: 'Keyword Spotting', desc: 'Detect spoken wake words' },
+    { id: 'AUDIO_CLASSIFICATION', label: 'Audio Classification', desc: 'Identify continuous audio streams' },
+  ];
+
+  const boardOptions: { id: TargetBoard; label: string; specs: string }[] = [
+    { id: 'ESP32_S3_N16R8', label: 'ESP32-S3 (N16R8)', specs: 'Xtensa LX7, 16MB Flash, 8MB PSRAM' },
+    { id: 'RASPBERRY_PI_PICO_2_W', label: 'Raspberry Pi Pico 2 W', specs: 'RP2350, 520KB SRAM, Wireless' },
+    { id: 'ARDUINO_NANO_33_BLE', label: 'Arduino Nano 33 BLE', specs: 'nRF52840, 256KB RAM, IMU' },
+  ];
+
+  const currentTaskLabel = taskOptions.find(t => t.id === selectedTask)?.label || selectedTask;
+  const currentBoardLabel = boardOptions.find(b => b.id === selectedBoard)?.label || selectedBoard;
 
   return (
     <div className="flex h-screen bg-slate-950 text-gray-100 overflow-hidden">
@@ -60,7 +118,8 @@ export default function App() {
       </aside>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-10">
+        {/* Header containing custom Global Config */}
+        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-50">
 
           {/* Health Status Indicator */}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full mr-4">
@@ -78,26 +137,135 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-6 flex-1 justify-end">
-            <div className="flex items-center gap-2 text-sm"><Settings2 className="w-4 h-4 text-gray-500" /><span className="text-gray-400">Global Config:</span></div>
-            <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5">
-              <BarChart3 className="w-4 h-4 text-purple-400" />
-              <select value={selectedTask} onChange={handleTaskSelect} className="bg-transparent text-sm text-white focus:outline-none cursor-pointer">
-                <option value="IMAGE_CLASSIFICATION">Image Classification</option>
-                <option value="OBJECT_DETECTION">Object Detection</option>
-                <option value="VISUAL_WAKE_WORDS">Visual Wake Words</option>
-                <option value="KEYWORD_SPOTTING">Keyword Spotting</option>
-                <option value="AUDIO_CLASSIFICATION">Audio Classification</option>
-              </select>
-            </div>
-            <div className="flex items-center gap-2 bg-slate-800/50 border border-slate-700 rounded-lg px-3 py-1.5">
-              <Zap className="w-4 h-4 text-cyan-400" />
-              <select value={selectedBoard} onChange={(e) => { setSelectedBoard(e.target.value as TargetBoard); dispatch({ type: 'SET_BOARD', payload: e.target.value as TargetBoard }); }} className="bg-transparent text-sm text-white focus:outline-none cursor-pointer">
-                <option value="ESP32_S3_N16R8">ESP32-S3 (N16R8)</option>
-                <option value="RASPBERRY_PI_PICO_2_W">Raspberry Pi Pico 2 W</option>
-                <option value="ARDUINO_NANO_33_BLE">Arduino Nano 33 BLE</option>
-              </select>
-            </div>
+          {/* Redesigned Premium Global Configuration Menu */}
+          <div className="relative" ref={dropdownRef}>
+            <button
+              onClick={() => setIsConfigOpen(!isConfigOpen)}
+              className={`flex items-center gap-3 bg-slate-900 border px-4 py-1.5 rounded-xl text-sm transition-all duration-200 shadow-md ${isConfigOpen
+                ? 'border-purple-500 ring-2 ring-purple-500/10 text-white'
+                : 'border-slate-700 hover:border-slate-600 text-gray-300 hover:text-white'
+                }`}
+            >
+              <Settings2 className={`w-4 h-4 ${isConfigOpen ? 'text-purple-400 animate-spin-slow' : 'text-gray-400'}`} />
+              <div className="flex items-center gap-2 divide-x divide-slate-700 text-xs">
+                <span className="text-gray-400 font-medium">Global Config:</span>
+                <span className="pl-2 font-semibold text-purple-400">{currentTaskLabel}</span>
+                <span className="pl-2 font-semibold text-cyan-400">{currentBoardLabel}</span>
+              </div>
+              <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${isConfigOpen ? 'rotate-180' : ''}`} />
+            </button>
+
+            {/* Floating Config Dropdown Panel */}
+            {isConfigOpen && (
+              <div className="absolute right-0 mt-2 w-[480px] bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 flex flex-col gap-5 animate-slideIn z-50 backdrop-blur-xl bg-slate-900/95">
+
+                {/* Section 1: ML Pipeline Task Selection */}
+                <div>
+                  <div className="flex items-center gap-2 mb-3 px-1">
+                    <BarChart3 className="w-4 h-4 text-purple-400" />
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Active Studio Pipeline</h4>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5 max-h-[180px] overflow-y-auto custom-scrollbar pr-1">
+                    {taskOptions.map((task) => {
+                      const isSelected = selectedTask === task.id;
+                      return (
+                        <button
+                          key={task.id}
+                          onClick={() => { handleTaskChange(task.id); }}
+                          className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between group ${isSelected
+                            ? 'bg-purple-600/10 border-purple-500/40 text-purple-300'
+                            : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                            }`}
+                        >
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`font-semibold ${isSelected ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                              {task.label}
+                            </span>
+                            <span className="text-[10px] text-slate-500 group-hover:text-slate-400">{task.desc}</span>
+                          </div>
+                          {isSelected && <Check className="w-4 h-4 text-purple-400 shrink-0 ml-2" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Divider Line */}
+                <div className="h-px bg-slate-800" />
+
+                {/* Section 2: Target Hardware Device Selection */}
+                <div>
+                  <div className="flex items-center gap-2 mb-3 px-1">
+                    <Zap className="w-4 h-4 text-cyan-400" />
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Target Cross-Compilation Board</h4>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {boardOptions.map((board) => {
+                      const isSelected = selectedBoard === board.id;
+                      return (
+                        <button
+                          key={board.id}
+                          onClick={() => { handleBoardChange(board.id); }}
+                          className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between group ${isSelected
+                            ? 'bg-cyan-600/10 border-cyan-500/40 text-cyan-300'
+                            : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                            }`}
+                        >
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`font-semibold ${isSelected ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                              {board.label}
+                            </span>
+                            <span className="text-[10px] text-slate-500 group-hover:text-slate-400 font-mono">{board.specs}</span>
+                          </div>
+                          {isSelected && <Check className="w-4 h-4 text-cyan-400 shrink-0 ml-2" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Divider Line */}
+                <div className="h-px bg-slate-800" />
+
+                {/* Section 3: AI Assistant Config */}
+                <div>
+                  <div className="flex items-center gap-2 mb-3 px-1">
+                    <Lightbulb className="w-4 h-4 text-yellow-400" />
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Studio Assistant (OpenRouter)</h4>
+                  </div>
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {openRouterModels.map((model) => {
+                      const isSelected = state.llmModel === model.id;
+                      return (
+                        <button
+                          key={model.id}
+                          onClick={() => dispatch({ type: 'SET_LLM_MODEL', payload: model.id })}
+                          className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between group ${isSelected
+                            ? 'bg-yellow-600/10 border-yellow-500/40 text-yellow-300'
+                            : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                            }`}
+                        >
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`font-semibold ${isSelected ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                              {model.label}
+                            </span>
+                            <span className="text-[10px] text-slate-500 group-hover:text-slate-400 font-mono">{model.specs}</span>
+                          </div>
+                          {isSelected && <Check className="w-4 h-4 text-yellow-400 shrink-0 ml-2" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Dropdown Micro Footer info */}
+                <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800 flex items-center gap-2 text-[10px] text-slate-500">
+                  <CpuIcon size={12} className="text-slate-600" />
+                  <span>Modifying variables will dynamically recalibrate processing pipelines.</span>
+                </div>
+
+              </div>
+            )}
           </div>
         </header>
 
@@ -114,7 +282,6 @@ export default function App() {
 
             {activeTab === 'train' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
-                {/* Dynamically shift columns so config dominates the screen until training finishes */}
                 <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
                   <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
                     <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
@@ -122,7 +289,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Only reveal the LLM Card when training hits 'completed' */}
                 {state.currentTraining?.status === 'completed' && (
                   <div className="space-y-6 animate-slideIn">
                     <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
@@ -130,7 +296,7 @@ export default function App() {
                       <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
                         <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
                       </h3>
-                      <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics, our AI provides actionable insights for deployment or further parameter tuning.</p>
+                      <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
                       <LLMAdvisor
                         trainingId={state.currentTraining?.id}
                         metrics={state.currentTraining?.metrics}

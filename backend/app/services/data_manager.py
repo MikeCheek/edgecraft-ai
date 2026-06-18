@@ -27,6 +27,17 @@ class DataManager:
         self.dataset_labels: Dict[str, List[str]] = {}
 
         self._load_from_disk()
+        
+    def _get_compatible_tasks(self, task: str) -> set:
+        """Group tasks by their underlying data modality."""
+        image_tasks = {"IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"}
+        audio_tasks = {"KEYWORD_SPOTTING", "AUDIO_CLASSIFICATION"}
+
+        if task in image_tasks:
+            return image_tasks
+        if task in audio_tasks:
+            return audio_tasks
+        return {task}
 
     # ------------------------------------------------------------------
     # Persistence
@@ -117,8 +128,12 @@ class DataManager:
     def get_datasets(self, task: Optional[str] = None) -> List[dict]:
         datasets = list(self.datasets.values())
         if task:
-            datasets = [d for d in datasets if d["task"] == task]
+            compatible_tasks = self._get_compatible_tasks(task)
+            datasets = [d for d in datasets if d["task"] in compatible_tasks]
         return datasets
+    
+    def get_dataset(self, dataset_id: str) -> Optional[dict]:
+        return self.datasets.get(dataset_id)
 
     # ------------------------------------------------------------------
     # Samples & Splits

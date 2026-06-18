@@ -20,23 +20,48 @@ class ModelFactory:
         base_model_name: str = "MobileNetV2",
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
+        trainable_layers: int = 0,  # 0 = unfreeze all, >0 = unfreeze last N layers
+        augmentation: dict = {},
     ) -> keras.Model:
         """Create image classification model with optional regularisation."""
-        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
+        # 1. Prepare Data Augmentation Block (Runs on GPU during training, zero overhead on Edge)
+        aug_layers = []
+        if augmentation:
+            if augmentation.get("horizontal_flip"):
+                aug_layers.append(layers.RandomFlip("horizontal"))
+            if augmentation.get("random_rotation"):
+                # 0.2 means ±20% of 2Pi
+                aug_layers.append(layers.RandomRotation(augmentation.get("random_rotation")))
+            if augmentation.get("random_crop"):
+                aug_layers.append(layers.RandomZoom(0.2)) 
+        
+        data_augmentation = keras.Sequential(aug_layers, name="data_augmentation")
 
-        if base_model_name == "MobileNetV2":
-            base = keras.applications.MobileNetV2(
-                input_shape=input_shape,
-                include_top=False,
-                weights="imagenet",
-            )
-            base.trainable = False
+        # 2. Prepare Regularization
+        reg = keras.regularizers.l2(l2_reg) if l2_reg > 0 else None
+
+        # 3. Build Model Pipeline
+        if base_model_name in ["MobileNetV2", "MobileNetV3Small"]:
+            if base_model_name == "MobileNetV2":
+                base = keras.applications.MobileNetV2(input_shape=input_shape, include_top=False, weights="imagenet")
+            else:
+                base = keras.applications.MobileNetV3Small(input_shape=input_shape, include_top=False, weights="imagenet")
+            
+            # Apply Trainable Layers Logic
+            if trainable_layers > 0:
+                base.trainable = True
+                for layer in base.layers[:-trainable_layers]:
+                    layer.trainable = False
+            else:
+                base.trainable = True
+
             model = keras.Sequential([
+                keras.Input(shape=input_shape),
+                data_augmentation,
                 base,
                 layers.GlobalAveragePooling2D(),
-                layers.Dense(256, activation="relu", kernel_regularizer=reg),
                 layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
+                layers.Dense(num_classes, activation="softmax", kernel_regularizer=reg)
             ])
 
         elif base_model_name == "EfficientNet":
@@ -47,6 +72,7 @@ class ModelFactory:
             )
             base.trainable = False
             model = keras.Sequential([
+                data_augmentation,
                 base,
                 layers.GlobalAveragePooling2D(),
                 layers.Dense(256, activation="relu", kernel_regularizer=reg),
@@ -62,24 +88,10 @@ class ModelFactory:
             )
             base.trainable = False
             model = keras.Sequential([
+                data_augmentation,
                 base,
                 layers.GlobalAveragePooling2D(),
                 layers.Dense(256, activation="relu", kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-            
-        elif base_model_name == "MobileNetV3Small":
-            base = keras.applications.MobileNetV3Small(
-                input_shape=input_shape,
-                include_top=False,
-                weights="imagenet",
-            )
-            base.trainable = False
-            model = keras.Sequential([
-                base,
-                layers.GlobalAveragePooling2D(),
-                layers.Dense(128, activation="relu", kernel_regularizer=reg),
                 layers.Dropout(dropout_rate),
                 layers.Dense(num_classes, activation="softmax"),
             ])
@@ -87,6 +99,7 @@ class ModelFactory:
         else:
             # Custom3LayerCNN - ultra-low memory
             model = keras.Sequential([
+                data_augmentation,
                 layers.Conv2D(16, 3, activation="relu", input_shape=input_shape,
                               kernel_regularizer=reg),
                 layers.MaxPooling2D(2),
@@ -220,27 +233,37 @@ class ModelFactory:
         input_shape: tuple = (224, 224, 3),
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
+        trainable_layers: int = 0,
+        augmentation: dict = None,
     ) -> keras.Model:
+        if augmentation is None:
+            augmentation = {}
+            
         """Dispatch to the correct model builder."""
         factories = {
             "IMAGE_CLASSIFICATION": lambda: ModelFactory.create_image_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
+                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
             ),
             "OBJECT_DETECTION": lambda: ModelFactory.create_image_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
+                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
             ),
             "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(
                 input_shape=input_shape, dropout_rate=dropout_rate, l2_reg=l2_reg,
+                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
             ),
             "KEYWORD_SPOTTING": lambda: ModelFactory.create_keyword_spotting_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
+                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
             ),
             "AUDIO_CLASSIFICATION": lambda: ModelFactory.create_audio_classification_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
+                trainable_layers=trainable_layers, augmentation=augmentation, # <-- Passed down
             ),
         }
         if task not in factories:

@@ -104,7 +104,13 @@ class Trainer:
         early_stopping_monitor: str = "val_loss",
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
+        trainable_layers: int = 0,         
+        freeze_encoder_epochs: int = 0,    
+        augmentation: dict = None,         
     ):
+        if augmentation is None:
+            augmentation = {}
+            
         session_id = str(uuid.uuid4())
         self.training_sessions[session_id] = {
             "id": session_id,
@@ -129,6 +135,10 @@ class Trainer:
             "early_stopping": early_stopping,
             "early_stopping_patience": early_stopping_patience,
             "early_stopping_monitor": early_stopping_monitor,
+            
+            "trainable_layers": trainable_layers,           
+            "freeze_encoder_epochs": freeze_encoder_epochs, 
+            "augmentation": augmentation,                   
         }
         self.active_training[session_id] = False
         self._save_to_disk()
@@ -360,6 +370,8 @@ class Trainer:
                 input_shape=model_input_shape,
                 dropout_rate=session.get("dropout_rate", 0.5),
                 l2_reg=session.get("l2_reg", 0.0),
+                trainable_layers=session.get("trainable_layers", 0), 
+                augmentation=session.get("augmentation", {}),
             )
 
             # When mixed_precision is active the final Dense softmax layer must
@@ -390,12 +402,47 @@ class Trainer:
                 )
                 callbacks.append(es)
 
-            model.fit(
-                train_ds,
-                validation_data=val_ds,
-                epochs=session["total_epochs"],
-                callbacks=callbacks,
-            )
+            freeze_epochs = session.get("freeze_encoder_epochs", 0)
+            trainable_layers = session.get("trainable_layers", 0)
+            total_epochs = session.get("epochs", 50)
+            
+            # Assume base model is at index 1 (Index 0 is the augmentation block)
+            base_model_layer = model.layers[1] if len(model.layers) > 1 else None
+
+            if freeze_epochs > 0 and base_model_layer:
+                # --- PHASE 1: Train Classification Head Only ---
+                base_model_layer.trainable = False
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"]),
+                    loss=loss_fn,
+                    metrics=['accuracy']
+                )
+                model.fit(train_ds, validation_data=val_ds, epochs=freeze_epochs, callbacks=callbacks)
+
+                # --- PHASE 2: Fine-Tune Backbone ---
+                base_model_layer.trainable = True
+                if trainable_layers > 0:
+                    for layer in base_model_layer.layers[:-trainable_layers]:
+                        layer.trainable = False
+                        
+                # Re-compile with a smaller learning rate (e.g. 10x smaller) to prevent wrecking pre-trained weights
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"] * 0.1),
+                    loss=loss_fn,
+                    metrics=['accuracy']
+                )
+                remaining_epochs = total_epochs - freeze_epochs
+                if remaining_epochs > 0:
+                    model.fit(train_ds, validation_data=val_ds, epochs=remaining_epochs, callbacks=callbacks)
+                    
+            else:
+                # Standard Single-Phase Training
+                model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"]),
+                    loss=loss_fn,
+                    metrics=['accuracy']
+                )
+                model.fit(train_ds, validation_data=val_ds, epochs=total_epochs, callbacks=callbacks)
 
             # Save in modern .keras format (replaces deprecated .h5)
             save_path = os.path.join(self.storage_dir, f"{training_id}.keras")
