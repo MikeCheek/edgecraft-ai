@@ -24,7 +24,7 @@ QuantizationMethod = Literal[
     "FLOAT16_QUANTIZATION",
     "PRUNING",
     "WEIGHT_CLUSTERING",
-    "DYNAMIC_QUANTIZATION" 
+    "DYNAMIC_QUANTIZATION"
 ]
 
 DatasetSplit = Literal["train", "val", "test", "unassigned"]
@@ -55,7 +55,6 @@ class TrainingConfig(BaseModel):
     learning_rate: float = 0.001
     base_model: str = "MobileNetV2"
     task: TaskType
-    validation_split: float = 0.2
 
 class ModelMetadata(BaseModel):
     """Model metadata for trained models"""

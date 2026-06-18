@@ -98,7 +98,6 @@ class Trainer:
         batch_size,
         learning_rate,
         base_model,
-        validation_split,
         input_shape,
         early_stopping: bool = False,
         early_stopping_patience: int = 5,
@@ -118,7 +117,6 @@ class Trainer:
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "base_model": base_model,
-            "validation_split": validation_split,
             "input_shape": input_shape,
             "dropout_rate": dropout_rate,
             "l2_reg": l2_reg,
@@ -136,44 +134,96 @@ class Trainer:
         self._save_to_disk()
         return session_id
 
-    def _export_dataset_to_temp_dir(self, dataset_id: str) -> str:
+    def _export_dataset_to_temp_dir(self, dataset_id: str, task: str) -> tuple:
+        """Export samples into temp_dir/train/<label>/... and temp_dir/val/<label>/...
+        using the dataset's precomputed split (samples NOT marked train/val, i.e.
+        test/unassigned, are skipped here — only train+val feed model.fit)."""
         from app.services.shared_state import data_manager
+        from PIL import Image
+        import io
 
         temp_dir = os.path.join(self.storage_dir, f"temp_{dataset_id}")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
-        os.makedirs(temp_dir)
+        train_dir = os.path.join(temp_dir, "train")
+        val_dir = os.path.join(temp_dir, "val")
+        os.makedirs(train_dir)
+        os.makedirs(val_dir)
 
         samples = data_manager.get_samples(dataset_id)
-        name_counters: Dict[str, Dict[str, int]] = {}
+        labels = data_manager.get_dataset_labels(dataset_id)
+        # Pre-create every class folder on both sides so image_dataset_from_directory
+        # sees identical, consistently-ordered class lists even if a class has no
+        # examples in one of the two splits.
+        for split_dir in (train_dir, val_dir):
+            for label in labels:
+                os.makedirs(os.path.join(split_dir, label), exist_ok=True)
+
+        name_counters: Dict[tuple, Dict[str, int]] = {}
+
+        # Define allowed image formats for TF's decode_image
+        ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "GIF", "BMP"}
 
         for sample in samples:
+            split = sample.get("split", "unassigned")
+            if split not in ("train", "val"):
+                continue  # test/unassigned are not used to fit the model
+
             label = sample["label"]
-            label_dir = os.path.join(temp_dir, label)
+            split_dir = train_dir if split == "train" else val_dir
+            label_dir = os.path.join(split_dir, label)
             os.makedirs(label_dir, exist_ok=True)
 
             data = data_manager.get_sample_data(sample["id"])
             if not data:
                 continue
+            
+            # --- START VALIDATION ---
+            if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
+                try:
+                    with Image.open(io.BytesIO(data)) as img:
+                        img.verify() # Verify integrity first
+                        
+                    # Re-open for conversion (verify() closes the file pointer)
+                    with Image.open(io.BytesIO(data)) as img:
+                        if img.format not in ALLOWED_IMAGE_FORMATS:
+                            print(f"Converting {sample.get('filename')} from {img.format} to JPEG...")
+                            # Convert to RGB (drops alpha channels from WEBP/PNG if present)
+                            rgb_im = img.convert('RGB')
+                            
+                            # Save to a new byte buffer as JPEG
+                            img_byte_arr = io.BytesIO()
+                            rgb_im.save(img_byte_arr, format='JPEG')
+                            data = img_byte_arr.getvalue() # Overwrite original data with new JPEG bytes
+                            
+                            # Update the filename to end in .jpg so we don't write a .webp extension
+                            stem, _ = os.path.splitext(sample["filename"])
+                            sample["filename"] = f"{stem}.jpg"
+                except Exception as e:
+                    print(f"Skipping corrupt image file: {sample.get('filename', 'unknown')}. Error: {e}")
+                    continue
+            # --- END VALIDATION ---
 
             safe_name = os.path.basename(sample["filename"])
-            if label not in name_counters:
-                name_counters[label] = {}
-            if safe_name in name_counters[label]:
-                name_counters[label][safe_name] += 1
+            counter_key = (split, label)
+            if counter_key not in name_counters:
+                name_counters[counter_key] = {}
+            
+            if safe_name in name_counters[counter_key]:
+                name_counters[counter_key][safe_name] += 1
                 stem, ext = os.path.splitext(safe_name)
-                safe_name = f"{stem}_{name_counters[label][safe_name]}{ext}"
+                safe_name = f"{stem}_{name_counters[counter_key][safe_name]}{ext}"
             else:
-                name_counters[label][safe_name] = 0
+                name_counters[counter_key][safe_name] = 0
 
             file_path = os.path.join(label_dir, safe_name)
             with open(file_path, "wb") as f:
                 f.write(data)
 
-        return temp_dir
+        return train_dir, val_dir
 
     def _build_image_pipeline(
-        self, dataset_dir: str, session: dict
+        self, train_dir: str, val_dir: str, session: dict, class_names: list
     ):
         """
         Build a GPU-optimised tf.data image pipeline with:
@@ -186,25 +236,23 @@ class Trainer:
         img_width = session["input_shape"][1]
         color_mode = "grayscale" if session["input_shape"][2] == 1 else "rgb"
         batch_size = session["batch_size"]
-        val_split = session["validation_split"]
 
         train_ds = tf.keras.utils.image_dataset_from_directory(
-            dataset_dir,
-            validation_split=val_split,
-            subset="training",
+            train_dir,
+            class_names=class_names,
             seed=123,
             color_mode=color_mode,
             image_size=(img_height, img_width),
             batch_size=batch_size,
+            shuffle=True,
         )
         val_ds = tf.keras.utils.image_dataset_from_directory(
-            dataset_dir,
-            validation_split=val_split,
-            subset="validation",
-            seed=123,
+            val_dir,
+            class_names=class_names,
             color_mode=color_mode,
             image_size=(img_height, img_width),
             batch_size=batch_size,
+            shuffle=False,
         )
 
         norm = tf.keras.layers.Rescaling(1.0 / 255)
@@ -228,39 +276,40 @@ class Trainer:
         return train_ds, val_ds
 
     def _build_audio_pipeline(
-        self, dataset_dir: str, batch_size: int, val_split: float, task: str
+        self, train_dir: str, val_dir: str, batch_size: int, task: str, class_names: list
     ):
         """Audio is small enough to load fully into RAM; still prefetch."""
-        features, labels = [], []
-        class_names = sorted(
-            d for d in os.listdir(dataset_dir)
-            if os.path.isdir(os.path.join(dataset_dir, d))
-        )
         class_map = {name: idx for idx, name in enumerate(class_names)}
 
-        for class_name in class_names:
-            class_dir = os.path.join(dataset_dir, class_name)
-            for file in os.listdir(class_dir):
-                if file.endswith((".wav", ".mp3")):
-                    with open(os.path.join(class_dir, file), "rb") as f:
-                        audio_data = f.read()
-                    mfcc = DataProcessor.preprocess_audio(audio_data, task)
-                    features.append(np.expand_dims(mfcc, axis=-1))
-                    labels.append(class_map[class_name])
+        def _load(split_dir):
+            features, labels = [], []
+            for class_name in class_names:
+                class_dir = os.path.join(split_dir, class_name)
+                if not os.path.isdir(class_dir):
+                    continue
+                for file in os.listdir(class_dir):
+                    if file.endswith((".wav", ".mp3")):
+                        with open(os.path.join(class_dir, file), "rb") as f:
+                            audio_data = f.read()
+                        mfcc = DataProcessor.preprocess_audio(audio_data, task)
+                        features.append(np.expand_dims(mfcc, axis=-1))
+                        labels.append(class_map[class_name])
+            return np.array(features), np.array(labels)
 
-        X, y = np.array(features), np.array(labels)
-        indices = np.arange(len(X))
-        np.random.shuffle(indices)
-        X, y = X[indices], y[indices]
+        X_train, y_train = _load(train_dir)
+        X_val, y_val = _load(val_dir)
 
-        split_idx = int(len(X) * (1 - val_split))
+        train_idx = np.arange(len(X_train))
+        np.random.shuffle(train_idx)
+        X_train, y_train = X_train[train_idx], y_train[train_idx]
+
         train_ds = (
-            tf.data.Dataset.from_tensor_slices((X[:split_idx], y[:split_idx]))
+            tf.data.Dataset.from_tensor_slices((X_train, y_train))
             .batch(batch_size)
             .prefetch(_AUTOTUNE)
         )
         val_ds = (
-            tf.data.Dataset.from_tensor_slices((X[split_idx:], y[split_idx:]))
+            tf.data.Dataset.from_tensor_slices((X_val, y_val))
             .batch(batch_size)
             .prefetch(_AUTOTUNE)
         )
@@ -273,21 +322,29 @@ class Trainer:
             session["status"] = "running"
             self._save_to_disk()
 
-            dataset_dir = self._export_dataset_to_temp_dir(session["dataset_id"])
-            classes = [
-                d for d in os.listdir(dataset_dir)
-                if os.path.isdir(os.path.join(dataset_dir, d))
-            ]
-            num_classes = len(classes)
             task = session["task"]
+            dataset_id = session["dataset_id"]
+
+            from app.services.shared_state import data_manager
+            if not data_manager.is_split_ready(dataset_id):
+                raise ValueError(
+                    "Dataset has no complete precomputed train/val split. "
+                    "Split it into train/val/test before starting training."
+                )
+
+            classes = data_manager.get_dataset_labels(dataset_id)
+            num_classes = len(classes)
+
+            train_dir, val_dir = self._export_dataset_to_temp_dir(dataset_id, task)
+            temp_dir = os.path.dirname(train_dir)
 
             if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
-                train_ds, val_ds = self._build_image_pipeline(dataset_dir, session)
+                train_ds, val_ds = self._build_image_pipeline(train_dir, val_dir, session, classes)
                 model_input_shape = tuple(session["input_shape"])
 
             elif task in ["AUDIO_CLASSIFICATION", "KEYWORD_SPOTTING"]:
                 train_ds, val_ds = self._build_audio_pipeline(
-                    dataset_dir, session["batch_size"], session["validation_split"], task
+                    train_dir, val_dir, session["batch_size"], task, classes
                 )
                 audio_params = DataProcessor.AUDIO_PARAMS.get(
                     task, DataProcessor.AUDIO_PARAMS["KEYWORD_SPOTTING"]
@@ -343,7 +400,7 @@ class Trainer:
             # Save in modern .keras format (replaces deprecated .h5)
             save_path = os.path.join(self.storage_dir, f"{training_id}.keras")
             model.save(save_path)
-            shutil.rmtree(dataset_dir)
+            shutil.rmtree(temp_dir)
 
             session["status"] = "completed"
             session["completed_at"] = time.time()
@@ -399,8 +456,3 @@ class Trainer:
             self._save_to_disk()
             return True
         return False
-
-    # kept for backward compat — callers that used _prepare_audio_dataset directly
-    def _prepare_audio_dataset(self, dataset_dir: str, batch_size: int,
-                               val_split: float, task: str):
-        return self._build_audio_pipeline(dataset_dir, batch_size, val_split, task)

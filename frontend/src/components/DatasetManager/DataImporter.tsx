@@ -2,8 +2,9 @@ import { Check, X, AlertTriangle, ExternalLink, Download, Upload, Loader2, Globe
 import React, { useEffect, useRef, useState } from 'react'
 import { useAPI } from '../../hooks/useAPI';
 import { TinyMLTask } from '../../types';
-import { DataCollector } from '../DataCollector';
 import DownloadProgressBar, { DownloadProgress } from './DownloadProgressBar';
+import { TreeItem } from '../../types';
+import { ZipTreeMapper } from './ZipTreeMapper';
 
 // ============================================================================
 // Unified Data Importer Component
@@ -48,6 +49,9 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
 
   const [detailsDataset, setDetailsDataset] = useState<any | null>(null);
 
+  const [mappingTree, setMappingTree] = useState<TreeItem[] | null>(null);
+  const [mappingSession, setMappingSession] = useState<{ type: 'local' | 'remote', id: string } | null>(null);
+
 
   // ─── Local ZIP upload handler ────────────────────────────────────────────
   const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -69,40 +73,33 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
       const { upload_id } = initData;
 
       setUploadStatus(`Streaming chunks... 0/${totalChunks}`);
-      let completed = 0;
-      let active = 0;
-      let current = 0;
+      let completed = 0; let active = 0; let current = 0;
 
       await new Promise<void>((resolve, reject) => {
         const uploadNext = () => {
           if (current >= totalChunks && active === 0) { resolve(); return; }
           while (active < MAX_CONCURRENT && current < totalChunks) {
-            const idx = current++;
-            active++;
+            const idx = current++; active++;
             const blob = file.slice(idx * CHUNK_SIZE, Math.min((idx + 1) * CHUNK_SIZE, file.size));
             apiClient.putZipChunk(upload_id, idx, blob)
-              .then(() => {
-                completed++;
-                setUploadProgress(Math.round((completed / totalChunks) * 100));
-                setUploadStatus(`Streaming chunks... ${completed}/${totalChunks}`);
-                active--;
-                uploadNext();
-              })
+              .then(() => { completed++; setUploadProgress(Math.round((completed / totalChunks) * 100)); setUploadStatus(`Streaming chunks... ${completed}/${totalChunks}`); active--; uploadNext(); })
               .catch(reject);
           }
         };
         uploadNext();
       });
 
-      setUploadStatus('Finalizing and extracting...');
-      const result = await apiClient.finalizeZipUpload({
-        upload_id, dataset_id: datasetId, task, total_chunks: totalChunks,
-      });
-      setUploadStatus(`✓ Imported ${result.count ?? 0} samples`);
+      setUploadStatus('Scanning ZIP structure...');
+      const result = await apiClient.finalizeZipUpload({ upload_id, total_chunks: totalChunks });
+
+      // Stop uploading loader, show modal
+      setUploading(false);
+      setMappingTree(result.tree || []);
+      setMappingSession({ type: 'local', id: upload_id });
       if (fileInputRef.current) fileInputRef.current.value = '';
-      onImportSuccess();
     } catch (err: any) {
       setUploadError(err.message || 'Upload failed');
+      setUploading(false);
     } finally {
       setUploading(false);
     }
@@ -145,6 +142,11 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
             phase: 'processing',
             message: data.message,
           } : prev);
+        } else if (data.type === 'ready_to_map') {
+          setMappingTree(data.tree);
+          setMappingSession({ type: 'remote', id: data.download_id });
+          setDownloadProgress(null); // Hide progress bar
+          es.close();
         } else if (data.type === 'complete') {
           setDownloadProgress((prev) => prev ? {
             ...prev,
@@ -191,6 +193,28 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     setDownloadProgress(prev => prev ? { ...prev, phase: 'cancelled' } : prev);
   };
 
+  const handleConfirmMapping = async (mapping: TreeItem[]) => {
+    setMappingTree(null);
+    setUploading(true);
+    setUploadStatus('Extracting explicitly mapped folders...');
+
+    try {
+      let result;
+      if (mappingSession?.type === 'local') {
+        result = await apiClient.processZipUpload(mappingSession.id, datasetId, task, mapping);
+      } else if (mappingSession?.type === 'remote') {
+        result = await apiClient.processRemoteZip(mappingSession.id, datasetId, task, mapping);
+      }
+      setUploadStatus(`? Imported ${result.count ?? 0} samples`);
+      onImportSuccess();
+    } catch (err: any) {
+      setUploadError(err.message || 'Extraction failed');
+    } finally {
+      setUploading(false);
+      setMappingSession(null);
+    }
+  };
+
   // ─── Kaggle search ──────────────────────────────────────────────────────
   const handleKaggleSearch = async () => {
     if (!kaggleQuery.trim()) return;
@@ -231,6 +255,13 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
 
   return (
     <div className="p-4 bg-slate-900 rounded-xl border border-slate-700/60 mt-2 space-y-3">
+      {mappingTree && mappingSession && (
+        <ZipTreeMapper
+          tree={mappingTree}
+          onConfirm={handleConfirmMapping}
+          onCancel={() => { setMappingTree(null); setMappingSession(null); setUploading(false); }}
+        />
+      )}
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-slate-700 pb-2">
         {tabs.map(t => (

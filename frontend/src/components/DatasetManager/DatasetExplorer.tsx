@@ -1,4 +1,4 @@
-import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft } from "lucide-react";
+import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2 } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
 import { useAPI } from "../../hooks/useAPI";
 import { DatasetInfo, DatasetSample } from "../../types";
@@ -12,6 +12,13 @@ interface ExplorerProps {
   onChanged: () => void;
 }
 
+// Helper to safely extract file extensions
+const getExt = (filename?: string) => {
+  if (!filename) return 'unknown';
+  const parts = filename.split('.');
+  return parts.length > 1 ? `.${parts.pop()?.toLowerCase()}` : 'unknown';
+};
+
 function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps) {
   const { request, apiClient } = useAPI();
   const [samples, setSamples] = useState<DatasetSample[]>([]);
@@ -21,11 +28,15 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const [viewMode, setViewMode] = useState<'groups' | 'samples'>('groups');
   const [filterLabel, setFilterLabel] = useState<string>('ALL');
   const [filterSplit, setFilterSplit] = useState<string>('ALL');
-  const [activeFilterType, setActiveFilterType] = useState<'class' | 'split' | null>(null);
+  const [filterFileType, setFilterFileType] = useState<string>('ALL');
+  const [activeFilterType, setActiveFilterType] = useState<'class' | 'split' | 'filetype' | null>(null);
   const [visibleCount, setVisibleCount] = useState<number>(10);
 
   const [isLoading, setIsLoading] = useState(true);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [showClassManager, setShowClassManager] = useState(false);
+
+  // Auto-Split State
   const [trainPct, setTrainPct] = useState(70);
   const [valPct, setValPct] = useState(20);
   const [testPct, setTestPct] = useState(10);
@@ -43,6 +54,8 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   }, [dataset.id, request, apiClient]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // --- Handlers ---
 
   const handleRelabel = async (sampleId: string, newLabel: string) => {
     await request(() => apiClient.relabelSample(sampleId, newLabel));
@@ -67,15 +80,30 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     setSamples(prev => prev.filter(s => s.id !== sampleId)); onChanged();
   };
 
-  // Group Click Handlers
-  const handleGroupClick = (type: 'class' | 'split', value: string) => {
-    if (type === 'class') {
-      setFilterLabel(value);
-      setFilterSplit('ALL');
-    } else {
-      setFilterSplit(value);
-      setFilterLabel('ALL');
+  // Bulk Delete By File Type
+  const handleDeleteByFileType = async (ext: string) => {
+    const toDelete = samples.filter(s => getExt(s.filename) === ext);
+    if (!window.confirm(`Are you sure you want to PERMANENTLY delete all ${toDelete.length} "${ext}" files in this dataset? This cannot be undone.`)) return;
+
+    setIsBulkDeleting(true);
+    try {
+      // Sequential processing prevents saturating the connection pool
+      for (const s of toDelete) {
+        await request(() => apiClient.deleteSample(s.id));
+      }
+      await fetchAll();
+      onChanged();
+    } finally {
+      setIsBulkDeleting(false);
     }
+  };
+
+  // Group Click Handlers
+  const handleGroupClick = (type: 'class' | 'split' | 'filetype', value: string) => {
+    setFilterLabel(type === 'class' ? value : 'ALL');
+    setFilterSplit(type === 'split' ? value : 'ALL');
+    setFilterFileType(type === 'filetype' ? value : 'ALL');
+
     setActiveFilterType(type);
     setVisibleCount(10);
     setViewMode('samples');
@@ -84,15 +112,18 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const clearFilter = () => {
     setFilterLabel('ALL');
     setFilterSplit('ALL');
+    setFilterFileType('ALL');
     setActiveFilterType(null);
     setViewMode('groups');
   };
 
-  // Derived Data
+  // --- Derived Data ---
+
   const visible = samples.filter(s => {
     const passLabel = filterLabel === 'ALL' || s.label === filterLabel;
     const passSplit = filterSplit === 'ALL' || (s.split || 'unassigned') === filterSplit;
-    return passLabel && passSplit;
+    const passFileType = filterFileType === 'ALL' || getExt(s.filename) === filterFileType;
+    return passLabel && passSplit && passFileType;
   });
 
   const countByLabel = allLabels.reduce<Record<string, number>>((acc, l) => {
@@ -103,6 +134,13 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     acc[split] = samples.filter(s => (s.split || 'unassigned') === split).length;
     return acc;
   }, {});
+
+  const countByFileType = samples.reduce<Record<string, number>>((acc, s) => {
+    const ext = getExt(s.filename);
+    acc[ext] = (acc[ext] || 0) + 1;
+    return acc;
+  }, {});
+  const fileTypes = Object.keys(countByFileType).sort();
 
   // Class Imbalance Check
   const counts = allLabels.map(l => countByLabel[l] ?? 0);
@@ -162,7 +200,12 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
         </div>
 
         {/* Main Content Area */}
-        {isLoading ? (
+        {isBulkDeleting ? (
+          <div className="flex-1 flex flex-col items-center justify-center py-20 gap-4 text-gray-400">
+            <RefreshCw className="w-8 h-8 animate-spin text-red-400" />
+            <p className="text-sm font-medium">Purging requested files...</p>
+          </div>
+        ) : isLoading ? (
           <div className="flex-1 flex items-center justify-center py-20 gap-2 text-gray-400">
             <RefreshCw className="w-5 h-5 animate-spin" /> Fetching indices...
           </div>
@@ -177,22 +220,51 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
               </div>
             )}
 
+            {/* File Types Section */}
+            <div>
+              <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
+                <FileText className="w-4 h-4" /> Browse by File Type
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-4">
+                {fileTypes.map(ext => (
+                  <div key={ext} className="relative group">
+                    <button
+                      onClick={() => handleGroupClick('filetype', ext)}
+                      className="w-full p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-emerald-500 text-left transition"
+                    >
+                      <div className="text-lg font-bold text-white group-hover:text-emerald-400 truncate uppercase">{ext}</div>
+                      <div className="text-xs text-gray-500 mt-1">{countByFileType[ext] ?? 0} items</div>
+                    </button>
+                    {/* Hover Delete Action */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteByFileType(ext); }}
+                      className="absolute top-3 right-3 p-2 bg-slate-900/90 hover:bg-red-500 text-gray-400 hover:text-white rounded-md transition-all opacity-0 group-hover:opacity-100 shadow-md border border-slate-700 hover:border-red-500"
+                      title={`Delete all ${ext} files globally`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Splits Section */}
+            <div>
+              <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
+                <FolderPlus className="w-4 h-4" /> Browse by Split
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                {['train', 'val', 'test', 'unassigned'].map(sp => (
+                  <button key={sp} onClick={() => handleGroupClick('split', sp)} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-blue-500 text-left transition group uppercase">
+                    <div className="text-lg font-bold text-white group-hover:text-blue-400 truncate">{sp}</div>
+                    <div className="text-xs text-gray-500 mt-1">{countBySplit[sp] ?? 0} items</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Classes Section */}
             <div>
-              {/* Splits Section */}
-              <div>
-                <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
-                  <FolderPlus className="w-4 h-4" /> Browse by Split
-                </h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                  {['train', 'val', 'test', 'unassigned'].map(sp => (
-                    <button key={sp} onClick={() => handleGroupClick('split', sp)} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-blue-500 text-left transition group uppercase">
-                      <div className="text-lg font-bold text-white group-hover:text-blue-400 truncate">{sp}</div>
-                      <div className="text-xs text-gray-500 mt-1">{countBySplit[sp] ?? 0} items</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
               <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
                 <Tags className="w-4 h-4" /> Browse by Class
               </h3>
@@ -220,7 +292,9 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
                 <ArrowLeft className="w-4 h-4" /> Back to Groups
               </button>
               <div className="text-sm text-gray-300">
-                Viewing: <span className="font-bold text-white uppercase tracking-wider">{activeFilterType === 'class' ? filterLabel : filterSplit}</span> ({visible.length} items)
+                Viewing: <span className="font-bold text-white uppercase tracking-wider">
+                  {activeFilterType === 'class' ? filterLabel : activeFilterType === 'split' ? filterSplit : filterFileType}
+                </span> ({visible.length} items)
               </div>
             </div>
 

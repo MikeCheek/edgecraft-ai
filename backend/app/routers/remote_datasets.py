@@ -10,6 +10,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from app.utils.zip_processor import extract_zip_with_mapping, scan_zip_tree
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -165,7 +166,7 @@ async def download_stream(
                     yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
                 download_path = result.get("path")
                 yield _sse_event({"type": "processing", "message": "Extracting archive..."})
-                yield _sse_event({"type": "complete", "count": result.get("count", 0)})
+                yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id")})
 
             # ------------------------------------------------------------------
             # Kaggle — queue bridge
@@ -186,6 +187,8 @@ async def download_stream(
                     if item is _SENTINEL:
                         break
                     if isinstance(item, tuple):
+                        if item[0] == "ready_to_map":
+                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2]})
                         if item[0] == "complete":
                             _, count, download_dir = item
                             yield _sse_event({"type": "processing", "message": "Extracting archive..."})
@@ -216,6 +219,8 @@ async def download_stream(
                     if item is _SENTINEL:
                         break
                     if isinstance(item, tuple):
+                        if item[0] == "ready_to_map":
+                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2]})
                         if item[0] == "complete":
                             _, count, download_dir = item
                             yield _sse_event({"type": "processing", "message": "Extracting archive..."})
@@ -304,9 +309,12 @@ async def _download_from_url_stream(
     if not zipfile.is_zipfile(download_path):
         raise ValueError("Downloaded file is not a valid ZIP archive.")
 
-    count = await _run_in_executor(_process_zip_to_dataset, download_path, dataset_id, task, download_id)
+    tree = await _run_in_executor(scan_zip_tree, download_path)
+    _active_downloads[download_id]["zip_path"] = download_path
+    result["tree"] = tree
+    result["download_id"] = download_id
     result["path"] = download_path
-    result["count"] = count
+    # result["count"] = count
 
 # ---------------------------------------------------------------------------
 # Kaggle: sync thread worker with asyncio queue bridge
@@ -360,8 +368,13 @@ def _kaggle_download_thread(
         if _active_downloads.get(download_id, {}).get("canceled"):
             raise ValueError("Download canceled by user")
 
-        count = _process_zip_to_dataset(download_dir, dataset_id, task, download_id)
-        _push(("complete", count, download_dir))
+        zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
+        if not zips: raise ValueError("No zip file found")
+        zip_path = os.path.join(download_dir, zips[0])
+        
+        _active_downloads[download_id]["zip_path"] = zip_path
+        tree = scan_zip_tree(zip_path)
+        _push(("ready_to_map", tree, download_id))
     except Exception as exc:
         _push(("error", str(exc)))
     finally:
@@ -412,8 +425,13 @@ def _huggingface_download_thread(
         if _active_downloads.get(download_id, {}).get("canceled"):
             raise ValueError("Download canceled by user")
 
-        count = _process_zip_to_dataset(download_dir, dataset_id, task, download_id)
-        _push(("complete", count, download_dir))
+        zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
+        if not zips: raise ValueError("No zip file found")
+        zip_path = os.path.join(download_dir, zips[0])
+        
+        _active_downloads[download_id]["zip_path"] = zip_path
+        tree = scan_zip_tree(zip_path)
+        _push(("ready_to_map", tree, download_id))
     except Exception as exc:
         _push(("error", str(exc)))
     finally:
@@ -648,3 +666,31 @@ async def get_download_progress(download_id: str):
         "total": info.get("total", 0),
         "cancelled": info.get("cancelled", False),
     }
+    
+    
+class ProcessRemoteRequest(BaseModel):
+    download_id: str
+    dataset_id: str
+    task: str
+    mapping: list
+
+@router.post("/process")
+async def process_remote_zip(req: ProcessRemoteRequest):
+    info = _active_downloads.get(req.download_id)
+    if not info or not info.get("zip_path"):
+        raise HTTPException(status_code=404, detail="Download session missing or expired")
+        
+    try:
+        count = await _run_in_executor(
+            extract_zip_with_mapping, 
+            info["zip_path"], req.dataset_id, req.task, req.mapping
+        )
+        # Clean up
+        base_dir = os.path.dirname(info["zip_path"])
+        if "edgecraft_remote_downloads" in base_dir:
+            shutil.rmtree(base_dir, ignore_errors=True)
+        _active_downloads.pop(req.download_id, None)
+            
+        return {"status": "success", "count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

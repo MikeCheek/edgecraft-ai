@@ -5,6 +5,10 @@
 
 import tensorflow as tf
 
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    tf.config.experimental.set_memory_growth(gpus[0], True)
+
 
 def get_model(base_model_name: str, num_classes: int, input_shape: tuple = (224, 224, 3)):
     """Legacy model factory — prefer ModelFactory.create_model() for new code."""

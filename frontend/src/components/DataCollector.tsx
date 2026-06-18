@@ -129,8 +129,6 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
     setProgress(95);
     const finalRes = await apiClient.finalizeZipUpload({
       upload_id: uploadId,
-      dataset_id: datasetId,
-      task,
       total_chunks: totalChunks,
     });
     if (finalRes.status === 'error') throw new Error(finalRes.message || 'Finalize failed');

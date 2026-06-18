@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
-  Eye,
-  Tags, Download, Upload
+  Eye, Tags, Download, Upload, AlertTriangle, Shuffle
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
 import { TinyMLTask, DatasetInfo } from '../../types';
@@ -14,6 +13,13 @@ import { RemoteDatasetBrowser } from './RemoteDatasetBrowser';
 interface DatasetManagerProps {
   task: TinyMLTask;
   onDatasetChanged?: () => void;
+}
+
+interface SplitSummary {
+  train: number;
+  val: number;
+  test: number;
+  unassigned: number;
 }
 
 export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) {
@@ -32,12 +38,34 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const [expandedClasses, setExpandedClasses] = useState<string | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
 
+  // Split summary state: datasetId → SplitSummary
+  const [splitSummaries, setSplitSummaries] = useState<Record<string, SplitSummary>>({});
+  const [splittingId, setSplittingId] = useState<string | null>(null);
+
   const fetchDatasets = useCallback(async () => {
     setIsLoading(true);
     const raw = await request(() => apiClient.listDatasets(task));
     setIsLoading(false);
-    if (raw?.datasets) setDatasets(raw.datasets);
+    if (raw?.datasets) {
+      setDatasets(raw.datasets);
+      // Fetch split summaries for each dataset in the background
+      fetchAllSplitSummaries(raw.datasets);
+    }
   }, [task, request, apiClient]);
+
+  const fetchAllSplitSummaries = useCallback(async (datasetList: DatasetInfo[]) => {
+    const entries = await Promise.all(
+      datasetList.map(async (d) => {
+        try {
+          const res = await apiClient.getSplitSummary(d.id);
+          return [d.id, res.summary] as [string, SplitSummary];
+        } catch {
+          return [d.id, { train: 0, val: 0, test: 0, unassigned: d.sample_count }] as [string, SplitSummary];
+        }
+      })
+    );
+    setSplitSummaries(Object.fromEntries(entries));
+  }, [apiClient]);
 
   useEffect(() => {
     fetchDatasets();
@@ -96,6 +124,23 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     catch { } finally { setExportingId(null); }
   };
 
+  /**
+   * Quick auto-split with sensible defaults: 70 / 20 / 10.
+   * Runs immediately without a dialog — the user can refine in DatasetExplorer.
+   */
+  const handleQuickAutoSplit = async (datasetId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSplittingId(datasetId);
+    await request(() => apiClient.autoSplitDataset(datasetId, 70, 20, 10));
+    setSplittingId(null);
+    // Refresh split summary for this dataset
+    try {
+      const res = await apiClient.getSplitSummary(datasetId);
+      setSplitSummaries(prev => ({ ...prev, [datasetId]: res.summary }));
+    } catch { }
+    onDatasetChanged?.();
+  };
+
   return (
     <div className="space-y-6">
       {exploringDataset && (
@@ -130,88 +175,127 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
         </div>
       ) : (
         <div className="space-y-3">
-          {datasets.map(dataset => (
-            <div key={dataset.id} className="rounded-xl border border-slate-700 overflow-hidden bg-slate-800/50">
-              {/* Dataset row */}
-              <div className="flex items-center gap-3 px-4 py-3">
-                {editingId === dataset.id ? (
-                  <div className="flex gap-2 flex-1">
-                    <input autoFocus value={editName} onChange={e => setEditName(e.target.value)}
-                      onKeyDown={e => e.key === 'Enter' && handleRename(dataset.id)}
-                      className="flex-1 px-2 py-1 bg-slate-700 rounded text-white text-sm focus:outline-none focus:border-purple-500 border border-slate-600" />
-                    <button onClick={() => handleRename(dataset.id)} className="text-green-400 hover:text-green-300 p-1"><Check className="w-4 h-4" /></button>
-                    <button onClick={() => setEditingId(null)} className="text-gray-400 hover:text-gray-200 p-1"><X className="w-4 h-4" /></button>
+          {datasets.map(dataset => {
+            const summary = splitSummaries[dataset.id];
+            const hasUnassigned = summary ? summary.unassigned > 0 : false;
+            const isFullyAssigned = summary
+              ? summary.unassigned === 0 && dataset.sample_count > 0
+              : false;
+
+            return (
+              <div key={dataset.id} className="rounded-xl border border-slate-700 overflow-hidden bg-slate-800/50">
+                {/* Dataset row */}
+                <div className="flex items-center gap-3 px-4 py-3">
+                  {editingId === dataset.id ? (
+                    <div className="flex gap-2 flex-1">
+                      <input autoFocus value={editName} onChange={e => setEditName(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleRename(dataset.id)}
+                        className="flex-1 px-2 py-1 bg-slate-700 rounded text-white text-sm focus:outline-none focus:border-purple-500 border border-slate-600" />
+                      <button onClick={() => handleRename(dataset.id)} className="text-green-400 hover:text-green-300 p-1"><Check className="w-4 h-4" /></button>
+                      <button onClick={() => setEditingId(null)} className="text-gray-400 hover:text-gray-200 p-1"><X className="w-4 h-4" /></button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-white truncate">{dataset.name}</p>
+                        <p className="text-xs text-gray-400">{dataset.sample_count} samples</p>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {/* ── Split warning badge + quick auto-split ── */}
+                        {dataset.sample_count > 0 && hasUnassigned && (
+                          <div className="flex items-center gap-1 mr-1">
+                            <span
+                              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-amber-400 bg-amber-900/30 border border-amber-500/40 rounded-lg"
+                              title={`${summary!.unassigned} sample(s) not yet assigned to train/val/test`}
+                            >
+                              <AlertTriangle className="w-3.5 h-3.5" />
+                              {summary!.unassigned} unassigned
+                            </span>
+                            <button
+                              onClick={e => handleQuickAutoSplit(dataset.id, e)}
+                              disabled={splittingId === dataset.id}
+                              title="Auto-split 70 / 20 / 10 (train / val / test)"
+                              className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-purple-300 hover:text-purple-200 bg-purple-900/30 hover:bg-purple-900/50 border border-purple-500/40 rounded-lg transition disabled:opacity-50"
+                            >
+                              {splittingId === dataset.id
+                                ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                : <Shuffle className="w-3.5 h-3.5" />}
+                              Auto Split
+                            </button>
+                          </div>
+                        )}
+
+                        {/* Split health badge when fully assigned */}
+                        {isFullyAssigned && (
+                          <span className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 bg-emerald-900/20 border border-emerald-500/30 rounded-lg mr-1"
+                            title={`train: ${summary!.train} · val: ${summary!.val} · test: ${summary!.test}`}>
+                            ✓ Split
+                          </span>
+                        )}
+
+                        <button onClick={() => setExploringDataset(dataset)}
+                          className="flex items-center gap-1 px-2 py-1 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-slate-700 rounded-lg transition" title="Explore samples">
+                          <Eye className="w-3.5 h-3.5" /> Explore
+                        </button>
+                        <button onClick={e => handleExportFull(dataset, e)}
+                          disabled={exportingId === `full-${dataset.id}` || dataset.sample_count === 0}
+                          className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Full ZIP">
+                          {exportingId === `full-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Full ZIP
+                        </button>
+                        <button onClick={e => handleExportSplit(dataset, e)}
+                          disabled={exportingId === `split-${dataset.id}` || dataset.sample_count === 0}
+                          className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Split ZIP">
+                          {exportingId === `split-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Split ZIP
+                        </button>
+                        <div className="h-4 w-px bg-slate-700 mx-1" />
+                        <button onClick={() => setExpandedClasses(prev => prev === dataset.id ? null : dataset.id)}
+                          className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quick Classes">
+                          <Tags className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => setExpandedUpload(prev => prev === dataset.id ? null : dataset.id)}
+                          className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Upload & Import">
+                          <Upload className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => { setEditingId(dataset.id); setEditName(dataset.name); }}
+                          className="p-1.5 text-gray-400 hover:text-white transition" title="Rename">
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button onClick={e => handleClear(dataset.id, e)}
+                          className="p-1.5 text-amber-500 hover:text-amber-400 transition" title="Clear Samples">
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                        <button onClick={e => handleDelete(dataset.id, e)}
+                          className="p-1.5 text-red-500 hover:text-red-400 transition" title="Delete Dataset">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Collapsible Classes */}
+                {expandedClasses === dataset.id && (
+                  <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
+                    <ClassManager datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                   </div>
-                ) : (
-                  <>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-white truncate">{dataset.name}</p>
-                      <p className="text-xs text-gray-400">{dataset.sample_count} samples</p>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button onClick={() => setExploringDataset(dataset)}
-                        className="flex items-center gap-1 px-2 py-1 text-xs text-cyan-400 hover:text-cyan-300 hover:bg-slate-700 rounded-lg transition" title="Explore samples">
-                        <Eye className="w-3.5 h-3.5" /> Explore
-                      </button>
-                      <button onClick={e => handleExportFull(dataset, e)}
-                        disabled={exportingId === `full-${dataset.id}` || dataset.sample_count === 0}
-                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Full ZIP">
-                        {exportingId === `full-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Full ZIP
-                      </button>
-                      <button onClick={e => handleExportSplit(dataset, e)}
-                        disabled={exportingId === `split-${dataset.id}` || dataset.sample_count === 0}
-                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 hover:text-emerald-300 hover:bg-slate-700 disabled:opacity-40 rounded-lg transition" title="Download Split ZIP">
-                        {exportingId === `split-${dataset.id}` ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />} Split ZIP
-                      </button>
-                      <div className="h-4 w-px bg-slate-700 mx-1" />
-                      <button onClick={() => setExpandedClasses(prev => prev === dataset.id ? null : dataset.id)}
-                        className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quick Classes">
-                        <Tags className="w-4 h-4" />
-                      </button>
-                      <button onClick={() => setExpandedUpload(prev => prev === dataset.id ? null : dataset.id)}
-                        className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Upload & Import">
-                        <Upload className="w-4 h-4" />
-                      </button>
-                      <button onClick={() => { setEditingId(dataset.id); setEditName(dataset.name); }}
-                        className="p-1.5 text-gray-400 hover:text-white transition" title="Rename">
-                        <Edit2 className="w-4 h-4" />
-                      </button>
-                      <button onClick={e => handleClear(dataset.id, e)}
-                        className="p-1.5 text-amber-500 hover:text-amber-400 transition" title="Clear Samples">
-                        <RefreshCw className="w-4 h-4" />
-                      </button>
-                      <button onClick={e => handleDelete(dataset.id, e)}
-                        className="p-1.5 text-red-500 hover:text-red-400 transition" title="Delete Dataset">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </>
+                )}
+
+                {expandedClasses === dataset.id && (
+                  <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
+                    <RemoteDatasetBrowser datasetId={dataset.id} onImportComplete={() => { fetchDatasets(); onDatasetChanged?.(); }} task={task} />
+                  </div>
+                )}
+
+                {/* Collapsible Upload & Import */}
+                {expandedUpload === dataset.id && (
+                  <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
+                    <DataImporter datasetId={dataset.id} task={task}
+                      onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
+                  </div>
                 )}
               </div>
-
-              {/* Collapsible Classes */}
-              {expandedClasses === dataset.id && (
-                <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                  <ClassManager datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
-                </div>
-              )}
-
-              {expandedClasses === dataset.id && (
-                <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                  <RemoteDatasetBrowser datasetId={dataset.id} onImportComplete={() => { fetchDatasets(); onDatasetChanged?.(); }} task={task} />
-                </div>
-              )}
-
-
-              {/* Collapsible Upload & Import */}
-              {expandedUpload === dataset.id && (
-                <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                  <DataImporter datasetId={dataset.id} task={task}
-                    onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

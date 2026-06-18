@@ -34,7 +34,7 @@ export function usePolling<T> (
   useEffect(() => {
     if (!enabled) return
 
-    let timeoutId: NodeJS.Timeout
+    let timeoutId: number | undefined
 
     const poll = async () => {
       setIsLoading(true)

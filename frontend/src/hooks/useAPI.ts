@@ -54,6 +54,14 @@ class APIClient {
     )
   }
 
+  async getSplitSummary(datasetId: string): Promise<{
+    status: string
+    summary: { train: number; val: number; test: number; unassigned: number }
+  }> {
+    const res = await this.client.get(`/datasets/split_summary/${datasetId}`)
+    return res.data
+  }
+
   // ── Single-file upload ────────────────────────────────────────────────────
 
   async uploadSample(
@@ -114,29 +122,45 @@ class APIClient {
 
   async finalizeZipUpload(params: {
     upload_id: string
-    dataset_id: string
-    task: string
     total_chunks: number
   }): Promise<{
     status: string
-    sample_ids?: string[]
-    count?: number
+    tree?: any[]
+    upload_id: string
     message?: string
   }> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 30 * 60 * 1000)
-    try {
-      const res = await fetch(`${API_BASE}/datasets/upload_zip/finalize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
-        signal: controller.signal
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      return await res.json()
-    } finally {
-      clearTimeout(timer)
-    }
+    const res = await this.client.post('/datasets/upload_zip/finalize', params)
+    return res.data
+  }
+
+  async processZipUpload(
+    uploadId: string,
+    datasetId: string,
+    task: string,
+    mapping: any[]
+  ) {
+    const res = await this.client.post('/datasets/upload_zip/process', {
+      upload_id: uploadId,
+      dataset_id: datasetId,
+      task,
+      mapping
+    })
+    return res.data
+  }
+
+  async processRemoteZip(
+    downloadId: string,
+    datasetId: string,
+    task: string,
+    mapping: any[]
+  ) {
+    const res = await this.client.post('/remote_datasets/process', {
+      download_id: downloadId,
+      dataset_id: datasetId,
+      task,
+      mapping
+    })
+    return res.data
   }
 
   async abortZipUpload(uploadId: string): Promise<void> {

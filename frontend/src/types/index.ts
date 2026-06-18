@@ -45,7 +45,6 @@ export interface TrainingConfig {
   learning_rate: number
   base_model: string
   task: TinyMLTask
-  validation_split: number
   input_shape?: number[]
 }
 
@@ -135,4 +134,12 @@ export interface InferenceResult {
   class_name: string
   confidence: number
   inference_time_ms: number
+}
+
+export interface TreeItem {
+  path: string
+  file_count: number
+  split: string
+  label: string
+  ignore: boolean
 }
