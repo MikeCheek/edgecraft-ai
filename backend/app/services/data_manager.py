@@ -26,7 +26,7 @@ class DataManager:
         self.dataset_labels: Dict[str, List[str]] = {}
 
         self._load_from_disk()
-        
+
     def _get_compatible_tasks(self, task: str) -> set:
         """Group tasks by their underlying data modality."""
         image_tasks = {"IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"}
@@ -46,7 +46,7 @@ class DataManager:
         """Persist only JSON metadata (datasets, samples, labels).
 
         Previously _save_to_disk() also looped over self.sample_data and
-        rewrote every .bin file already on disk ù O(n) disk writes on every
+        rewrote every .bin file already on disk — O(n) disk writes on every
         single upload.  Binary files are now written once on ingest and never
         touched again unless the sample is deleted.
         """
@@ -130,7 +130,7 @@ class DataManager:
             compatible_tasks = self._get_compatible_tasks(task)
             datasets = [d for d in datasets if d["task"] in compatible_tasks]
         return datasets
-    
+
     def get_dataset(self, dataset_id: str) -> Optional[dict]:
         return self.datasets.get(dataset_id)
 
@@ -153,7 +153,7 @@ class DataManager:
             "timestamp": time.time(),
             "split": "unassigned",
         }
-        # Write binary first, then update metadata ù avoids orphaned records
+        # Write binary first, then update metadata — avoids orphaned records
         self._write_sample_file(sample_id, data)
 
         self.datasets[dataset_id]["sample_count"] += 1
@@ -166,7 +166,7 @@ class DataManager:
             )
         self._save_metadata()
         return sample_id
-    
+
     def bulk_add_samples(
         self, dataset_id: str, task: str, items: List[dict]
     ) -> List[str]:
@@ -184,9 +184,9 @@ class DataManager:
 
         for item in items:
             sample_id = str(uuid.uuid4())
-            
+
             split = item.get("split", "unassigned")
-            
+
             self.samples[sample_id] = {
                 "id": sample_id,
                 "dataset_id": dataset_id,
@@ -196,7 +196,7 @@ class DataManager:
                 "timestamp": time.time(),
                 "split": split,
             }
-            # Write the binary immediately ù one file, one write, done.
+            # Write the binary immediately — one file, one write, done.
             self._write_sample_file(sample_id, item["content"])
             sample_ids.append(sample_id)
             new_labels.add(item["label"])
@@ -213,28 +213,27 @@ class DataManager:
         self._save_metadata()
         return sample_ids
 
-
     def delete_sample(self, sample_id: str, save_metadata: bool = True) -> bool:
         if sample_id not in self.samples:
             return False
-            
+
         dataset_id = self.samples[sample_id]["dataset_id"]
         if dataset_id in self.datasets:
             self.datasets[dataset_id]["sample_count"] = max(
                 0, self.datasets[dataset_id]["sample_count"] - 1
             )
-            
+
         del self.samples[sample_id]
-        
+
         file_path = os.path.join(self.storage_dir, f"{sample_id}.bin")
-        
+
         # EAFP approach: faster than os.path.exists followed by os.remove
         with contextlib.suppress(FileNotFoundError):
             os.remove(file_path)
-            
+
         if save_metadata:
             self._save_metadata()
-            
+
         return True
 
     def get_samples(self, dataset_id: Optional[str] = None) -> List[dict]:

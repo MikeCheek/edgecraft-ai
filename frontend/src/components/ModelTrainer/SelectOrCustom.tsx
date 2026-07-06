@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { SelectOption } from './constants';
 
-
 // ---------------------------------------------------------------------------
 // Reusable SelectOrCustom
 // ---------------------------------------------------------------------------
@@ -9,15 +8,15 @@ import { SelectOption } from './constants';
 // entry whose value === 'custom' an inline number <input> appears next to it.
 //
 // Props:
-//   options   – array of { label: string; value: number | string }
+//   options   — array of { label: string; value: number | string }
 //               (last entry should be { label: 'Custom...', value: 'custom' })
-//   value     – current controlled value (number or string)
-//   onChange  – (newValue: number | string) => void
-//   disabled  – forwarded to both select and input
-//   min       – optional forwarded to number input
-//   max       – optional forwarded to number input
-//   step      – optional forwarded to number input
-//   className – optional extra className applied to the select
+//   value     — current controlled value (number or string)
+//   onChange  — (newValue: number | string) => void
+//   disabled  — forwarded to both select and input
+//   min       — optional forwarded to number input
+//   max       — optional forwarded to number input
+//   step      — optional forwarded to number input
+//   className — optional extra className applied to the select
 // ---------------------------------------------------------------------------
 
 interface SelectOrCustomProps {
@@ -118,6 +117,5 @@ function SelectOrCustom({
     </div>
   );
 }
-
 
 export default SelectOrCustom;

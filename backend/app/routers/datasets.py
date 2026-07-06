@@ -41,7 +41,7 @@ def _cleanup_file(path: str):
     except Exception:
         pass
 
-# ?? Dataset CRUD ??????????????????????????????????????????????????????????????
+# --- Dataset CRUD ---
 
 @router.post("/create")
 async def create_dataset(name: str = Body(...), task: str = Body(...)):
@@ -78,7 +78,7 @@ async def clear_dataset(dataset_id: str):
     count = await _run_in_executor(data_manager.clear_dataset_samples, dataset_id)
     return {"status": "success", "message": f"Cleared {count} samples"}
 
-# ?? Single-file upload ????????????????????????????????????????????????????????
+# --- Single-file upload ---
 
 @router.post("/upload")
 async def upload_dataset_sample(
@@ -96,7 +96,7 @@ async def upload_dataset_sample(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ?? Chunked Resumable ZIP upload Engine ???????????????????????????????????????
+# --- Chunked Resumable ZIP upload Engine ---
 
 @router.post("/upload_zip/init")
 async def init_zip_upload(
@@ -149,12 +149,12 @@ async def _upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Reque
     t_disk_end = time.perf_counter()
 
     UPLOAD_TRACKER[upload_id] = UPLOAD_TRACKER.get(upload_id, 0) + 1
-    
+
     # 3. Print the diagnostic report
     net_time = t_net_end - t_net_start
     disk_time = t_disk_end - t_disk_start
     total_time = t_disk_end - t_start
-    
+
     print(f"[Chunk {chunk_index:03d}] Total: {total_time:.3f}s | Network Recv: {net_time:.3f}s | Disk Write: {disk_time:.3f}s")
 
     return {"status": "success", "chunk_index": chunk_index, "received": UPLOAD_TRACKER[upload_id]}
@@ -212,8 +212,8 @@ def _assemble_and_process_zip(upload_dir: str, total_chunks: int, dataset_id: st
         # Filter out junk quickly with a lightweight list comprehension
         valid_items = [
             info for info in z.infolist()
-            if not info.is_dir() 
-            and not info.filename.startswith("__MACOSX") 
+            if not info.is_dir()
+            and not info.filename.startswith("__MACOSX")
             and not info.filename.split("/")[-1].startswith(".")
         ]
 
@@ -360,12 +360,12 @@ async def finalize_zip_upload(
 
         # Scan the tree instead of blindly extracting
         tree = await _run_in_executor(scan_zip_tree, assembled_zip_path)
-        
+
         UPLOAD_TRACKER.pop(upload_id, None)
         return {"status": "success", "upload_id": upload_id, "tree": tree}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assembly crash: {str(e)}")
-    
+
 @router.post("/upload_zip/process")
 async def process_zip_upload(
     upload_id: str = Body(...),
@@ -376,7 +376,7 @@ async def process_zip_upload(
     """Executes the extraction using the confirmed folder mapping."""
     upload_dir = os.path.join(CHUNK_DIR, upload_id)
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
-    
+
     if not os.path.exists(assembled_zip_path):
         raise HTTPException(status_code=404, detail="Assembled ZIP not found")
 
@@ -386,8 +386,8 @@ async def process_zip_upload(
         return {"status": "success", "count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction crash: {str(e)}")
-    
-# ?? Samples & Metadata ????????????????????????????????????????????????????????
+
+# --- Samples & Metadata ---
 
 @router.get("/list")
 async def list_samples(dataset_id: str = None):
@@ -426,7 +426,7 @@ async def auto_split_dataset(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# ?? Export Engine ?????????????????????????????????????????????????????????????
+# --- Export Engine ---
 
 def _build_export_zip(samples: list, dataset_name: str, mode: str) -> str:
     """Builds the zip archive on disk."""
@@ -472,7 +472,7 @@ async def export_split(dataset_id: str, background_tasks: BackgroundTasks):
     filename = f"{dataset['name'].replace(' ', '_')}_split.zip"
     return FileResponse(zip_path, media_type="application/zip", filename=filename)
 
-# ?? Relabeling & Sample Management ???????????????????????????????????????????
+# --- Relabeling & Sample Management ---
 
 @router.patch("/sample/{sample_id}/split")
 async def update_sample_split(sample_id: str, split: str = Body(..., embed=True)):

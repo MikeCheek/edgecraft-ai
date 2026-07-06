@@ -47,7 +47,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
-  // ── Chunked ZIP upload ────────────────────────────────────────────────────
+  // --- Chunked ZIP upload ---
 
   const uploadZipChunked = async (zipFile: File) => {
     const totalChunks = Math.ceil(zipFile.size / CHUNK_SIZE);
@@ -138,7 +138,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
     return finalRes;
   };
 
-  // ── Main upload handler ───────────────────────────────────────────────────
+  // --- Main upload handler ---
 
   const handleUpload = async () => {
     setIsLoading(true);
@@ -202,7 +202,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
 
   const handleCancel = () => abortRef.current?.abort();
 
-  // ── File selection ────────────────────────────────────────────────────────
+  // --- File selection ---
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const incoming = Array.from(e.target.files || []);
@@ -277,7 +277,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
       {uploadMode === 'zip' && (
         <div className="text-sm text-gray-400 bg-slate-800/80 p-3 rounded border border-slate-700 space-y-1">
           <p>Upload a <strong>.zip</strong> — subfolder names become labels.</p>
-          <p className="text-xs text-gray-500">Large archives (5–10 GB) use resumable chunked upload. If interrupted, just retry.</p>
+          <p className="text-xs text-gray-500">Large archives (5—10 GB) use resumable chunked upload. If interrupted, just retry.</p>
         </div>
       )}
 
@@ -290,7 +290,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
             <p className="text-xs mt-0.5">For more than {TOO_MANY_FILES_THRESHOLD} files, zip them into a single archive organised by class folder.</p>
             <button className="mt-2 text-xs underline text-amber-400 hover:text-amber-200 block text-left"
               onClick={() => { setTooManyWarning(false); switchMode('zip'); }}>
-              Switch to ZIP mode →
+              Switch to ZIP mode ?
             </button>
           </div>
         </div>
@@ -322,7 +322,7 @@ export function DataCollector({ datasetId, task, onSampleAdded }: DataCollectorP
         {files.length > 0 && (
           <p className="text-xs text-gray-400 mt-2">
             {files.length} {files.length === 1 ? 'file' : 'files'} ready
-            {uploadMode === 'zip' && files[0] ? ` · ${(files[0].size / 1024 / 1024).toFixed(1)} MB` : ''}
+            {uploadMode === 'zip' && files[0] ? ` • ${(files[0].size / 1024 / 1024).toFixed(1)} MB` : ''}
           </p>
         )}
       </div>

@@ -2,7 +2,6 @@ import { Download, X } from 'lucide-react';
 import React, { useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
-
 interface MetricChartProps {
   data: { epoch: number; train: number; val: number }[];
   label: string;

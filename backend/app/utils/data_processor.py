@@ -5,16 +5,15 @@ from typing import Tuple, Optional
 from io import BytesIO
 from PIL import Image
 
-
 class DataProcessor:
     """Data processing utilities for TinyML tasks"""
 
-    # ─── Input Size Configuration ──────────────────────────────────────────────
+    # --- Input Size Configuration ---
     # Edit these values to change the input dimensions.
     # Keep them in sync with INPUT_SIZES in constants.ts (frontend).
     #
     # IMAGE_SHAPES: (width, height, channels)
-    #   channels = 3 → RGB,  channels = 1 → grayscale
+    #   channels = 3 ? RGB,  channels = 1 ? grayscale
     IMAGE_SHAPES = {
         "IMAGE_CLASSIFICATION": (224, 224, 3),
         "OBJECT_DETECTION":     (224, 224, 3),
@@ -22,9 +21,9 @@ class DataProcessor:
     }
 
     # AUDIO_PARAMS:
-    #   sample_rate  – target Hz after resampling
-    #   duration     – clip length in seconds used during collection
-    #   n_mfcc       – number of MFCC coefficients (= first dim of input tensor)
+    #   sample_rate  — target Hz after resampling
+    #   duration     — clip length in seconds used during collection
+    #   n_mfcc       — number of MFCC coefficients (= first dim of input tensor)
     AUDIO_PARAMS = {
         "KEYWORD_SPOTTING": {
             "sample_rate": 16000,
@@ -37,7 +36,7 @@ class DataProcessor:
             "n_mfcc":      64,
         },
     }
-    # ──────────────────────────────────────────────────────────────────────────
+    # ----------------------------------------
 
     @staticmethod
     def preprocess_image(image_data: bytes, task: str) -> np.ndarray:

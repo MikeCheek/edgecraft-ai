@@ -33,13 +33,13 @@ interface ModelTrainerProps {
 }
 
 export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
-  const { dispatch } = useAppContext();
+  const { state, dispatch } = useAppContext();
   const { request, apiClient, error } = useAPI();
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const defaults = getTaskDefaults(task);
 
-  // ── Core config ───────────────────────────────────────────────────────────
+  // --- Core config ---
   const [datasetId, setDatasetId] = useState('');
   const [datasets, setDatasets] = useState<{ id: string; name: string; sample_count: number }[]>([]);
   const [epochs, setEpochs] = useState<number>(100);
@@ -47,6 +47,21 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [learningRate, setLearningRate] = useState<number>(0.001);
   const [baseModel, setBaseModel] = useState(defaults.base_model);
   const [inputShape, setInputShape] = useState<number[]>(defaults.input_shape);
+
+  // --- Compute device (CPU/GPU) ---
+  const [device, setDevice] = useState<'auto' | 'cpu' | 'gpu'>('auto');
+  const [availableDevices, setAvailableDevices] = useState<{ cpu_available: boolean; gpu_available: boolean; gpus: { name: string }[] } | null>(null);
+
+  useEffect(() => {
+    apiClient.getAvailableDevices()
+      .then((res) => { if (res.status === 'success') setAvailableDevices(res.devices); })
+      .catch(() => { /* devices endpoint unreachable; leave selector enabled */ });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // AI-assisted pre-training configuration suggestion
+  const [isSuggesting, setIsSuggesting] = useState(false);
+  const [suggestionReasoning, setSuggestionReasoning] = useState<string | null>(null);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
   useEffect(() => {
     setInputShape(getTaskDefaults(task).input_shape);
@@ -58,65 +73,80 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     setInputShape((prev) => prev.map((v, i) => (i === index ? num : v)));
   };
 
-  // ── UI toggles ────────────────────────────────────────────────────────────
+  // --- UI toggles ---
   const [isConfigExpanded, setIsConfigExpanded] = useState(true);
   const [showRegularization, setShowRegularization] = useState(false);
 
-  // ── Regularization ────────────────────────────────────────────────────────
+  // --- Regularization ---
   const [dropoutRate, setDropoutRate] = useState(0.5);
   const [l2Reg, setL2Reg] = useState(0.0);
   const [trainableLayers, setTrainableLayers] = useState(0);
   const [freezeEpochs, setFreezeEpochs] = useState(0);
 
-  // ── Early stopping ────────────────────────────────────────────────────────
+  // --- Early stopping ---
   const [earlyStopping, setEarlyStopping] = useState(false);
   const [esPatience, setEsPatience] = useState(5);
   const [esMonitor, setEsMonitor] = useState<'val_loss' | 'val_accuracy'>('val_loss');
 
-  // ── Augmentation ─────────────────────────────────────────────────────────
+  // --- Augmentation ---
   const [augmentation, setAugmentation] = useState({
     horizontal_flip: false,
     random_rotation: 0,
     random_crop: false,
   });
 
-  // ── Training runtime ──────────────────────────────────────────────────────
+  // --- Training runtime ---
   const [trainingId, setTrainingId] = useState<string | null>(null);
   const [status, setStatus] = useState<TrainingStatus | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
 
-  // ── History / sessions ────────────────────────────────────────────────────
+  // --- History / sessions ---
   const [pastSessions, setPastSessions] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [viewingSession, setViewingSession] = useState<any | null>(null);
 
-  // ── Warnings / split ─────────────────────────────────────────────────────
+  // --- Warnings / split ---
   const [duplicateWarning, setDuplicateWarning] = useState(false);
   const [splitSummary, setSplitSummary] = useState<{
     train: number; val: number; test: number; unassigned: number;
   } | null>(null);
   const [isSplitting, setIsSplitting] = useState(false);
 
-  // ── Chart modal ───────────────────────────────────────────────────────────
+  // --- Chart modal ---
   const [expandedLiveChart, setExpandedLiveChart] = useState<'accuracy' | 'loss' | null>(null);
 
-  // ── Fetch helpers ─────────────────────────────────────────────────────────
+  // --- Fetch helpers ---
   const fetchDatasets = async () => {
     const raw = await request(() => apiClient.listDatasets(task));
     if (raw && raw.datasets) setDatasets(raw.datasets);
   };
 
   const fetchPastSessions = useCallback(async () => {
-    const raw = await request(() => apiClient.listAllSessions());
+    const raw = await request(() => apiClient.listAllSessions(showArchived));
     if (raw && raw.sessions)
       setPastSessions(raw.sessions.filter((s: any) => s.task === task));
-  }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [task, showArchived]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleArchiveToggle = async (sessionId: string, currentlyArchived: boolean) => {
+    if (currentlyArchived) {
+      await request(() => apiClient.unarchiveTraining(sessionId));
+    } else {
+      await request(() => apiClient.archiveTraining(sessionId));
+    }
+    fetchPastSessions();
+  };
 
   useEffect(() => {
     fetchDatasets();
     fetchPastSessions();
     setBaseModel(getTaskDefaults(task).base_model);
   }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    fetchPastSessions();
+  }, [showArchived]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!datasetId) { setSplitSummary(null); return; }
@@ -126,7 +156,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
       .catch(() => setSplitSummary(null));
   }, [datasetId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Polling ───────────────────────────────────────────────────────────────
+  // --- Polling ---
   const pollStatus = useCallback(
     async (id: string) => {
       const raw = await request(() => apiClient.getTrainingStatus(id));
@@ -136,9 +166,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
       dispatch({ type: 'SET_TRAINING', payload: s });
       if (s.status === 'running' || s.status === 'initialized') {
         pollRef.current = setTimeout(() => pollStatus(id), 5000);
-      } else if (s.status === 'completed') {
+      } else if (s.status === 'completed' || s.status === 'cancelled' || s.status === 'failed') {
         fetchPastSessions();
-        onTrainingComplete?.();
+        if (s.status === 'completed') onTrainingComplete?.();
       }
     },
     [request, apiClient, dispatch, onTrainingComplete, fetchPastSessions],
@@ -148,7 +178,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, []);
 
-  // ── Duplicate check ───────────────────────────────────────────────────────
+  // --- Duplicate check ---
   const checkDuplicate = useCallback(() => {
     if (!datasetId) return false;
     return pastSessions.some(
@@ -162,7 +192,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     );
   }, [pastSessions, datasetId, baseModel, epochs, batchSize, learningRate]);
 
-  // ── Start / stop ──────────────────────────────────────────────────────────
+  // --- Start / stop ---
   const handleStart = async () => {
     if (!datasetId) { alert('Please select a dataset first.'); return; }
     if (!splitReady) {
@@ -191,13 +221,18 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         learning_rate: learningRate,
         base_model: baseModel,
         input_shape: inputShape,
+        device,
         early_stopping: earlyStopping,
         early_stopping_patience: esPatience,
         early_stopping_monitor: esMonitor,
         dropout_rate: dropoutRate,
         l2_reg: l2Reg,
         trainable_layers: trainableLayers,
-        freeze_epochs: freezeEpochs,
+        // NOTE: was "freeze_epochs" - the backend's TrainingRequest field is
+        // "freeze_encoder_epochs"; the mismatched name meant this always
+        // silently fell back to the default (0), disabling the freeze-then-
+        // fine-tune two-phase training path whenever it was set in the UI.
+        freeze_encoder_epochs: freezeEpochs,
         augmentation: {
           horizontal_flip: augmentation.horizontal_flip,
           random_rotation: augmentation.random_rotation,
@@ -214,9 +249,16 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
   const handleCancel = async () => {
     if (!trainingId) return;
+    // NOTE: previously this cleared the poll loop and immediately overwrote
+    // the status to "cancelled" locally - but the backend only actually
+    // stops at the next epoch boundary, so the UI could claim "cancelled"
+    // while training was still running, and would never learn the real
+    // final outcome since polling had already been killed. Just request
+    // the cancellation and let the existing poll loop discover the real
+    // status once the backend settles.
+    setIsCancelling(true);
     await request(() => apiClient.cancelTraining(trainingId));
-    if (pollRef.current) clearTimeout(pollRef.current);
-    setStatus((prev) => (prev ? { ...prev, status: 'cancelled' } : null));
+    setIsCancelling(false);
   };
 
   const handleQuickAutoSplit = async () => {
@@ -228,7 +270,44 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     setIsSplitting(false);
   };
 
-  // ── Derived values ────────────────────────────────────────────────────────
+  const handleSuggestConfig = async () => {
+    if (!datasetId) return;
+    setIsSuggesting(true);
+    setSuggestionError(null);
+    setSuggestionReasoning(null);
+    try {
+      const result = await request(() =>
+        apiClient.getTrainingRecommendation({
+          task,
+          dataset_id: datasetId,
+          target_board: state.currentBoard ?? 'ESP32_S3_N16R8',
+          provider: 'openrouter',
+          model_name: state.llmModel,
+        })
+      );
+      const rec = result?.recommendation;
+      if (rec) {
+        if (rec.base_model) setBaseModel(rec.base_model);
+        if (Array.isArray(rec.input_shape) && rec.input_shape.length === 3) setInputShape(rec.input_shape);
+        if (typeof rec.batch_size === 'number') setBatchSize(rec.batch_size);
+        if (typeof rec.epochs === 'number') setEpochs(rec.epochs);
+        if (typeof rec.learning_rate === 'number') setLearningRate(rec.learning_rate);
+        if (typeof rec.dropout_rate === 'number') setDropoutRate(rec.dropout_rate);
+        if (rec.augmentation && typeof rec.augmentation === 'object') {
+          setAugmentation((prev) => ({ ...prev, ...rec.augmentation }));
+        }
+        setSuggestionReasoning(rec.reasoning ?? null);
+      } else {
+        setSuggestionError('No recommendation returned.');
+      }
+    } catch (e: any) {
+      setSuggestionError(e?.message ?? 'Failed to get suggestion.');
+    } finally {
+      setIsSuggesting(false);
+    }
+  };
+
+  // --- Derived values ---
   const isRunning = status?.status === 'running' || status?.status === 'initialized';
   const availableModels = AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
   const latestMetrics = status?.metrics?.length
@@ -279,7 +358,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   return (
     <div className="space-y-6">
 
-      {/* ── Configuration Wrapper ─────────────────────────────────────────── */}
+      {/* --- Configuration Wrapper --- */}
       <div className="bg-slate-800/40 rounded-xl border border-slate-700 overflow-hidden shadow-sm">
         <button
           onClick={() => setIsConfigExpanded(!isConfigExpanded)}
@@ -336,9 +415,33 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                       </div>
                     ) : splitReady ? (
                       <p className="text-xs text-emerald-400 mt-1">
-                        ✓ Split ready — train: {splitSummary.train} · val: {splitSummary.val} · test: {splitSummary.test}
+                        ? Split ready — train: {splitSummary.train} • val: {splitSummary.val} • test: {splitSummary.test}
                       </p>
                     ) : null}
+                  </div>
+                )}
+              </div>
+
+              {/* AI-assisted config suggestion */}
+              <div className="md:col-span-2">
+                <button
+                  onClick={handleSuggestConfig}
+                  disabled={!datasetId || isSuggesting || isRunning}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 disabled:from-slate-800 disabled:to-slate-800 disabled:text-gray-500 text-white transition-all shadow-md"
+                >
+                  {isSuggesting ? (
+                    <><RefreshCw className="w-4 h-4 animate-spin" /> Analyzing dataset &amp; hardware target...</>
+                  ) : (
+                    <>✨ Suggest Optimal Config for {state.currentBoard?.replace(/_/g, ' ') ?? 'ESP32-S3'}</>
+                  )}
+                </button>
+                {suggestionError && (
+                  <p className="text-xs text-red-400 mt-1.5">{suggestionError}</p>
+                )}
+                {suggestionReasoning && (
+                  <div className="mt-2 p-3 bg-fuchsia-900/10 border border-fuchsia-500/20 rounded-lg text-xs text-fuchsia-200/90">
+                    <span className="font-semibold text-fuchsia-300">Why this config: </span>
+                    {suggestionReasoning}
                   </div>
                 )}
               </div>
@@ -356,6 +459,32 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+              </div>
+
+              {/* Compute Device */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1">
+                  Compute Device
+                  {availableDevices && !availableDevices.gpu_available && (
+                    <span className="ml-1.5 text-[10px] font-normal text-gray-500 normal-case">(no GPU detected)</span>
+                  )}
+                </label>
+                <select
+                  value={device}
+                  onChange={(e) => setDevice(e.target.value as 'auto' | 'cpu' | 'gpu')}
+                  disabled={isRunning}
+                  className={selectCls}
+                >
+                  <option value="auto">Auto (prefer GPU if available)</option>
+                  <option value="cpu">CPU only</option>
+                  <option value="gpu" disabled={!!availableDevices && !availableDevices.gpu_available}>
+                    GPU (CUDA) only{availableDevices && !availableDevices.gpu_available ? ' - unavailable' : ''}
+                  </option>
+                </select>
+                <p className="text-[11px] text-gray-500 mt-1">
+                  Small models often train just as fast (or faster) on CPU once you factor in
+                  host↔GPU transfer overhead. Force CPU here to skip that overhead.
+                </p>
               </div>
 
               {/* Epochs — SelectOrCustom */}
@@ -402,7 +531,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
             </div>
 
-            {/* ── Regularization (collapsible) ─────────────────────────────── */}
+            {/* --- Regularization (collapsible) --- */}
             <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
               <button
                 className="flex items-center justify-between w-full"
@@ -495,7 +624,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               )}
             </div>
 
-            {/* ── Early Stopping ───────────────────────────────────────────── */}
+            {/* --- Early Stopping --- */}
             <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-3 cursor-pointer select-none">
@@ -551,7 +680,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               )}
             </div>
 
-            {/* ── Data Augmentation (compact single row) ───────────────────── */}
+            {/* --- Data Augmentation (compact single row) --- */}
             <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700">
               <p className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-2">
                 <Shuffle className="w-4 h-4 text-purple-400" />
@@ -608,7 +737,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               </div>
             </div>
 
-            {/* ── Input Shape ──────────────────────────────────────────────── */}
+            {/* --- Input Shape --- */}
             <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
               <p className="text-sm font-medium text-gray-300">
                 Input Shape
@@ -639,11 +768,11 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 disabled={isRunning}
                 className="text-xs text-gray-500 hover:text-purple-400 disabled:opacity-40 transition"
               >
-                ↺ Reset to default ({getTaskDefaults(task).input_shape.join('×')})
+                ? Reset to default ({getTaskDefaults(task).input_shape.join('×')})
               </button>
             </div>
 
-            {/* ── Task info badge ──────────────────────────────────────────── */}
+            {/* --- Task info badge --- */}
             <div className="px-3 py-2 bg-slate-800/50 rounded-lg border border-slate-700 text-xs text-gray-400 flex gap-4">
               <span>
                 Task:{' '}
@@ -659,14 +788,14 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         )}
       </div>
 
-      {/* ── Error ─────────────────────────────────────────────────────────── */}
+      {/* --- Error --- */}
       {error && (
         <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">
           {error}
         </div>
       )}
 
-      {/* ── Action Buttons ────────────────────────────────────────────────── */}
+      {/* --- Action Buttons --- */}
       <div className="flex gap-3">
         <button
           onClick={handleStart}
@@ -682,9 +811,11 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         {isRunning && (
           <button
             onClick={handleCancel}
-            className="px-4 py-3 bg-red-600/20 hover:bg-red-600/40 border border-red-500/50 text-red-400 font-semibold rounded-xl transition-all"
+            disabled={isCancelling}
+            title="Cancel training (takes effect at the end of the current epoch)"
+            className="px-4 py-3 bg-red-600/20 hover:bg-red-600/40 disabled:opacity-50 border border-red-500/50 text-red-400 font-semibold rounded-xl transition-all"
           >
-            <Square className="w-5 h-5" />
+            {isCancelling ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Square className="w-5 h-5" />}
           </button>
         )}
 
@@ -702,7 +833,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </button>
       </div>
 
-      {/* ── Duplicate Warning ─────────────────────────────────────────────── */}
+      {/* --- Duplicate Warning --- */}
       {duplicateWarning && (
         <div className="p-4 bg-amber-900/30 border border-amber-500/50 rounded-xl flex items-start gap-3">
           <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
@@ -730,13 +861,24 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </div>
       )}
 
-      {/* ── Past Sessions Panel ───────────────────────────────────────────── */}
+      {/* --- Past Sessions Panel --- */}
       {showHistory && (
         <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-2 animate-slideIn">
-          <h3 className="text-sm font-semibold text-gray-300 mb-3 flex items-center gap-2">
-            <History className="w-4 h-4 text-purple-400" />
-            Past Trainings ({pastSessions.length})
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
+              <History className="w-4 h-4 text-purple-400" />
+              Past Trainings ({pastSessions.length})
+            </h3>
+            <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(e) => setShowArchived(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-800 text-purple-500 focus:ring-purple-500 focus:ring-offset-0"
+              />
+              Show archived
+            </label>
+          </div>
           {pastSessions.length === 0 ? (
             <p className="text-gray-500 text-sm text-center py-4">
               No past trainings for this task.
@@ -745,6 +887,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
             <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
               {pastSessions.map((s) => {
                 const last = s.metrics?.length ? s.metrics[s.metrics.length - 1] : null;
+                const isSessionRunning = s.status === 'running' || s.status === 'initialized';
                 const sc =
                   s.status === 'completed'
                     ? 'text-green-400 bg-green-900/20 border-green-500/30'
@@ -754,34 +897,54 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                         ? 'text-yellow-400 bg-yellow-900/20 border-yellow-500/30'
                         : 'text-purple-400 bg-purple-900/20 border-purple-500/30';
                 return (
-                  <button
+                  <div
                     key={s.id}
-                    onClick={() => setViewingSession(s)}
-                    className="w-full text-left p-3 bg-slate-900/50 hover:bg-slate-700/50 rounded-lg border border-slate-700 hover:border-slate-500 transition-all group"
+                    className={`w-full text-left p-3 bg-slate-900/50 hover:bg-slate-700/50 rounded-lg border transition-all group ${s.archived ? 'border-slate-800 opacity-60' : 'border-slate-700 hover:border-slate-500'}`}
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${sc}`}>
-                          {s.status?.toUpperCase()}
-                        </span>
-                        <span className="text-white text-sm font-medium">{s.base_model}</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <button onClick={() => setViewingSession(s)} className="flex-1 min-w-0 text-left">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${sc}`}>
+                            {s.status?.toUpperCase()}
+                          </span>
+                          <span className="text-white text-sm font-medium">{s.base_model}</span>
+                          {s.archived && (
+                            <span className="text-[10px] text-gray-500 border border-slate-700 rounded px-1.5 py-0.5">archived</span>
+                          )}
+                        </div>
+                        <div className="flex gap-4 mt-1.5 text-xs text-gray-400">
+                          <span>Ep {s.current_epoch}/{s.total_epochs}</span>
+                          {last && (
+                            <>
+                              <span className="text-green-400">Acc {(last.accuracy * 100).toFixed(1)}%</span>
+                              <span className="text-cyan-400">Val {(last.val_accuracy * 100).toFixed(1)}%</span>
+                            </>
+                          )}
+                        </div>
+                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="text-xs text-gray-500 mr-1 hidden sm:inline">{formatDate(s.created_at)}</span>
+                        {isSessionRunning && (
+                          <button
+                            onClick={async (e) => { e.stopPropagation(); await request(() => apiClient.cancelTraining(s.id)); fetchPastSessions(); }}
+                            title="Cancel this training"
+                            className="p-1.5 rounded-lg bg-red-600/10 hover:bg-red-600/30 text-red-400 transition-colors"
+                          >
+                            <Square className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {!isSessionRunning && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleArchiveToggle(s.id, !!s.archived); }}
+                            title={s.archived ? 'Unarchive' : 'Archive (hide from history)'}
+                            className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-gray-400 hover:text-white transition-colors"
+                          >
+                            {s.archived ? <History className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                          </button>
+                        )}
                       </div>
-                      <span className="text-xs text-gray-500">{formatDate(s.created_at)}</span>
                     </div>
-                    <div className="flex gap-4 mt-1.5 text-xs text-gray-400">
-                      <span>Ep {s.current_epoch}/{s.total_epochs}</span>
-                      {last && (
-                        <>
-                          <span className="text-green-400">
-                            Acc {(last.accuracy * 100).toFixed(1)}%
-                          </span>
-                          <span className="text-cyan-400">
-                            Val {(last.val_accuracy * 100).toFixed(1)}%
-                          </span>
-                        </>
-                      )}
-                    </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -789,7 +952,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </div>
       )}
 
-      {/* ── Live Training Progress ────────────────────────────────────────── */}
+      {/* --- Live Training Progress --- */}
       {status && (
         <div className="mt-8 bg-slate-900/80 border border-purple-500/30 rounded-2xl p-6 shadow-2xl relative overflow-hidden animate-slideIn">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500 opacity-80" />
@@ -798,11 +961,18 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               <Activity className="w-5 h-5 text-purple-400" />
               Live Training Progress
             </h3>
-            <span
-              className={`px-3 py-1 text-xs font-bold rounded-full ${statusColor} bg-slate-800 border border-slate-700`}
-            >
-              {status.status.toUpperCase()}
-            </span>
+            <div className="flex items-center gap-2">
+              {(status as any).device_used && (
+                <span className="px-2.5 py-1 text-[10px] font-bold rounded-full bg-slate-800 border border-slate-700 text-cyan-400 uppercase tracking-wide">
+                  {(status as any).device_used === 'gpu' ? '⚡ GPU' : '🖥 CPU'}
+                </span>
+              )}
+              <span
+                className={`px-3 py-1 text-xs font-bold rounded-full ${statusColor} bg-slate-800 border border-slate-700`}
+              >
+                {status.status.toUpperCase()}
+              </span>
+            </div>
           </div>
 
           <div className="space-y-6">
@@ -928,7 +1098,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         </div>
       )}
 
-      {/* ── Chart Modals ──────────────────────────────────────────────────── */}
+      {/* --- Chart Modals --- */}
       {expandedLiveChart === 'accuracy' && (
         <ChartModal
           label="Accuracy (%)"
@@ -949,7 +1119,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         />
       )}
 
-      {/* ── Past Session Detail Popup ─────────────────────────────────────── */}
+      {/* --- Past Session Detail Popup --- */}
       {viewingSession && (
         <PastSessionPopup
           session={viewingSession}

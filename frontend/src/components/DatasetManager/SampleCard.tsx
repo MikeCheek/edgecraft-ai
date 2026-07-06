@@ -2,7 +2,6 @@ import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2 } from 'lucide-react
 import React, { useState } from 'react'
 import { DatasetSample } from '../../types';
 
-
 interface SampleCardProps {
   sample: DatasetSample;
   allLabels: string[];
@@ -43,7 +42,7 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
       <div className="relative h-28 bg-slate-900 flex items-center justify-center">
         {isAudio ? (
           <div className="flex flex-col items-center gap-1 opacity-50">
-            <span className="text-2xl">🎵</span>
+            <span className="text-2xl">?</span>
             <span className="text-xs text-gray-400 truncate px-2 max-w-full">{sample.filename}</span>
           </div>
         ) : imgError ? (

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { DataCollector, ModelTrainer, OptimizationStudio, BoardAdvisor, LLMAdvisor, DashboardOverview, DatasetManager } from './components';
+import { DataCollector, ModelTrainer, OptimizationStudio, DeploymentPanel, LLMAdvisor, DashboardOverview, DatasetManager } from './components';
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
 import { TinyMLTask, TargetBoard } from './types';
@@ -19,15 +19,16 @@ import {
   CpuIcon
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
+import { useLocalStorage } from './hooks/useLocalStorage';
 
 export default function App() {
   const { state, dispatch } = useAppContext();
   const isHealthy = useHealthCheck();
   const { request, apiClient } = useAPI();
 
-  const [selectedTask, setSelectedTask] = useState<TinyMLTask>('IMAGE_CLASSIFICATION');
-  const [selectedBoard, setSelectedBoard] = useState<TargetBoard>('ESP32_S3_N16R8');
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'collect' | 'train' | 'optimize' | 'deploy'>('dashboard');
+  const [selectedTask, setSelectedTask] = useLocalStorage<TinyMLTask>('ec_task', 'IMAGE_CLASSIFICATION');
+  const [selectedBoard, setSelectedBoard] = useLocalStorage<TargetBoard>('ec_board', 'ESP32_S3_N16R8');
+  const [activeTab, setActiveTab] = useLocalStorage<'dashboard' | 'collect' | 'train' | 'optimize' | 'deploy'>('ec_tab', 'dashboard');
 
   // Local UI State for the custom Global Config dropdown
   const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -85,6 +86,7 @@ export default function App() {
 
   const boardOptions: { id: TargetBoard; label: string; specs: string }[] = [
     { id: 'ESP32_S3_N16R8', label: 'ESP32-S3 (N16R8)', specs: 'Xtensa LX7, 16MB Flash, 8MB PSRAM' },
+    { id: 'ESP32_CAM', label: 'ESP32-CAM (AI-Thinker)', specs: 'Xtensa LX6, OV2640 camera, ~4MB Flash+PSRAM' },
     { id: 'RASPBERRY_PI_PICO_2_W', label: 'Raspberry Pi Pico 2 W', specs: 'RP2350, 520KB SRAM, Wireless' },
     { id: 'ARDUINO_NANO_33_BLE', label: 'Arduino Nano 33 BLE', specs: 'nRF52840, 256KB RAM, IMU' },
   ];
@@ -271,16 +273,18 @@ export default function App() {
 
         <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
           <div className="max-w-6xl mx-auto animate-slideIn">
-            {activeTab === 'dashboard' && <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />}
+            <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
+              <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />
+            </div>
 
-            {activeTab === 'collect' && (
+            <div className={activeTab === 'collect' ? 'block' : 'hidden'}>
               <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
                 <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
                 <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
               </div>
-            )}
+            </div>
 
-            {activeTab === 'train' && (
+            <div className={activeTab === 'train' ? 'block' : 'hidden'}>
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
                 <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
                   <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
@@ -306,33 +310,21 @@ export default function App() {
                   </div>
                 )}
               </div>
-            )}
+            </div>
 
-            {activeTab === 'optimize' && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                <div className="lg:col-span-2 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
-                  <OptimizationStudio models={state.trainedModels} />
-                </div>
-                <div className="space-y-6">
-                  <div className="bg-slate-800/50 rounded-xl border border-slate-700 p-6">
-                    <h3 className="text-lg font-semibold text-white mb-4">Hardware Target</h3>
-                    <BoardAdvisor optimizationId={state.currentOptimization?.id} board={selectedBoard} />
-                  </div>
-                </div>
+            <div className={activeTab === 'optimize' ? 'block' : 'hidden'}>
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
+                <OptimizationStudio models={state.trainedModels} />
               </div>
-            )}
+            </div>
 
-            {activeTab === 'deploy' && (
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl max-w-3xl">
-                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Export C-Array</h2>
-                <div className="p-6 bg-slate-900/80 rounded-lg border border-pink-500/20 text-center">
-                  <button disabled={!state.currentOptimization} className="px-8 py-3 bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500 disabled:from-slate-700 text-white font-bold rounded-lg transition-all shadow-lg">
-                    {state.currentOptimization ? 'Generate edgecraft_model.h' : 'Complete optimization first'}
-                  </button>
-                </div>
+            <div className={activeTab === 'deploy' ? 'block' : 'hidden'}>
+              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
+                <DeploymentPanel board={selectedBoard} />
               </div>
-            )}
+            </div>
           </div>
         </main>
       </div>

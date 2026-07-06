@@ -15,6 +15,7 @@ TaskType = Literal[
 # Board Types
 BoardType = Literal[
     "ESP32_S3_N16R8",
+    "ESP32_CAM",
     "RASPBERRY_PI_PICO_2_W",
     "ARDUINO_NANO_33_BLE"
 ]
@@ -24,7 +25,8 @@ QuantizationMethod = Literal[
     "FLOAT16_QUANTIZATION",
     "PRUNING",
     "WEIGHT_CLUSTERING",
-    "DYNAMIC_QUANTIZATION"
+    "DYNAMIC_QUANTIZATION",
+    "TRANSFER_LEARNING"
 ]
 
 DatasetSplit = Literal["train", "val", "test", "unassigned"]

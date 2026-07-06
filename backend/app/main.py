@@ -7,11 +7,12 @@ import os
 load_dotenv()  # Load .env file at startup
 
 from app.routers import datasets, training, optimization, remote_datasets
+from app.routers import inference  # NEW: real inference router
 
 app = FastAPI(
     title="EdgeCraft AI Backend",
     description="Local TinyML Studio API",
-    version="0.2.0"
+    version="0.3.0"
 )
 
 # CORS Configuration
@@ -30,11 +31,11 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(datasets.router, prefix="/api/datasets", tags=["Datasets"])
-app.include_router(remote_datasets.router, prefix="/api/remote_datasets", tags=["Remote Datasets"])
-app.include_router(training.router, prefix="/api/training", tags=["Training"])
-app.include_router(optimization.router, prefix="/api/optimization", tags=["Optimization"])
-app.include_router(remote_datasets.router, prefix="/api/remote_datasets", tags=["Remote Datasets"])
+app.include_router(datasets.router,         prefix="/api/datasets",         tags=["Datasets"])
+app.include_router(remote_datasets.router,  prefix="/api/remote_datasets",  tags=["Remote Datasets"])
+app.include_router(training.router,         prefix="/api/training",          tags=["Training"])
+app.include_router(optimization.router,     prefix="/api/optimization",      tags=["Optimization"])
+app.include_router(inference.router,        prefix="/api/inference",         tags=["Inference"])  # NEW
 
 @app.get("/api/health")
 async def health_check():
@@ -47,7 +48,7 @@ async def health_check():
 async def get_info():
     return {
         "name": "EdgeCraft AI Backend",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "tasks": [
             "IMAGE_CLASSIFICATION",
             "OBJECT_DETECTION",
@@ -57,15 +58,29 @@ async def get_info():
         ],
         "boards": [
             "ESP32_S3_N16R8",
+            "ESP32_CAM",
             "RASPBERRY_PI_PICO_2_W",
             "ARDUINO_NANO_33_BLE"
         ],
         "models": {
-            "image": ["MobileNetV2", "EfficientNet", "ResNet50V2", "MobileNetV3Small", "Custom3LayerCNN"],
+            "image": ["MobileNetV2", "MobileNetV3Small", "MobileNetV1_0.25", "EfficientNet", "ResNet50V2", "Custom3LayerCNN"],
             "audio": ["MFCC_CNN", "WaveNet", "AudioLSTM", "AudioGRU"],
-            "text": ["TinyBERT"]
+            "text":  ["TinyBERT"]
         }
     }
+
+@app.get("/api/storage/overview")
+async def get_storage_overview():
+    """
+    Full backend storage report: per-dataset sample counts/sizes/file-type
+    breakdowns, trained model sizes, optimized (.tflite) output sizes, and
+    overall disk usage - all computed live from what's actually on disk.
+    """
+    try:
+        from app.services.storage_overview import get_storage_overview as _overview
+        return {"status": "success", "overview": _overview()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):

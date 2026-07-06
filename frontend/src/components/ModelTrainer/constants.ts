@@ -1,22 +1,27 @@
 import { TinyMLTask } from '../../types'
 
-// ─── Input Size Configuration ────────────────────────────────────────────────
+// --- Input Size Configuration ---
 // Edit these values to change the input dimensions sent to the backend.
 // Keep them in sync with IMAGE_SHAPES / AUDIO_PARAMS in data_processor.py.
 
 export const INPUT_SIZES = {
   // Image tasks — [width, height, channels]
-  IMAGE_CLASSIFICATION:  [224, 224, 3] as number[],
-  OBJECT_DETECTION:      [224, 224, 3] as number[],
+  // NOTE: 96x96 (not 224x224) is the default because this studio targets
+  // microcontroller-class boards (ESP32-S3, ESP32-CAM). 224x224 inputs
+  // produce activation tensors far too large for typical MCU RAM budgets;
+  // 96x96 matches what TinyML references (e.g. Visual Wake Words) commonly
+  // use and keeps the resulting tensor arena in a deployable range.
+  IMAGE_CLASSIFICATION:  [96, 96, 3] as number[],
+  OBJECT_DETECTION:      [96, 96, 3] as number[],
   VISUAL_WAKE_WORDS:     [96,  96,  1] as number[],   // grayscale
 
   // Audio tasks — [n_mfcc, time_frames, 1]
-  // time_frames ≈ ceil(sample_rate * duration / hop_length)  (default hop = 512)
+  // time_frames ? ceil(sample_rate * duration / hop_length)  (default hop = 512)
   KEYWORD_SPOTTING:      [40, 101, 1] as number[],
   AUDIO_CLASSIFICATION:  [64, 101, 1] as number[],
 } satisfies Record<TinyMLTask, number[]>
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ----------------------------------------
 
 export function getTaskDefaults (task: TinyMLTask): {
   input_shape: number[]
@@ -24,24 +29,31 @@ export function getTaskDefaults (task: TinyMLTask): {
 } {
   switch (task) {
     case 'VISUAL_WAKE_WORDS':
-      return { input_shape: INPUT_SIZES.VISUAL_WAKE_WORDS, base_model: 'MobileNetV2' }
+      return { input_shape: INPUT_SIZES.VISUAL_WAKE_WORDS, base_model: 'MobileNetV3Small' }
     case 'KEYWORD_SPOTTING':
       return { input_shape: INPUT_SIZES.KEYWORD_SPOTTING, base_model: 'MFCC_CNN' }
     case 'AUDIO_CLASSIFICATION':
       return { input_shape: INPUT_SIZES.AUDIO_CLASSIFICATION, base_model: 'MFCC_CNN' }
     case 'OBJECT_DETECTION':
-      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'MobileNetV2' }
+      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'MobileNetV3Small' }
     case 'IMAGE_CLASSIFICATION':
     default:
-      return { input_shape: INPUT_SIZES.IMAGE_CLASSIFICATION, base_model: 'MobileNetV2' }
+      // MobileNetV3Small at 96x96 is a far more realistic edge default than
+      // the previous MobileNetV2 @ 224x224 (which alone can exceed 8MB as
+      // float32 - unusable on any of the supported boards without heavy
+      // optimization first). Use the "Suggest Optimal Config" button for a
+      // dataset- and board-aware recommendation instead of relying purely
+      // on this static default.
+      return { input_shape: INPUT_SIZES.IMAGE_CLASSIFICATION, base_model: 'MobileNetV3Small' }
   }
 }
 
 export const IMAGE_MODELS = [
   'MobileNetV2',
+  'MobileNetV3Small',
+  'MobileNetV1_0.25',
   'EfficientNet',
   'ResNet50V2',
-  'MobileNetV3Small',
   'Custom3LayerCNN'
 ]
 export const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet', 'AudioLSTM', 'AudioGRU']
@@ -126,6 +138,6 @@ export function formatTime (secs: number): string {
 }
 
 export function formatDate (ts: number): string {
-  if (!ts) return '–'
+  if (!ts) return '—'
   return new Date(ts * 1000).toLocaleString()
 }

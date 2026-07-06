@@ -1,6 +1,6 @@
-// ═══════════════════════════════════════════════════════════════════════════════
+// ----------------------------------------
 // FILE: useApi.ts
-// ═══════════════════════════════════════════════════════════════════════════════
+// ----------------------------------------
 
 import { useCallback, useState } from 'react'
 import axios, { AxiosInstance } from 'axios'
@@ -21,7 +21,11 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/health')
   }
 
-  // ── Datasets ──────────────────────────────────────────────────────────────
+  async getStorageOverview() {
+    return this.client.get<ApiResponse<any>>('/storage/overview')
+  }
+
+  // --- Datasets ---
 
   async createDataset(name: string, task: string) {
     return this.client.post<ApiResponse<any>>('/datasets/create', {
@@ -62,7 +66,7 @@ class APIClient {
     return res.data
   }
 
-  // ── Single-file upload ────────────────────────────────────────────────────
+  // --- Single-file upload ---
 
   async uploadSample(
     datasetId: string,
@@ -78,7 +82,7 @@ class APIClient {
     return this.uploadClient.post<ApiResponse<any>>('/datasets/upload', fd)
   }
 
-  // ── Chunked ZIP upload ────────────────────────────────────────────────────
+  // --- Chunked ZIP upload ---
 
   async initZipUpload(params: {
     dataset_id: string
@@ -167,7 +171,7 @@ class APIClient {
     await this.client.delete(`/datasets/upload_zip/${uploadId}`)
   }
 
-  // ── Samples ───────────────────────────────────────────────────────────────
+  // --- Samples ---
 
   async listSamples(datasetId?: string) {
     return this.client.get<ApiResponse<any>>('/datasets/list', {
@@ -272,7 +276,7 @@ class APIClient {
     URL.revokeObjectURL(url)
   }
 
-  // ── Remote Datasets (URL / Kaggle / HuggingFace) ────────────────────────────
+  // --- Remote Datasets (URL / Kaggle / HuggingFace) ---
 
   async getRemoteTokenStatus(): Promise<{
     status: string
@@ -339,13 +343,22 @@ class APIClient {
     })
   }
 
-  // ── Training ──────────────────────────────────────────────────────────────
+  // --- Training ---
 
   async startTraining(config: any) {
     return this.client.post<ApiResponse<any>>('/training/start', {
       ...config,
-      input_shape: config.input_shape || [224, 224, 3]
+      input_shape: config.input_shape || [224, 224, 3],
+      device: config.device || 'auto'
     })
+  }
+
+  async getAvailableDevices(): Promise<{
+    status: string
+    devices: { cpu_available: boolean; gpu_available: boolean; gpus: { name: string; compute_capability: any }[] }
+  }> {
+    const res = await this.client.get('/training/devices')
+    return res.data
   }
 
   async getTrainingStatus(trainingId: string) {
@@ -364,11 +377,44 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/training/models')
   }
 
-  async listAllSessions() {
-    return this.client.get<ApiResponse<any>>('/training/sessions')
+  async listAllSessions(includeArchived: boolean = false) {
+    return this.client.get<ApiResponse<any>>('/training/sessions', {
+      params: { include_archived: includeArchived }
+    })
   }
 
-  // ── Optimization ──────────────────────────────────────────────────────────
+  async archiveTraining(trainingId: string) {
+    return this.client.post<ApiResponse<any>>(`/training/archive/${trainingId}`)
+  }
+
+  async unarchiveTraining(trainingId: string) {
+    return this.client.post<ApiResponse<any>>(`/training/unarchive/${trainingId}`)
+  }
+
+  async deleteTrainingSession(trainingId: string) {
+    return this.client.delete<ApiResponse<any>>(`/training/session/${trainingId}`)
+  }
+
+  /**
+   * Ask the LLM (with a rule-based fallback) for a suggested base_model +
+   * hyperparameters BEFORE starting a training run, given the task, the
+   * dataset actually selected, and the board you plan to deploy to.
+   */
+  async getTrainingRecommendation(params: {
+    task: string
+    dataset_id: string
+    target_board?: string
+    provider?: 'ollama' | 'openrouter'
+    model_name?: string
+  }) {
+    return this.client.post<ApiResponse<any>>(
+      '/training/recommend',
+      params,
+      { timeout: 60_000 }
+    )
+  }
+
+  // --- Optimization ---
 
   async quantizeModel(config: any) {
     return this.client.post<ApiResponse<any>>('/optimization/quantize', config)
@@ -392,6 +438,26 @@ class APIClient {
     )
   }
 
+  /**
+   * Download a full Arduino/C++ project (model_data.h + sketch.ino + README.md)
+   * for the given board, built from the REAL optimized model bytes.
+   */
+  async exportProject(optimizationId: string, board: string, config?: { camera_pins?: Record<string, number>; display_config?: Record<string, any> }) {
+    const resp = await this.client.post(
+      `/optimization/export/${optimizationId}`,
+      { board, camera_pins: config?.camera_pins, display_config: config?.display_config },
+      { responseType: 'blob' }
+    )
+    const url = URL.createObjectURL(resp.data as Blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `edgecraft_export_${optimizationId.slice(0, 8)}_${board}.zip`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   async evaluateBoard(optimizationId: string, board: string) {
     return this.client.post<ApiResponse<any>>('/optimization/evaluate-board', {
       optimization_id: optimizationId,
@@ -408,11 +474,17 @@ class APIClient {
     provider: 'ollama' | 'openrouter',
     modelName: string
   ) {
-    return this.client.post<ApiResponse<any>>('/optimization/llm-suggest', {
-      training_id: trainingId,
-      provider,
-      model_name: modelName
-    })
+    return this.client.post<ApiResponse<any>>(
+      '/optimization/llm-suggest',
+      {
+        training_id: trainingId,
+        provider,
+        model_name: modelName
+      },
+      {
+        timeout: 120_000 // Override: Allow up to 2 minutes for LLM generation
+      }
+    )
   }
 
   async getLLMOptimizationAdvice(
@@ -420,11 +492,33 @@ class APIClient {
     board: string,
     useLocalLLM = false
   ) {
-    return this.client.post<ApiResponse<any>>('/optimization/llm-optimize', {
-      optimization_id: optimizationId,
-      board,
-      use_local_llm: useLocalLLM
-    })
+    return this.client.post<ApiResponse<any>>(
+      '/optimization/llm-optimize',
+      {
+        optimization_id: optimizationId,
+        board,
+        use_local_llm: useLocalLLM
+      },
+      {
+        timeout: 120_000 // Override: Allow up to 2 minutes for LLM generation
+      }
+    )
+  }
+
+  // ── Inference ──────────────────────────────────────────────────────────────
+
+  async getInferenceHistory(limit: number = 100) {
+    return this.client.get<ApiResponse<any>>(
+      `/inference/history?limit=${limit}`
+    )
+  }
+
+  async clearInferenceHistory() {
+    return this.client.delete<ApiResponse<any>>('/inference/history')
+  }
+
+  async getOptimizationHistory() {
+    return this.client.get<ApiResponse<any>>('/optimization/history')
   }
 }
 
@@ -449,6 +543,7 @@ export function useAPI() {
           : response.data
       } catch (err: any) {
         setError(err.message || 'Network error')
+        console.error('API request error:', err)
         return null
       } finally {
         setLoading(false)

@@ -1,7 +1,6 @@
 import { Loader2, Check, AlertTriangle, XCircle } from 'lucide-react';
 import React, { useEffect, useState } from 'react'
 
-
 export interface DownloadProgress {
   downloaded: number;
   total: number;

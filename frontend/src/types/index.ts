@@ -8,6 +8,7 @@ export type TinyMLTask =
 
 export type TargetBoard =
   | 'ESP32_S3_N16R8'
+  | 'ESP32_CAM'
   | 'RASPBERRY_PI_PICO_2_W'
   | 'ARDUINO_NANO_33_BLE'
 
@@ -17,6 +18,7 @@ export type QuantizationMethod =
   | 'PRUNING'
   | 'WEIGHT_CLUSTERING'
   | 'DYNAMIC_QUANTIZATION'
+  | 'TRANSFER_LEARNING'
 
 export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
 
@@ -54,6 +56,7 @@ export interface ModelMetadata {
   training_id: string
   task: TinyMLTask
   dataset_id?: string
+  dataset_name?: string
   base_model?: string
   created_at: number
   accuracy: number
@@ -63,6 +66,8 @@ export interface ModelMetadata {
   optimized: boolean
   size_bytes: number
   download_url?: string
+  type: 'image' | 'audio' | 'tabular' | 'text'
+  labels: string[]
 }
 
 export interface TrainingMetrics {
@@ -85,6 +90,26 @@ export interface TrainingStatus {
   metrics: TrainingMetrics[]
 }
 
+export interface OptimizationComparisonSide {
+  accuracy: number
+  loss?: number
+  avg_inference_ms: number
+  size_bytes: number
+}
+
+export interface OptimizationComparison {
+  test_split_used: string
+  num_samples_evaluated: number
+  original: OptimizationComparisonSide
+  optimized: OptimizationComparisonSide
+  deltas: {
+    accuracy_delta: number
+    speedup_factor: number
+    size_reduction_pct: number
+  }
+  error?: string
+}
+
 export interface OptimizationResult {
   id: string
   original_size_bytes: number
@@ -92,6 +117,7 @@ export interface OptimizationResult {
   compression_ratio: number
   method: QuantizationMethod
   status: 'initialized' | 'running' | 'completed' | 'failed'
+  comparison?: OptimizationComparison
   c_array?: string
   cpp_wrapper?: string
   download_url?: string
@@ -104,6 +130,10 @@ export interface BoardRecommendation {
   flash_usage_kb: number
   ram_percentage: number
   flash_percentage: number
+  ram_estimation_method?: string
+  measured_inference_ms_on_host?: number
+  estimated_inference_ms_on_device?: number
+  estimation_note?: string
   warnings: string[]
   suggestions: string[]
   estimated_inference_ms: number

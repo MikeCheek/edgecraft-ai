@@ -29,3 +29,5 @@ Thumbs.db
 
 backend.*
 frontend.*
+
+backend/data_storage/

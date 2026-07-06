@@ -38,7 +38,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const [expandedClasses, setExpandedClasses] = useState<string | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
 
-  // Split summary state: datasetId → SplitSummary
+  // Split summary state: datasetId ? SplitSummary
   const [splitSummaries, setSplitSummaries] = useState<Record<string, SplitSummary>>({});
   const [splittingId, setSplittingId] = useState<string | null>(null);
 
@@ -210,7 +210,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         <p className="text-xs text-gray-400">{dataset.sample_count} samples</p>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
-                        {/* ── Split warning badge + quick auto-split ── */}
+                        {/* --- Split warning badge + quick auto-split --- */}
                         {dataset.sample_count > 0 && hasUnassigned && (
                           <div className="flex items-center gap-1 mr-1">
                             <span
@@ -237,8 +237,8 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         {/* Split health badge when fully assigned */}
                         {isFullyAssigned && (
                           <span className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 bg-emerald-900/20 border border-emerald-500/30 rounded-lg mr-1"
-                            title={`train: ${summary!.train} · val: ${summary!.val} · test: ${summary!.test}`}>
-                            ✓ Split
+                            title={`train: ${summary!.train} • val: ${summary!.val} • test: ${summary!.test}`}>
+                            ? Split
                           </span>
                         )}
 

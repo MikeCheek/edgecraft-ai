@@ -1,7 +1,7 @@
 export { DataCollector } from './DataCollector'
 export { ModelTrainer } from './ModelTrainer'
 export { OptimizationStudio } from './OptimizationStudio'
-export { BoardAdvisor } from './BoardAdvisor'
+export { DeploymentPanel } from './DeploymentPanel'
 export { LLMAdvisor } from './LLMAdvisor'
 export { DashboardOverview } from './DashboardOverview'
 export { DatasetManager } from './DatasetManager'

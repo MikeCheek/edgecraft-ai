@@ -3,7 +3,6 @@ import { X, ZoomIn } from 'lucide-react';
 import { MetricChart, ChartModal } from './Chart';
 import { formatDate } from './constants';
 
-
 interface PastSessionPopupProps {
   session: any;
   onClose: () => void;
@@ -40,7 +39,7 @@ function PastSessionPopup({ session, onClose }: PastSessionPopupProps) {
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 sticky top-0 bg-slate-900 z-10">
           <div>
             <h3 className="text-lg font-bold text-white">
-              {session.base_model} – {session.task?.replace(/_/g, ' ')}
+              {session.base_model} — {session.task?.replace(/_/g, ' ')}
             </h3>
             <p className="text-xs text-gray-400 mt-0.5">{formatDate(session.created_at)}</p>
           </div>
@@ -57,8 +56,8 @@ function PastSessionPopup({ session, onClose }: PastSessionPopupProps) {
               ['Epochs', `${session.current_epoch ?? 0} / ${session.total_epochs}`],
               ['Batch Size', session.batch_size],
               ['Learning Rate', session.learning_rate],
-              ['Dropout', session.dropout_rate ?? '–'],
-              ['L2 Reg', session.l2_reg ?? '–'],
+              ['Dropout', session.dropout_rate ?? '—'],
+              ['L2 Reg', session.l2_reg ?? '—'],
               ['Early Stop', session.early_stopping ? `Yes (pat. ${session.early_stopping_patience})` : 'No'],
             ].map(([k, v], i) => (
               <div key={i} className="p-3 bg-slate-800 rounded-lg border border-slate-700">

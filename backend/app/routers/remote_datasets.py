@@ -31,18 +31,15 @@ ZIP_PROCESSING_BATCH_SIZE = 500
 # Active downloads tracking (for cancellation)
 _active_downloads: dict[str, dict] = {}
 
-
 async def _run_in_executor(fn, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_EXECUTOR, fn, *args)
-
 
 def _sse_event(data: dict) -> str:
     """Format a dict as an SSE data line."""
     return f"data: {json.dumps(data)}\n\n"
 
-
-# ─── Shared Processing Logic ─────────────────────────────────────────────────
+# --- Shared Processing Logic ---
 
 def _process_zip_to_dataset(zip_path: str, dataset_id: str, task: str, download_id: str = None) -> int:
     """Extract a zip file and ingest samples into the data_manager.
@@ -102,8 +99,7 @@ def _process_zip_to_dataset(zip_path: str, dataset_id: str, task: str, download_
 
     return total_processed
 
-
-# ─── Token Status ─────────────────────────────────────────────────────────────
+# --- Token Status ---
 
 @router.get("/token_status")
 async def get_token_status():
@@ -118,8 +114,7 @@ async def get_token_status():
         "huggingface_configured": hf_configured,
     }
 
-
-# ─── Cancel Download ──────────────────────────────────────────────────────────
+# --- Cancel Download ---
 
 class CancelRequest(BaseModel):
     download_id: str
@@ -132,8 +127,7 @@ async def cancel_download(req: CancelRequest):
         return {"status": "success", "message": "Cancellation requested"}
     return {"status": "error", "message": "Download not found or already completed"}
 
-
-# ─── SSE Download Stream (URL / Kaggle / HuggingFace) ─────────────────────────
+# --- SSE Download Stream (URL / Kaggle / HuggingFace) ---
 
 @router.get("/download_stream")
 async def download_stream(
@@ -260,7 +254,7 @@ async def download_stream(
         },
     )
 
-# ─── Internal Download Implementations ────────────────────────────────────────
+# --- Internal Download Implementations ---
 
 ## Active downloads tracking (for cancellation)
 _active_downloads: dict[str, dict] = {}
@@ -389,7 +383,7 @@ def _kaggle_download_thread(
         zips = [f for f in os.listdir(download_dir) if f.endswith(".zip")]
         if not zips: raise ValueError("No zip file found in Kaggle download")
         zip_path = os.path.join(download_dir, zips[0])
-        
+
         _active_downloads[download_id]["zip_path"] = zip_path
         tree = scan_zip_tree(zip_path)
         _push(("ready_to_map", tree, download_id))
@@ -438,10 +432,10 @@ def _huggingface_download_thread(
         poller.start()
         try:
             snapshot_download(
-                repo_id=repo_id, 
-                local_dir=download_dir, 
-                repo_type="dataset", 
-                token=os.environ.get("HUGGINGFACE_TOKEN", None), 
+                repo_id=repo_id,
+                local_dir=download_dir,
+                repo_type="dataset",
+                token=os.environ.get("HUGGINGFACE_TOKEN", None),
                 local_dir_use_symlinks=False
             )
         finally:
@@ -463,7 +457,7 @@ def _huggingface_download_thread(
                     arcname = os.path.relpath(file_path, download_dir)
                     zf.write(file_path, arcname)
 
-        # 2. FIX: Clean up the raw HuggingFace directory to save space 
+        # 2. FIX: Clean up the raw HuggingFace directory to save space
         shutil.rmtree(download_dir, ignore_errors=True)
 
         _active_downloads[download_id]["zip_path"] = zip_path
@@ -474,7 +468,7 @@ def _huggingface_download_thread(
     finally:
         _push(_SENTINEL)
 
-# ─── Kaggle Search ────────────────────────────────────────────────────────────
+# --- Kaggle Search ---
 
 @router.get("/kaggle/search")
 async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: int = 1, page_size: int = 20):
@@ -490,7 +484,7 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
             os.environ["KAGGLE_KEY"] = key
             try:
                 from kaggle.api.kaggle_api_extended import KaggleApi
-            except ImportError as ie:                
+            except ImportError as ie:
                 raise ValueError(f"kaggle package not installed: {ie}. Run: pip install kaggle")
 
             api = KaggleApi()
@@ -534,8 +528,7 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
         logger.exception("Kaggle search error")
         raise HTTPException(status_code=500, detail=f"Kaggle search failed: {type(e).__name__}: {str(e)}")
 
-
-# ─── HuggingFace Search ───────────────────────────────────────────────────────
+# --- HuggingFace Search ---
 
 @router.get("/huggingface/search")
 async def search_huggingface_datasets(query: str = Query(..., min_length=1), limit: int = 20):
@@ -590,8 +583,7 @@ async def search_huggingface_datasets(query: str = Query(..., min_length=1), lim
         logger.exception("HuggingFace search error")
         raise HTTPException(status_code=500, detail=f"HuggingFace search failed: {type(e).__name__}: {str(e)}")
 
-
-# ─── Download Progress Polling (alternative to SSE for simple clients) ────────
+# --- Download Progress Polling (alternative to SSE for simple clients) ---
 
 @router.get("/progress/{download_id}")
 async def get_download_progress(download_id: str):
@@ -605,8 +597,7 @@ async def get_download_progress(download_id: str):
         "total": info.get("total", 0),
         "cancelled": info.get("cancelled", False),
     }
-    
-    
+
 class ProcessRemoteRequest(BaseModel):
     download_id: str
     dataset_id: str
@@ -618,10 +609,10 @@ async def process_remote_zip(req: ProcessRemoteRequest):
     info = _active_downloads.get(req.download_id)
     if not info or not info.get("zip_path"):
         raise HTTPException(status_code=404, detail="Download session missing or expired")
-        
+
     try:
         count = await _run_in_executor(
-            extract_zip_with_mapping, 
+            extract_zip_with_mapping,
             info["zip_path"], req.dataset_id, req.task, req.mapping
         )
         # Clean up
@@ -629,7 +620,7 @@ async def process_remote_zip(req: ProcessRemoteRequest):
         if "edgecraft_remote_downloads" in base_dir:
             shutil.rmtree(base_dir, ignore_errors=True)
         _active_downloads.pop(req.download_id, None)
-            
+
         return {"status": "success", "count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

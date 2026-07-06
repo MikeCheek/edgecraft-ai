@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Cpu, AlertTriangle, CheckCircle2, RefreshCw } from 'lucide-react';
+import { Cpu, AlertTriangle, CheckCircle2, RefreshCw, Download } from 'lucide-react';
 import { useAPI } from '../hooks/useAPI';
 import { BoardRecommendation } from '../types';
 
@@ -11,6 +11,7 @@ interface BoardAdvisorProps {
 export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
   const [recommendation, setRecommendation] = useState<BoardRecommendation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const { request, error, apiClient } = useAPI();
 
   const handleEvaluate = async () => {
@@ -29,12 +30,27 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
     }
   };
 
+  const handleExport = async () => {
+    if (!optimizationId || !board) return;
+    setIsExporting(true);
+    try {
+      await apiClient.exportProject(optimizationId, board);
+    } catch (e) {
+      // apiClient.exportProject throws on non-2xx; surface via alert since
+      // this isn't routed through the useAPI() error state.
+      alert('Export failed. Make sure the optimization has completed successfully.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      {/* Action Button */}
-      <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700">
-        <p className="text-sm text-gray-400 mb-3">
-          Simulate the deployment of your optimized model onto the physical hardware to check for memory constraints.
+      {/* Action Buttons */}
+      <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-2">
+        <p className="text-sm text-gray-400 mb-1">
+          Estimate real memory/latency impact of deploying your optimized model to this board,
+          then export a ready-to-flash Arduino project.
         </p>
         <button
           onClick={handleEvaluate}
@@ -42,9 +58,20 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
           className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition text-sm flex items-center justify-center gap-2"
         >
           {isLoading ? (
-            <><RefreshCw className="w-4 h-4 animate-spin" /> Simulating...</>
+            <><RefreshCw className="w-4 h-4 animate-spin" /> Evaluating...</>
           ) : (
             <><Cpu className="w-4 h-4" /> Evaluate for {board ? board.replace(/_/g, ' ') : 'Board'}</>
+          )}
+        </button>
+        <button
+          onClick={handleExport}
+          disabled={!optimizationId || !board || isExporting}
+          className="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition text-sm flex items-center justify-center gap-2"
+        >
+          {isExporting ? (
+            <><RefreshCw className="w-4 h-4 animate-spin" /> Exporting...</>
+          ) : (
+            <><Download className="w-4 h-4" /> Export Arduino Project (.zip)</>
           )}
         </button>
       </div>
@@ -63,7 +90,7 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
 
             {/* RAM Usage Block */}
             <div className="p-3 bg-slate-800 rounded-lg border border-slate-600">
-              <span className="text-gray-400 block mb-1">RAM Usage</span>
+              <span className="text-gray-400 block mb-1">RAM Usage (est.)</span>
               <div className="flex justify-between items-end mb-1">
                 <span className="text-white font-bold">{recommendation.ram_usage_kb} KB</span>
                 <span className={recommendation.ram_percentage > 80 ? 'text-red-400' : 'text-green-400'}>
@@ -96,6 +123,21 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
             </div>
           </div>
 
+          {/* Real vs estimated latency */}
+          {recommendation.estimated_inference_ms_on_device != null && (
+            <div className="p-3 bg-slate-800 rounded-lg border border-slate-600 text-xs text-gray-300">
+              <span className="text-gray-400 block mb-1">Inference Latency</span>
+              <div className="flex justify-between">
+                <span>Measured on this PC</span>
+                <span className="font-mono text-white">{recommendation.measured_inference_ms_on_host} ms</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Estimated on {board?.replace(/_/g, ' ')}</span>
+                <span className="font-mono text-cyan-300">{recommendation.estimated_inference_ms_on_device} ms</span>
+              </div>
+            </div>
+          )}
+
           {/* Warnings (if any) */}
           {recommendation.warnings && recommendation.warnings.length > 0 && (
             <div className="p-3 bg-yellow-900/20 border border-yellow-500/30 rounded-lg">
@@ -122,6 +164,10 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
                 ))}
               </ul>
             </div>
+          )}
+
+          {recommendation.estimation_note && (
+            <p className="text-[10px] text-slate-500 italic">{recommendation.estimation_note}</p>
           )}
         </div>
       )}

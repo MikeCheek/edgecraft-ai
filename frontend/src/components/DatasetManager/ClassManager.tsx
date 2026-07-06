@@ -2,7 +2,6 @@ import { Tags, RefreshCw, FolderPlus, Check, X, Tag, Edit2, Trash2 } from 'lucid
 import React, { useCallback, useEffect, useState } from 'react'
 import { useAPI } from '../../hooks/useAPI';
 
-
 interface ClassManagerProps {
   datasetId: string;
   onChanged: () => void;

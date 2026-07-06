@@ -1,19 +1,42 @@
-import { Database, FolderHeart, Activity, CheckCircle2, XCircle, BrainCircuit, Box } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Database, FolderHeart, Activity, CheckCircle2, XCircle, BrainCircuit, Box, HardDrive, ChevronDown, FileType } from 'lucide-react';
 import { DatasetStatistics } from '../types';
 import { useAppContext } from '../context/AppContext';
+import { useAPI } from '../hooks/useAPI';
 
 interface DashboardOverviewProps {
   stats: DatasetStatistics;
   isHealthy: boolean;
 }
 
+function formatBytes(n: number): string {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = n;
+  let i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return `${size.toFixed(1)} ${units[i]}`;
+}
+
 export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) {
   const { state } = useAppContext();
+  const { apiClient, request } = useAPI();
   const labels = Object.entries(stats.by_label || {});
   const tasks = Object.entries(stats.by_task || {});
 
   const modelsCount = state.trainedModels.length;
   const recentModel = state.trainedModels.length > 0 ? state.trainedModels[state.trainedModels.length - 1] : null;
+
+  const [storageOverview, setStorageOverview] = useState<any | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [showStorageDetails, setShowStorageDetails] = useState(false);
+
+  useEffect(() => {
+    setStorageLoading(true);
+    request(() => apiClient.getStorageOverview())
+      .then((res: any) => { if (res && res.overview) setStorageOverview(res.overview); })
+      .finally(() => setStorageLoading(false));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -142,6 +165,125 @@ export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) 
           )}
         </div>
 
+      </div>
+
+      {/* Storage Overview */}
+      <div className="bg-slate-800/50 rounded-xl border border-slate-700 overflow-hidden">
+        <button
+          onClick={() => setShowStorageDetails((v) => !v)}
+          className="w-full flex items-center justify-between p-6 hover:bg-white/5 transition-colors"
+        >
+          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+            <HardDrive className="w-5 h-5 text-emerald-400" />
+            Backend Storage Overview
+          </h3>
+          <div className="flex items-center gap-3">
+            {storageOverview && (
+              <span className="text-sm text-gray-400 font-mono">
+                {storageOverview.total_storage_human} used
+                {storageOverview.disk_free_human && ` · ${storageOverview.disk_free_human} free on disk`}
+              </span>
+            )}
+            <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${showStorageDetails ? 'rotate-180' : ''}`} />
+          </div>
+        </button>
+
+        {showStorageDetails && (
+          <div className="px-6 pb-6 space-y-5 border-t border-slate-700 pt-5">
+            {storageLoading ? (
+              <p className="text-sm text-gray-500 text-center py-4">Loading storage report...</p>
+            ) : !storageOverview ? (
+              <p className="text-sm text-gray-500 text-center py-4">Storage overview unavailable.</p>
+            ) : (
+              <>
+                {/* Summary cards */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-700">
+                    <span className="text-xs text-gray-500 block mb-1">Datasets</span>
+                    <span className="text-lg font-bold text-white">{storageOverview.datasets.total_human}</span>
+                    <span className="text-xs text-gray-500 block">{storageOverview.datasets.total_samples} samples across {storageOverview.datasets.count} datasets</span>
+                  </div>
+                  <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-700">
+                    <span className="text-xs text-gray-500 block mb-1">Trained Models</span>
+                    <span className="text-lg font-bold text-white">{storageOverview.trained_models.total_human}</span>
+                    <span className="text-xs text-gray-500 block">{storageOverview.trained_models.count} .keras files</span>
+                  </div>
+                  <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-700">
+                    <span className="text-xs text-gray-500 block mb-1">Optimized Models</span>
+                    <span className="text-lg font-bold text-white">{storageOverview.optimized_models.total_human}</span>
+                    <span className="text-xs text-gray-500 block">{storageOverview.optimized_models.count} .tflite files</span>
+                  </div>
+                  <div className="p-3 bg-slate-900/60 rounded-lg border border-slate-700">
+                    <span className="text-xs text-gray-500 block mb-1">Training Sessions</span>
+                    <span className="text-lg font-bold text-white">{storageOverview.training_sessions.total}</span>
+                    <span className="text-xs text-gray-500 block">{storageOverview.training_sessions.archived} archived</span>
+                  </div>
+                </div>
+
+                {/* Global file type breakdown */}
+                {storageOverview.datasets.file_types && Object.keys(storageOverview.datasets.file_types).length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2 flex items-center gap-1.5">
+                      <FileType className="w-3.5 h-3.5" /> File Types Across All Datasets
+                    </h4>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(storageOverview.datasets.file_types).map(([ext, info]: [string, any]) => (
+                        <span key={ext} className="text-xs px-2.5 py-1 rounded-md bg-slate-900/60 border border-slate-700 text-gray-300 font-mono">
+                          {ext} <span className="text-gray-500">×{info.count}</span> <span className="text-emerald-400">{formatBytes(info.bytes)}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Per-dataset breakdown table */}
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Per-Dataset Breakdown</h4>
+                  {storageOverview.datasets.items.length === 0 ? (
+                    <p className="text-sm text-gray-500">No datasets yet.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-gray-500 border-b border-slate-700">
+                            <th className="pb-2 pr-3">Dataset</th>
+                            <th className="pb-2 pr-3">Task</th>
+                            <th className="pb-2 pr-3">Samples</th>
+                            <th className="pb-2 pr-3">Size</th>
+                            <th className="pb-2 pr-3">Avg/Sample</th>
+                            <th className="pb-2 pr-3">File Types</th>
+                            <th className="pb-2">Split (train/val/test/unassigned)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {storageOverview.datasets.items.map((d: any) => (
+                            <tr key={d.id} className="border-b border-slate-800/60">
+                              <td className="py-2 pr-3 text-white font-medium">{d.name}</td>
+                              <td className="py-2 pr-3 text-gray-400">{d.task?.replace(/_/g, ' ')}</td>
+                              <td className="py-2 pr-3 text-gray-300">{d.sample_count}</td>
+                              <td className="py-2 pr-3 text-emerald-400 font-mono">{d.size_human}</td>
+                              <td className="py-2 pr-3 text-gray-400 font-mono">{formatBytes(d.avg_sample_bytes)}</td>
+                              <td className="py-2 pr-3 text-gray-400 font-mono">
+                                {Object.entries(d.file_types).map(([ext, info]: [string, any]) => `${ext}×${info.count}`).join(', ') || '—'}
+                              </td>
+                              <td className="py-2 text-gray-400 font-mono">
+                                {d.split_counts.train}/{d.split_counts.val}/{d.split_counts.test}/{d.split_counts.unassigned}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-[10px] text-gray-600">
+                  Storage directory: <span className="font-mono">{storageOverview.storage_dir}</span>
+                </p>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -28,7 +28,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     apiClient.getRemoteTokenStatus().then(setTokenStatus).catch(() => { });
   }, [apiClient]);
 
-  // ─── Local ZIP state ─────────────────────────────────────────────────────
+  // --- Local ZIP state ---
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('');
@@ -37,7 +37,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
   const CHUNK_SIZE = 2 * 1024 * 1024;
   const MAX_CONCURRENT = 3;
 
-  // ─── Remote download state ───────────────────────────────────────────────
+  // --- Remote download state ---
   const [url, setUrl] = useState('');
   const [kaggleQuery, setKaggleQuery] = useState('');
   const [kaggleResults, setKaggleResults] = useState<any[]>([]);
@@ -52,8 +52,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
   const [mappingTree, setMappingTree] = useState<TreeItem[] | null>(null);
   const [mappingSession, setMappingSession] = useState<{ type: 'local' | 'remote', id: string } | null>(null);
 
-
-  // ─── Local ZIP upload handler ────────────────────────────────────────────
+  // --- Local ZIP upload handler ---
   const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -105,7 +104,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     }
   };
 
-  // ─── Remote download via SSE ─────────────────────────────────────────────
+  // --- Remote download via SSE ---
   const startRemoteDownload = (source: 'url' | 'kaggle' | 'huggingface', params: any) => {
     if (eventSourceRef.current) { eventSourceRef.current.close(); eventSourceRef.current = null; }
 
@@ -205,7 +204,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
       } else if (mappingSession?.type === 'remote') {
         result = await apiClient.processRemoteZip(mappingSession.id, datasetId, task, mapping);
       }
-      setUploadStatus(`? Imported ${result.count ?? 0} samples`);
+      setUploadStatus(`✓ Imported ${result.count ?? 0} samples`);
       onImportSuccess();
     } catch (err: any) {
       setUploadError(err.message || 'Extraction failed');
@@ -215,7 +214,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     }
   };
 
-  // ─── Kaggle search ──────────────────────────────────────────────────────
+  // --- Kaggle search ---
   const handleKaggleSearch = async () => {
     if (!kaggleQuery.trim()) return;
     setSearching(true);
@@ -226,7 +225,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     finally { setSearching(false); }
   };
 
-  // ─── HuggingFace search ─────────────────────────────────────────────────
+  // --- HuggingFace search ---
   const handleHfSearch = async () => {
     if (!hfQuery.trim()) return;
     setSearching(true);
@@ -247,10 +246,10 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
   const isDownloading = downloadProgress && (downloadProgress.phase === 'downloading' || downloadProgress.phase === 'processing');
 
   const tabs: { key: ImportTab; icon: string; label: string }[] = [
-    { key: 'local', icon: '📤', label: 'Local ZIP' },
-    { key: 'url', icon: '🌐', label: 'Remote URL' },
-    { key: 'kaggle', icon: '📊', label: 'Kaggle' },
-    { key: 'huggingface', icon: '🤗', label: 'HuggingFace' },
+    { key: 'local', icon: '?', label: 'Local ZIP' },
+    { key: 'url', icon: '?', label: 'Remote URL' },
+    { key: 'kaggle', icon: '?', label: 'Kaggle' },
+    { key: 'huggingface', icon: '?', label: 'HuggingFace' },
   ];
 
   return (
@@ -330,7 +329,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
         </div>
       )}
 
-      {/* ═══ LOCAL ZIP TAB ═══ */}
+      {/* --- LOCAL ZIP TAB --- */}
       {activeTab === 'local' && (
         <div>
           {!uploading && (
@@ -368,7 +367,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
         </div>
       )}
 
-      {/* ═══ REMOTE URL TAB ═══ */}
+      {/* --- REMOTE URL TAB --- */}
       {activeTab === 'url' && (
         <div>
           <p className="text-[11px] text-gray-500 mb-2">Paste a direct .zip download link. The server will download, extract, and import it.</p>
@@ -388,7 +387,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
         </div>
       )}
 
-      {/* ═══ KAGGLE TAB ═══ */}
+      {/* --- KAGGLE TAB --- */}
       {activeTab === 'kaggle' && (
         <div>
           {!tokenStatus?.kaggle_configured && (
@@ -439,7 +438,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
         </div>
       )}
 
-      {/* ═══ HUGGINGFACE TAB ═══ */}
+      {/* --- HUGGINGFACE TAB --- */}
       {activeTab === 'huggingface' && (
         <div>
           <div className="flex gap-2 mb-3">
@@ -488,6 +487,5 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     </div>
   );
 }
-
 
 export default DataImporter

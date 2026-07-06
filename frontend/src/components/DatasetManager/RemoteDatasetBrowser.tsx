@@ -13,7 +13,7 @@ interface Props {
   onImportComplete: () => void;
 }
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// --- helpers ---
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -32,7 +32,7 @@ function formatEta(sec: number): string {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
-// ─── ProgressBar ─────────────────────────────────────────────────────────────
+// --- ProgressBar ---
 
 function ProgressBar({ progress, processing }: { progress: DownloadProgress | null; processing: string | null }) {
   if (!progress && !processing) return null;
@@ -83,11 +83,11 @@ function ProgressBar({ progress, processing }: { progress: DownloadProgress | nu
             <span>
               {formatBytes(progress.downloaded)}
               {progress.total > 0 && ` / ${formatBytes(progress.total)}`}
-              {progress.speed > 0 && ` · ${formatSpeed(progress.speed)}`}
+              {progress.speed > 0 && ` • ${formatSpeed(progress.speed)}`}
             </span>
             <span>
               {pct !== null && `${pct}%`}
-              {progress.eta !== null && ` · ETA ${formatEta(progress.eta)}`}
+              {progress.eta !== null && ` • ETA ${formatEta(progress.eta)}`}
             </span>
           </>
         ) : null}
@@ -103,7 +103,7 @@ function ProgressBar({ progress, processing }: { progress: DownloadProgress | nu
   );
 }
 
-// ─── DetailsModal ─────────────────────────────────────────────────────────────
+// --- DetailsModal ---
 
 type ModalData =
   | { kind: 'kaggle'; dataset: KaggleDataset }
@@ -139,7 +139,7 @@ function DetailsModal({ data, onClose }: { data: ModalData; onClose: () => void 
             cursor: 'pointer', color: '#888',
           }}
         >
-          ✕
+          ?
         </button>
 
         {data.kind === 'kaggle' && (
@@ -198,7 +198,7 @@ function DetailsModal({ data, onClose }: { data: ModalData; onClose: () => void 
   );
 }
 
-// ─── Main component ──────────────────────────────────────────────────────────
+// --- Main component ---
 
 export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Props) {
   const [activeTab, setActiveTab] = useState<'url' | 'kaggle' | 'huggingface'>('url');
@@ -263,7 +263,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     abortRef.current?.abort();
   };
 
-  // ── URL ──────────────────────────────────────────────────────────────────
+  // --- URL ---
 
   const handleUrlDownload = () => {
     if (!url.trim()) return;
@@ -277,7 +277,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     );
   };
 
-  // ── Kaggle ───────────────────────────────────────────────────────────────
+  // --- Kaggle ---
 
   const handleKaggleSearch = async () => {
     if (!kaggleQuery.trim()) return;
@@ -304,7 +304,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     );
   };
 
-  // ── HuggingFace ──────────────────────────────────────────────────────────
+  // --- HuggingFace ---
 
   const handleHfSearch = async () => {
     if (!hfQuery.trim()) return;
@@ -331,7 +331,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     );
   };
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  // --- Render ---
 
   const isLoading = downloading || searching;
 
@@ -343,10 +343,10 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
       {tokenStatus && (
         <div style={{ marginBottom: 12, fontSize: '0.85em', color: '#666' }}>
           <span style={{ marginRight: 16 }}>
-            Kaggle: {tokenStatus.kaggle_configured ? '✅ Configured' : '❌ Not configured'}
+            Kaggle: {tokenStatus.kaggle_configured ? '? Configured' : '? Not configured'}
           </span>
           <span>
-            HuggingFace: {tokenStatus.huggingface_configured ? '✅ Configured' : '⚪ Optional'}
+            HuggingFace: {tokenStatus.huggingface_configured ? '? Configured' : '? Optional'}
           </span>
         </div>
       )}
@@ -366,7 +366,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
               cursor: 'pointer',
             }}
           >
-            {tab === 'url' ? '🔗 Download URL' : tab === 'kaggle' ? '🐙 Kaggle' : '🤗 HuggingFace'}
+            {tab === 'url' ? '? Download URL' : tab === 'kaggle' ? '? Kaggle' : '? HuggingFace'}
           </button>
         ))}
       </div>
@@ -405,7 +405,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
         </>
       )}
 
-      {/* ── URL Tab ── */}
+      {/* --- URL Tab --- */}
       {activeTab === 'url' && (
         <div style={{ marginTop: downloading ? 12 : 0 }}>
           <p style={{ fontSize: '0.9em', color: '#555', marginBottom: 8 }}>
@@ -439,7 +439,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
         </div>
       )}
 
-      {/* ── Kaggle Tab ── */}
+      {/* --- Kaggle Tab --- */}
       {activeTab === 'kaggle' && (
         <div>
           {!tokenStatus?.kaggle_configured && (
@@ -490,7 +490,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
                       {ds.title}
                     </div>
                     <div style={{ fontSize: '0.8em', color: '#666' }}>
-                      {formatBytes(ds.size)} · {ds.download_count.toLocaleString()} downloads · {ds.ref}
+                      {formatBytes(ds.size)} • {ds.download_count.toLocaleString()} downloads • {ds.ref}
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 6, marginLeft: 10, flexShrink: 0 }}>
@@ -527,7 +527,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
                         alignItems: 'center',
                       }}
                     >
-                      ↗
+                      ?
                     </a>
                     <button
                       onClick={() => handleKaggleDownload(ds.ref)}
@@ -552,7 +552,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
         </div>
       )}
 
-      {/* ── HuggingFace Tab ── */}
+      {/* --- HuggingFace Tab --- */}
       {activeTab === 'huggingface' && (
         <div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
@@ -599,7 +599,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
                     </div>
                     <div style={{ fontSize: '0.8em', color: '#666' }}>
                       {ds.downloads.toLocaleString()} downloads
-                      {ds.tags.length > 0 && ` · ${ds.tags.slice(0, 4).join(', ')}`}
+                      {ds.tags.length > 0 && ` • ${ds.tags.slice(0, 4).join(', ')}`}
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 6, marginLeft: 10, flexShrink: 0 }}>
@@ -636,7 +636,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
                         alignItems: 'center',
                       }}
                     >
-                      ↗
+                      ?
                     </a>
                     <button
                       onClick={() => handleHfDownload(ds.id)}

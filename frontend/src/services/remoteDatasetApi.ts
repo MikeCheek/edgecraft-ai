@@ -34,7 +34,7 @@ export interface HuggingFaceDataset {
 export interface DownloadProgress {
   downloaded: number
   total: number
-  /** 0–1, or -1 when total is unknown */
+  /** 0—1, or -1 when total is unknown */
   fraction: number
   /** bytes/sec */
   speed: number

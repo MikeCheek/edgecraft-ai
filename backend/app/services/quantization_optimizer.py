@@ -85,4 +85,5 @@ class QuantizationOptimizer:
             "float16_quantized": fp16_size,
             "compression_ratio_int8": int8_size_est / full_size if full_size > 0 else 0,
             "compression_ratio_float16": fp16_size / full_size if full_size > 0 else 0,
+            "transfer_learning_estimate": int(full_size * 0.5)  # Rough estimate for transfer learning
         }

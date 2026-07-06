@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import time
+import logging
+import contextlib
 from typing import Dict, List, Optional
 
 import tensorflow as tf
@@ -11,8 +13,9 @@ import shutil
 from app.services.model_factory import ModelFactory
 from app.utils.data_processor import DataProcessor
 
-# tf.data pipeline tuning constant
-_AUTOTUNE = tf.data.AUTOTUNE
+logger = logging.getLogger(__name__)
+
+# tf.data pipeline constant (audio pipeline only)
 
 
 class TrainingCallback(tf.keras.callbacks.Callback):
@@ -48,11 +51,11 @@ class TrainingCallback(tf.keras.callbacks.Callback):
         metric_entry = {
             "epoch": epochs_done,
             # mixed_precision wraps metric names; fall back gracefully
-            "accuracy": float(logs.get("accuracy", logs.get("acc", 0.0))),
+            "accuracy":     float(logs.get("accuracy",     logs.get("acc",     0.0))),
             "val_accuracy": float(logs.get("val_accuracy", logs.get("val_acc", 0.0))),
-            "loss": float(logs.get("loss", 0.0)),
-            "val_loss": float(logs.get("val_loss", 0.0)),
-            "time_ms": epoch_duration * 1000,
+            "loss":         float(logs.get("loss",     0.0)),
+            "val_loss":     float(logs.get("val_loss", 0.0)),
+            "time_ms":      epoch_duration * 1000,
         }
         self.session["metrics"].append(metric_entry)
 
@@ -80,7 +83,7 @@ class Trainer:
         with open(self.db_file, "w") as f:
             json.dump({
                 "training_sessions": self.training_sessions,
-                "trained_models": self.trained_models,
+                "trained_models":    self.trained_models,
             }, f, indent=2)
 
     def _load_from_disk(self):
@@ -88,7 +91,7 @@ class Trainer:
             with open(self.db_file, "r") as f:
                 data = json.load(f)
                 self.training_sessions = data.get("training_sessions", {})
-                self.trained_models = data.get("trained_models", {})
+                self.trained_models    = data.get("trained_models",    {})
 
     def create_training_session(
         self,
@@ -104,64 +107,120 @@ class Trainer:
         early_stopping_monitor: str = "val_loss",
         dropout_rate: float = 0.5,
         l2_reg: float = 0.0,
-        trainable_layers: int = 0,         
-        freeze_encoder_epochs: int = 0,    
-        augmentation: dict = None,         
+        trainable_layers: int = 0,
+        freeze_encoder_epochs: int = 0,
+        augmentation: dict = None,
+        device: str = "auto",
     ):
         if augmentation is None:
             augmentation = {}
-            
+        if device not in ("auto", "cpu", "gpu"):
+            device = "auto"
+
         session_id = str(uuid.uuid4())
         self.training_sessions[session_id] = {
-            "id": session_id,
-            "task": task,
-            "dataset_id": dataset_id,
-            "epochs": epochs,
-            "total_epochs": epochs,
-            "current_epoch": 0,
-            "progress": 0,
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
-            "base_model": base_model,
-            "input_shape": input_shape,
-            "dropout_rate": dropout_rate,
-            "l2_reg": l2_reg,
-            "status": "initialized",
-            "created_at": time.time(),
-            "elapsed_seconds": 0,
-            "remaining_seconds": 0,
-            "metrics": [],
-            "stop_requested": False,
-            "early_stopping": early_stopping,
-            "early_stopping_patience": early_stopping_patience,
-            "early_stopping_monitor": early_stopping_monitor,
-            
-            "trainable_layers": trainable_layers,           
-            "freeze_encoder_epochs": freeze_encoder_epochs, 
-            "augmentation": augmentation,                   
+            "id":                       session_id,
+            "task":                     task,
+            "dataset_id":               dataset_id,
+            "epochs":                   epochs,
+            "total_epochs":             epochs,
+            "current_epoch":            0,
+            "progress":                 0,
+            "batch_size":               batch_size,
+            "learning_rate":            learning_rate,
+            "base_model":               base_model,
+            "input_shape":              input_shape,
+            "dropout_rate":             dropout_rate,
+            "l2_reg":                   l2_reg,
+            "status":                   "initialized",
+            "created_at":               time.time(),
+            "elapsed_seconds":          0,
+            "remaining_seconds":        0,
+            "metrics":                  [],
+            "stop_requested":           False,
+            "early_stopping":           early_stopping,
+            "early_stopping_patience":  early_stopping_patience,
+            "early_stopping_monitor":   early_stopping_monitor,
+            "trainable_layers":         trainable_layers,
+            "freeze_encoder_epochs":    freeze_encoder_epochs,
+            "augmentation":             augmentation,
+            "device":                   device,       # "auto" | "cpu" | "gpu" - user's requested compute target
+            "device_used":              None,          # filled in once train() resolves it (e.g. GPU requested but unavailable)
+            "archived":                 False,
         }
         self.active_training[session_id] = False
         self._save_to_disk()
         return session_id
 
+    # -------------------------------------------------------------------------
+    # Compute device selection
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_device(preference: str) -> "tuple[Optional[str], str]":
+        """
+        Resolve a user's device preference ("auto" | "cpu" | "gpu") into a
+        concrete tf.device() string (or None to let TF place automatically)
+        plus the device actually used, so it can be recorded on the session.
+        Falls back to CPU with a warning if GPU was requested but none is
+        visible to TensorFlow.
+        """
+        if preference == "cpu":
+            return "/CPU:0", "cpu"
+
+        gpus = tf.config.list_physical_devices("GPU")
+        if preference == "gpu":
+            if gpus:
+                return "/GPU:0", "gpu"
+            logger.warning("GPU training requested but no GPU is visible to TensorFlow; using CPU instead.")
+            return "/CPU:0", "cpu"
+
+        # "auto": don't force placement, let TF prefer GPU if present
+        return None, ("gpu" if gpus else "cpu")
+
+    @staticmethod
+    def get_available_devices() -> Dict:
+        """Used by GET /api/training/devices so the frontend can show which
+        options are actually usable (and disable "GPU" if none exists)."""
+        gpus = tf.config.list_physical_devices("GPU")
+        gpu_details = []
+        for gpu in gpus:
+            try:
+                details = tf.config.experimental.get_device_details(gpu)
+                gpu_details.append({
+                    "name": details.get("device_name", gpu.name),
+                    "compute_capability": details.get("compute_capability"),
+                })
+            except Exception:
+                gpu_details.append({"name": gpu.name, "compute_capability": None})
+
+        return {
+            "cpu_available": True,
+            "gpu_available": len(gpus) > 0,
+            "gpus": gpu_details,
+        }
+
+    # -------------------------------------------------------------------------
+    # Dataset export
+    # -------------------------------------------------------------------------
+
     def _export_dataset_to_temp_dir(self, dataset_id: str, task: str) -> tuple:
-        """Export samples into temp_dir/train/<label>/... and temp_dir/val/<label>/...
-        using the dataset's precomputed split (samples NOT marked train/val, i.e.
-        test/unassigned, are skipped here — only train+val feed model.fit)."""
+        """Export samples into temp_dir/train/<label>/… and temp_dir/val/<label>/…"""
         from app.services.shared_state import data_manager
         from PIL import Image
         import io
 
-        temp_dir = os.path.join(self.storage_dir, f"temp_{dataset_id}")
+        temp_dir  = os.path.join(self.storage_dir, f"temp_{dataset_id}")
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         train_dir = os.path.join(temp_dir, "train")
-        val_dir = os.path.join(temp_dir, "val")
+        val_dir   = os.path.join(temp_dir, "val")
         os.makedirs(train_dir)
         os.makedirs(val_dir)
 
         samples = data_manager.get_samples(dataset_id)
-        labels = data_manager.get_dataset_labels(dataset_id)
+        labels  = data_manager.get_dataset_labels(dataset_id)
+
         # Pre-create every class folder on both sides so image_dataset_from_directory
         # sees identical, consistently-ordered class lists even if a class has no
         # examples in one of the two splits.
@@ -170,16 +229,14 @@ class Trainer:
                 os.makedirs(os.path.join(split_dir, label), exist_ok=True)
 
         name_counters: Dict[tuple, Dict[str, int]] = {}
-
-        # Define allowed image formats for TF's decode_image
         ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG", "GIF", "BMP"}
 
         for sample in samples:
             split = sample.get("split", "unassigned")
             if split not in ("train", "val"):
-                continue  # test/unassigned are not used to fit the model
+                continue
 
-            label = sample["label"]
+            label     = sample["label"]
             split_dir = train_dir if split == "train" else val_dir
             label_dir = os.path.join(split_dir, label)
             os.makedirs(label_dir, exist_ok=True)
@@ -187,38 +244,28 @@ class Trainer:
             data = data_manager.get_sample_data(sample["id"])
             if not data:
                 continue
-            
-            # --- START VALIDATION ---
+
             if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
                 try:
                     with Image.open(io.BytesIO(data)) as img:
-                        img.verify() # Verify integrity first
-                        
-                    # Re-open for conversion (verify() closes the file pointer)
+                        img.verify()
                     with Image.open(io.BytesIO(data)) as img:
                         if img.format not in ALLOWED_IMAGE_FORMATS:
-                            print(f"Converting {sample.get('filename')} from {img.format} to JPEG...")
-                            # Convert to RGB (drops alpha channels from WEBP/PNG if present)
-                            rgb_im = img.convert('RGB')
-                            
-                            # Save to a new byte buffer as JPEG
-                            img_byte_arr = io.BytesIO()
-                            rgb_im.save(img_byte_arr, format='JPEG')
-                            data = img_byte_arr.getvalue() # Overwrite original data with new JPEG bytes
-                            
-                            # Update the filename to end in .jpg so we don't write a .webp extension
+                            rgb_im = img.convert("RGB")
+                            buf = io.BytesIO()
+                            rgb_im.save(buf, format="JPEG")
+                            data = buf.getvalue()
                             stem, _ = os.path.splitext(sample["filename"])
                             sample["filename"] = f"{stem}.jpg"
                 except Exception as e:
-                    print(f"Skipping corrupt image file: {sample.get('filename', 'unknown')}. Error: {e}")
+                    print(f"Skipping corrupt image: {sample.get('filename', 'unknown')} — {e}")
                     continue
-            # --- END VALIDATION ---
 
-            safe_name = os.path.basename(sample["filename"])
+            safe_name   = os.path.basename(sample["filename"])
             counter_key = (split, label)
             if counter_key not in name_counters:
                 name_counters[counter_key] = {}
-            
+
             if safe_name in name_counters[counter_key]:
                 name_counters[counter_key][safe_name] += 1
                 stem, ext = os.path.splitext(safe_name)
@@ -226,71 +273,94 @@ class Trainer:
             else:
                 name_counters[counter_key][safe_name] = 0
 
-            file_path = os.path.join(label_dir, safe_name)
-            with open(file_path, "wb") as f:
+            with open(os.path.join(label_dir, safe_name), "wb") as f:
                 f.write(data)
 
         return train_dir, val_dir
+
+    # -------------------------------------------------------------------------
+    # tf.data pipelines
+    # -------------------------------------------------------------------------
 
     def _build_image_pipeline(
         self, train_dir: str, val_dir: str, session: dict, class_names: list
     ):
         """
-        Build a GPU-optimised tf.data image pipeline with:
-          • cache()    – keeps decoded images in RAM after the first epoch
-          • shuffle()  – randomises order each epoch
-          • prefetch() – overlaps CPU preprocessing with GPU compute so the
-                         GPU is never idle waiting for the next batch
+        Load all images into numpy arrays then wrap in tf.data.
+
+        image_dataset_from_directory (and any tf.data source backed by file I/O)
+        spins up internal reader threads bound to the TF session of the calling
+        OS thread. When model.fit() later runs on FastAPI's BackgroundTasks thread
+        the sessions don't match and TF raises:
+            "stream cannot wait for other [[node IteratorGetNext/_4]]"
+
+        Pre-loading into numpy arrays (same approach as _build_audio_pipeline)
+        sidesteps this entirely: from_tensor_slices has no background threads.
         """
-        img_height = session["input_shape"][0]
-        img_width = session["input_shape"][1]
-        color_mode = "grayscale" if session["input_shape"][2] == 1 else "rgb"
+        from PIL import Image as PILImage
+        import io as _io
+
+        img_h      = session["input_shape"][0]
+        img_w      = session["input_shape"][1]
+        channels   = session["input_shape"][2]
         batch_size = session["batch_size"]
+        class_map  = {name: idx for idx, name in enumerate(class_names)}
 
-        train_ds = tf.keras.utils.image_dataset_from_directory(
-            train_dir,
-            class_names=class_names,
-            seed=123,
-            color_mode=color_mode,
-            image_size=(img_height, img_width),
-            batch_size=batch_size,
-            shuffle=True,
-        )
-        val_ds = tf.keras.utils.image_dataset_from_directory(
-            val_dir,
-            class_names=class_names,
-            color_mode=color_mode,
-            image_size=(img_height, img_width),
-            batch_size=batch_size,
-            shuffle=False,
-        )
+        def _load(split_dir):
+            images, labs = [], []
+            for class_name in class_names:
+                class_dir = os.path.join(split_dir, class_name)
+                if not os.path.isdir(class_dir):
+                    continue
+                for fname in os.listdir(class_dir):
+                    fpath = os.path.join(class_dir, fname)
+                    try:
+                        with PILImage.open(fpath) as img:
+                            img = img.convert("L" if channels == 1 else "RGB")
+                            img = img.resize((img_w, img_h), PILImage.BILINEAR)
+                            arr = np.array(img, dtype=np.float32) / 255.0
+                            if channels == 1:
+                                arr = arr[:, :, np.newaxis]
+                    except Exception as e:
+                        print(f"Skipping {fpath}: {e}")
+                        continue
+                    images.append(arr)
+                    labs.append(class_map[class_name])
+            return np.array(images, dtype=np.float32), np.array(labs, dtype=np.int32)
 
-        norm = tf.keras.layers.Rescaling(1.0 / 255)
+        X_train, y_train = _load(train_dir)
+        X_val,   y_val   = _load(val_dir)
 
-        # cache() before shuffle so we only decode JPEG once;
-        # shuffle() + prefetch() after norm so every epoch sees a different order.
+        if len(X_train) > 0:
+            idx = np.random.permutation(len(X_train))
+            X_train, y_train = X_train[idx], y_train[idx]
+
         train_ds = (
-            train_ds
-            .map(lambda x, y: (norm(x), y), num_parallel_calls=_AUTOTUNE)
-            .cache()
-            .shuffle(buffer_size=1000)
-            .prefetch(_AUTOTUNE)
+            tf.data.Dataset.from_tensor_slices((X_train, y_train))
+            .batch(batch_size)
+            .prefetch(1)
         )
         val_ds = (
-            val_ds
-            .map(lambda x, y: (norm(x), y), num_parallel_calls=_AUTOTUNE)
-            .cache()
-            .prefetch(_AUTOTUNE)
+            tf.data.Dataset.from_tensor_slices((X_val, y_val))
+            .batch(batch_size)
+            .prefetch(1)
         )
 
         return train_ds, val_ds
 
     def _build_audio_pipeline(
-        self, train_dir: str, val_dir: str, batch_size: int, task: str, class_names: list, input_shape: tuple
+        self,
+        train_dir: str,
+        val_dir: str,
+        batch_size: int,
+        task: str,
+        class_names: list,
+        input_shape: tuple,
     ):
-        """Audio is small enough to load fully into RAM; still prefetch."""
-        class_map = {name: idx for idx, name in enumerate(class_names)}
-        expected_features, max_time_steps = input_shape
+        """Audio pre-loaded fully into numpy arrays — no threading issues."""
+        class_map       = {name: idx for idx, name in enumerate(class_names)}
+        expected_n_mfcc = input_shape[0]
+        max_time_steps  = input_shape[1]
 
         def _load(split_dir):
             features, labels = [], []
@@ -298,56 +368,58 @@ class Trainer:
                 class_dir = os.path.join(split_dir, class_name)
                 if not os.path.isdir(class_dir):
                     continue
-                for file in os.listdir(class_dir):
-                    if file.endswith((".wav", ".mp3")):
-                        with open(os.path.join(class_dir, file), "rb") as f:
-                            audio_data = f.read()
-                        
-                        mfcc = DataProcessor.preprocess_audio(audio_data, task)
-                        
-                        # --- START AUDIO SHAPE FIX ---
-                        # mfcc shape is typically (num_features, time_steps) e.g., (64, T)
-                        current_features, current_time_steps = mfcc.shape
-                        
-                        if current_time_steps > max_time_steps:
-                            # Truncate: slice the time dimension down to max_time_steps
-                            mfcc = mfcc[:, :max_time_steps]
-                        elif current_time_steps < max_time_steps:
-                            # Pad: add zeros to the end of the time axis (axis 1)
-                            pad_width = max_time_steps - current_time_steps
-                            mfcc = np.pad(mfcc, pad_width=((0, 0), (0, pad_width)), mode='constant')
-                            
-                        # Double-check the feature dimension matches the expectation to avoid weird crashes
-                        if current_features != expected_features:
-                            print(f"Skipping {file}: Expected {expected_features} features, got {current_features}")
-                            continue
-                        # --- END AUDIO SHAPE FIX ---
+                for fname in os.listdir(class_dir):
+                    if not fname.endswith((".wav", ".mp3")):
+                        continue
+                    with open(os.path.join(class_dir, fname), "rb") as f:
+                        audio_data = f.read()
 
-                        features.append(np.expand_dims(mfcc, axis=-1))
-                        labels.append(class_map[class_name])
-                        
-            return np.array(features), np.array(labels)
+                    mfcc = DataProcessor.preprocess_audio(audio_data, task)
+                    mfcc = np.squeeze(mfcc)  # collapse any extra dims → (n_mfcc, time)
+
+                    if mfcc.ndim != 2:
+                        print(f"Skipping {fname}: unexpected MFCC shape {mfcc.shape}")
+                        continue
+
+                    actual_n_mfcc, actual_time = mfcc.shape
+
+                    if actual_n_mfcc != expected_n_mfcc:
+                        print(f"Skipping {fname}: expected {expected_n_mfcc} MFCCs, got {actual_n_mfcc}")
+                        continue
+
+                    # Pad or truncate time axis
+                    if actual_time > max_time_steps:
+                        mfcc = mfcc[:, :max_time_steps]
+                    elif actual_time < max_time_steps:
+                        mfcc = np.pad(mfcc, ((0, 0), (0, max_time_steps - actual_time)), mode="constant")
+
+                    features.append(np.expand_dims(mfcc, axis=-1))  # (n_mfcc, time, 1)
+                    labels.append(class_map[class_name])
+
+            return np.array(features, dtype=np.float32), np.array(labels, dtype=np.int32)
 
         X_train, y_train = _load(train_dir)
-        X_val, y_val = _load(val_dir)
+        X_val,   y_val   = _load(val_dir)
 
-        # Check if arrays are empty before shuffling to prevent exceptions
         if len(X_train) > 0:
-            train_idx = np.arange(len(X_train))
-            np.random.shuffle(train_idx)
-            X_train, y_train = X_train[train_idx], y_train[train_idx]
+            idx = np.random.permutation(len(X_train))
+            X_train, y_train = X_train[idx], y_train[idx]
 
         train_ds = (
             tf.data.Dataset.from_tensor_slices((X_train, y_train))
             .batch(batch_size)
-            .prefetch(_AUTOTUNE)
+            .prefetch(1)
         )
         val_ds = (
             tf.data.Dataset.from_tensor_slices((X_val, y_val))
             .batch(batch_size)
-            .prefetch(_AUTOTUNE)
+            .prefetch(1)
         )
         return train_ds, val_ds
+
+    # -------------------------------------------------------------------------
+    # Main training entry point
+    # -------------------------------------------------------------------------
 
     def train(self, training_id: str):
         try:
@@ -356,17 +428,17 @@ class Trainer:
             session["status"] = "running"
             self._save_to_disk()
 
-            task = session["task"]
+            task       = session["task"]
             dataset_id = session["dataset_id"]
 
             from app.services.shared_state import data_manager
             if not data_manager.is_split_ready(dataset_id):
                 raise ValueError(
-                    "Dataset has no complete precomputed train/val split. "
-                    "Split it into train/val/test before starting training."
+                    "Dataset has no complete train/val split. "
+                    "Split it via Auto Split before starting training."
                 )
 
-            classes = data_manager.get_dataset_labels(dataset_id)
+            classes     = data_manager.get_dataset_labels(dataset_id)
             num_classes = len(classes)
 
             train_dir, val_dir = self._export_dataset_to_temp_dir(dataset_id, task)
@@ -380,150 +452,290 @@ class Trainer:
                 audio_params = DataProcessor.AUDIO_PARAMS.get(
                     task, DataProcessor.AUDIO_PARAMS["KEYWORD_SPOTTING"]
                 )
-                
-                # Fetch shape from session, fallback to audio defaults if missing
                 if session.get("input_shape"):
-                    model_input_shape = tuple(session["input_shape"])
+                    raw_shape         = tuple(session["input_shape"])
+                    model_input_shape = raw_shape[:2]  # (n_mfcc, time_steps)
                 else:
                     model_input_shape = (audio_params["n_mfcc"], 101)
-                
-                # Pass the exact model_input_shape to the pipeline builder
+
                 train_ds, val_ds = self._build_audio_pipeline(
                     train_dir, val_dir, session["batch_size"], task, classes, model_input_shape
                 )
             else:
                 raise ValueError(f"Unknown task: {task}")
 
-            model = ModelFactory.create_model(
-                task=task,
-                num_classes=num_classes,
-                base_model=session["base_model"],
-                input_shape=model_input_shape,
-                dropout_rate=session.get("dropout_rate", 0.5),
-                l2_reg=session.get("l2_reg", 0.0),
-                trainable_layers=session.get("trainable_layers", 0), 
-                augmentation=session.get("augmentation", {}),
-            )
+            # --- Resolve compute device -------------------------------------
+            # For small models there's often no benefit (or a net loss, due to
+            # host<->device transfer overhead) to training on GPU, so the user
+            # can force CPU explicitly. "auto" leaves TensorFlow's normal
+            # placement behavior untouched (prefers GPU if one is visible).
+            device_pref = session.get("device", "auto")
+            device_str, device_used = self._resolve_device(device_pref)
+            session["device_used"] = device_used
+            self._save_to_disk()
 
-            # When mixed_precision is active the final Dense softmax layer must
-            # output float32 to avoid numerical instability. ModelFactory already
-            # uses softmax, but we cast to be safe.
-            policy = tf.keras.mixed_precision.global_policy()
-            if policy.name == "mixed_float16":
-                # Wrap the model output in a float32 cast layer
-                inputs = model.input
-                outputs = tf.cast(model.output, tf.float32)
-                model = tf.keras.Model(inputs, outputs)
+            # mixed_float16 is a GPU-oriented optimization (it relies on
+            # Tensor Cores for the speedup); forcing CPU while that policy is
+            # still active just adds pointless cast ops. Temporarily switch
+            # to float32 for the duration of this training run when the user
+            # asked for CPU explicitly, and restore whatever policy was
+            # active afterwards.
+            original_policy = tf.keras.mixed_precision.global_policy()
+            switched_policy = False
+            if device_used == "cpu" and original_policy.name == "mixed_float16":
+                tf.keras.mixed_precision.set_global_policy("float32")
+                switched_policy = True
 
-            optimizer = tf.keras.optimizers.Adam(learning_rate=session["learning_rate"])
-            loss_fn = (
-                "binary_crossentropy"
-                if task == "VISUAL_WAKE_WORDS"
-                else "sparse_categorical_crossentropy"
-            )
-            model.compile(optimizer=optimizer, loss=loss_fn, metrics=["accuracy"])
+            device_ctx = tf.device(device_str) if device_str else contextlib.nullcontext()
 
-            callbacks: list = [TrainingCallback(session, self)]
-            if session.get("early_stopping", False):
-                es = tf.keras.callbacks.EarlyStopping(
-                    monitor=session.get("early_stopping_monitor", "val_loss"),
-                    patience=session.get("early_stopping_patience", 5),
-                    restore_best_weights=True,
-                    verbose=0,
-                )
-                callbacks.append(es)
+            try:
+                with device_ctx:
+                    model = ModelFactory.create_model(
+                        task=task,
+                        num_classes=num_classes,
+                        base_model=session["base_model"],
+                        input_shape=model_input_shape,
+                        dropout_rate=session.get("dropout_rate",     0.5),
+                        l2_reg=session.get("l2_reg",                 0.0),
+                        trainable_layers=session.get("trainable_layers", 0),
+                        augmentation=session.get("augmentation",      {}),
+                    )
 
-            freeze_epochs = session.get("freeze_encoder_epochs", 0)
-            trainable_layers = session.get("trainable_layers", 0)
-            total_epochs = session.get("epochs", 50)
-            
-            # Assume base model is at index 1 (Index 0 is the augmentation block)
-            base_model_layer = model.layers[1] if len(model.layers) > 1 else None
+                    # When mixed_precision is active cast the output to float32 to
+                    # avoid numerical instability with softmax in float16.
+                    policy = tf.keras.mixed_precision.global_policy()
+                    if policy.name == "mixed_float16":
+                        inputs  = model.input
+                        outputs = tf.cast(model.output, tf.float32)
+                        model   = tf.keras.Model(inputs, outputs)
 
-            if freeze_epochs > 0 and base_model_layer:
-                # --- PHASE 1: Train Classification Head Only ---
-                base_model_layer.trainable = False
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"]),
-                    loss=loss_fn,
-                    metrics=['accuracy']
-                )
-                model.fit(train_ds, validation_data=val_ds, epochs=freeze_epochs, callbacks=callbacks)
+                    loss_fn = (
+                        "binary_crossentropy"
+                        if task == "VISUAL_WAKE_WORDS"
+                        else "sparse_categorical_crossentropy"
+                    )
 
-                # --- PHASE 2: Fine-Tune Backbone ---
-                base_model_layer.trainable = True
-                if trainable_layers > 0:
-                    for layer in base_model_layer.layers[:-trainable_layers]:
-                        layer.trainable = False
-                        
-                # Re-compile with a smaller learning rate (e.g. 10x smaller) to prevent wrecking pre-trained weights
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"] * 0.1),
-                    loss=loss_fn,
-                    metrics=['accuracy']
-                )
-                remaining_epochs = total_epochs - freeze_epochs
-                if remaining_epochs > 0:
-                    model.fit(train_ds, validation_data=val_ds, epochs=remaining_epochs, callbacks=callbacks)
-                    
-            else:
-                # Standard Single-Phase Training
-                model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=session["learning_rate"]),
-                    loss=loss_fn,
-                    metrics=['accuracy']
-                )
-                model.fit(train_ds, validation_data=val_ds, epochs=total_epochs, callbacks=callbacks)
+                    callbacks: list = [TrainingCallback(session, self)]
+                    if session.get("early_stopping", False):
+                        callbacks.append(
+                            tf.keras.callbacks.EarlyStopping(
+                                monitor=session.get("early_stopping_monitor", "val_loss"),
+                                patience=session.get("early_stopping_patience", 5),
+                                restore_best_weights=True,
+                                verbose=0,
+                            )
+                        )
 
-            # Save in modern .keras format (replaces deprecated .h5)
+                    freeze_epochs    = session.get("freeze_encoder_epochs", 0)
+                    trainable_layers = session.get("trainable_layers",       0)
+                    total_epochs     = session.get("epochs",                 50)
+                    lr               = session["learning_rate"]
+
+                    # Find the pretrained backbone by type instead of assuming
+                    # a fixed layer index - ModelFactory may insert an
+                    # optional augmentation layer AND an optional channel-
+                    # adapter layer before the backbone, so "index 1" isn't
+                    # reliable. The backbone is itself a nested Keras Model
+                    # (e.g. MobileNetV2/V3Small/EfficientNet/ResNet50V2),
+                    # which is how we identify it regardless of position.
+                    base_model_layer = next(
+                        (l for l in model.layers if isinstance(l, tf.keras.Model)), None
+                    )
+
+                    if freeze_epochs > 0 and base_model_layer:
+                        # Phase 1: train head only
+                        base_model_layer.trainable = False
+                        model.compile(
+                            optimizer=tf.keras.optimizers.Adam(lr),
+                            loss=loss_fn, metrics=["accuracy"],
+                        )
+                        model.fit(
+                            train_ds, validation_data=val_ds,
+                            epochs=freeze_epochs, callbacks=callbacks,
+                        )
+
+                        # Phase 2: fine-tune backbone
+                        base_model_layer.trainable = True
+                        if trainable_layers > 0:
+                            for layer in base_model_layer.layers[:-trainable_layers]:
+                                layer.trainable = False
+                        model.compile(
+                            optimizer=tf.keras.optimizers.Adam(lr * 0.1),
+                            loss=loss_fn, metrics=["accuracy"],
+                        )
+                        remaining = total_epochs - freeze_epochs
+                        if remaining > 0:
+                            model.fit(
+                                train_ds, validation_data=val_ds,
+                                epochs=remaining, callbacks=callbacks,
+                            )
+                    else:
+                        model.compile(
+                            optimizer=tf.keras.optimizers.Adam(lr),
+                            loss=loss_fn, metrics=["accuracy"],
+                        )
+                        model.fit(
+                            train_ds, validation_data=val_ds,
+                            epochs=total_epochs, callbacks=callbacks,
+                        )
+            finally:
+                if switched_policy:
+                    tf.keras.mixed_precision.set_global_policy(original_policy)
+
+            # Save in modern .keras format
             save_path = os.path.join(self.storage_dir, f"{training_id}.keras")
+
+            was_cancelled = session.get("stop_requested", False)
+            has_any_metrics = len(session.get("metrics", [])) > 0
+
+            if was_cancelled and not has_any_metrics:
+                # Cancelled before completing even one epoch - nothing
+                # meaningful to save or register as a usable model.
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                session["status"] = "cancelled"
+                session["completed_at"] = time.time()
+                self._save_to_disk()
+                return
+
             model.save(save_path)
             shutil.rmtree(temp_dir)
 
-            session["status"] = "completed"
+            # Previously this was set unconditionally to "completed", so a
+            # training run stopped via cancel_training() (which only takes
+            # effect at the next epoch boundary) was silently reported as
+            # having finished successfully instead of as cancelled.
+            session["status"]       = "cancelled" if was_cancelled else "completed"
             session["completed_at"] = time.time()
 
-            model_id = str(uuid.uuid4())
+            model_id     = str(uuid.uuid4())
             last_metrics = session["metrics"][-1] if session["metrics"] else {}
+
+            if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
+                model_type = "image"
+            elif task in ["AUDIO_CLASSIFICATION", "KEYWORD_SPOTTING"]:
+                model_type = "audio"
+            elif task == "TABULAR_CLASSIFICATION":
+                model_type = "tabular"
+            else:
+                model_type = "text"
+
+            # Look up the dataset's display name for convenience - dataset_id
+            # alone isn't very readable in the UI's model picker.
+            dataset_name = None
+            try:
+                from app.services.shared_state import data_manager as _dm
+                ds_info = _dm.get_dataset(dataset_id)
+                dataset_name = ds_info.get("name") if ds_info else None
+            except Exception:
+                pass
+
             self.trained_models[model_id] = {
-                "id": model_id,
-                "name": f"{session['base_model']} Trained",
-                "training_id": training_id,
-                "task": task,
-                "accuracy": last_metrics.get("accuracy", 0.0),
+                "id":           model_id,
+                "name":         f"{session['base_model']} Trained" + (" (cancelled - partial)" if was_cancelled else ""),
+                "training_id":  training_id,
+                "task":         task,
+                "dataset_id":   dataset_id,
+                "dataset_name": dataset_name,
+                "device_used":  session.get("device_used"),
+                "accuracy":     last_metrics.get("accuracy",     0.0),
                 "val_accuracy": last_metrics.get("val_accuracy", 0.0),
-                "loss": last_metrics.get("loss", 0.0),
-                "val_loss": last_metrics.get("val_loss", 0.0),
-                "size_bytes": os.path.getsize(save_path),
-                "optimized": False,
-                "path": save_path,
+                "loss":         last_metrics.get("loss",         0.0),
+                "val_loss":     last_metrics.get("val_loss",     0.0),
+                "size_bytes":   os.path.getsize(save_path),
+                "optimized":    False,
+                "path":         save_path,
+                "type":         model_type,
+                "labels":       classes,
             }
             self._save_to_disk()
 
         except Exception as e:
             session = self.training_sessions.get(training_id, {})
             session["status"] = "failed"
-            session["error"] = str(e)
+            session["error"]  = str(e)
             self._save_to_disk()
         finally:
             self.active_training[training_id] = False
+
+    # -------------------------------------------------------------------------
+    # Public helpers
+    # -------------------------------------------------------------------------
 
     def get_training_status(self, training_id: str) -> dict:
         return self.training_sessions.get(training_id, {})
 
     def get_training_metrics(self, training_id: str) -> List[dict]:
-        session = self.training_sessions.get(training_id, {})
-        return session.get("metrics", [])
+        return self.training_sessions.get(training_id, {}).get("metrics", [])
 
-    def get_all_sessions(self) -> List[dict]:
-        """Return all training sessions sorted newest-first."""
+    def get_all_sessions(self, include_archived: bool = False) -> List[dict]:
         sessions = list(self.training_sessions.values())
+        if not include_archived:
+            sessions = [s for s in sessions if not s.get("archived", False)]
         return sorted(sessions, key=lambda s: s.get("created_at", 0), reverse=True)
 
-    def cancel_training(self, training_id: str):
+    def cancel_training(self, training_id: str) -> bool:
+        """
+        Request cancellation of a running/queued training session.
+
+        NOTE: this only *requests* a stop - TrainingCallback checks
+        stop_requested at the END of the current epoch (Keras has no clean
+        way to interrupt mid-epoch), so the session will show status
+        "running" for a little longer before actually transitioning to
+        "cancelled". Previously this also force-set active_training=False
+        immediately, which made the UI think training had stopped even
+        though the background thread was still executing the current epoch.
+        """
+        session = self.training_sessions.get(training_id)
+        if not session:
+            return False
+        if session.get("status") not in ("initialized", "running"):
+            return False  # already finished/failed/cancelled - nothing to do
+        session["stop_requested"] = True
+        self._save_to_disk()
+        return True
+
+    def archive_training(self, training_id: str) -> bool:
+        """Hide a session from the default history view without deleting
+        its data - it can still be found via include_archived=True."""
         if training_id in self.training_sessions:
-            self.training_sessions[training_id]["stop_requested"] = True
-            self.active_training[training_id] = False
+            self.training_sessions[training_id]["archived"] = True
+            self._save_to_disk()
+            return True
+        return False
+
+    def unarchive_training(self, training_id: str) -> bool:
+        if training_id in self.training_sessions:
+            self.training_sessions[training_id]["archived"] = False
+            self._save_to_disk()
+            return True
+        return False
+
+    def delete_training_session(self, training_id: str) -> bool:
+        """Permanently remove a training session record (and its saved
+        .keras file, if any). Does not touch other training_ids' models."""
+        if training_id not in self.training_sessions:
+            return False
+        if self.active_training.get(training_id):
+            raise ValueError("Cannot delete a training session that is still running - cancel it first.")
+
+        model_path = os.path.join(self.storage_dir, f"{training_id}.keras")
+        if os.path.exists(model_path):
+            try:
+                os.remove(model_path)
+            except OSError:
+                pass
+
+        # Also remove any trained_models entries pointing at this training_id
+        stale_model_ids = [
+            mid for mid, m in self.trained_models.items() if m.get("training_id") == training_id
+        ]
+        for mid in stale_model_ids:
+            del self.trained_models[mid]
+
+        del self.training_sessions[training_id]
+        self.active_training.pop(training_id, None)
+        self._save_to_disk()
+        return True
 
     def get_trained_models(self) -> List[dict]:
         return list(self.trained_models.values())
