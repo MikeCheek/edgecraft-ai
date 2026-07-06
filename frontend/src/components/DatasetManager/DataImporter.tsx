@@ -256,6 +256,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
     <div className="p-4 bg-slate-900 rounded-xl border border-slate-700/60 mt-2 space-y-3">
       {mappingTree && mappingSession && (
         <ZipTreeMapper
+          uploadId={mappingSession.id}
           tree={mappingTree}
           onConfirm={handleConfirmMapping}
           onCancel={() => { setMappingTree(null); setMappingSession(null); setUploading(false); }}

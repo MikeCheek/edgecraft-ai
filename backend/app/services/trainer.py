@@ -12,6 +12,7 @@ import shutil
 
 from app.services.model_factory import ModelFactory
 from app.utils.data_processor import DataProcessor
+from app.services.job_logs import job_log_broker
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class TrainingCallback(tf.keras.callbacks.Callback):
     def on_train_begin(self, logs=None):
         self.training_start_time = time.time()
         self.session["started_at"] = self.training_start_time
+        job_log_broker.log(self.session["id"], f"Training started - {self.session.get('total_epochs', '?')} epochs planned.")
 
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start_time = time.time()
@@ -59,8 +61,17 @@ class TrainingCallback(tf.keras.callbacks.Callback):
         }
         self.session["metrics"].append(metric_entry)
 
+        job_log_broker.log(
+            self.session["id"],
+            f"Epoch {epochs_done}/{total_epochs} - "
+            f"loss: {metric_entry['loss']:.4f} - accuracy: {metric_entry['accuracy']:.4f} - "
+            f"val_loss: {metric_entry['val_loss']:.4f} - val_accuracy: {metric_entry['val_accuracy']:.4f} "
+            f"({epoch_duration:.1f}s)",
+        )
+
         if self.session.get("stop_requested", False):
             self.model.stop_training = True
+            job_log_broker.log(self.session["id"], "Cancellation requested - stopping after this epoch.", level="warning")
 
         self.trainer._save_to_disk()
 
@@ -431,6 +442,9 @@ class Trainer:
             task       = session["task"]
             dataset_id = session["dataset_id"]
 
+            job_log_broker.log(training_id, f"Training session {training_id} starting.")
+            job_log_broker.log(training_id, f"Task: {task}  |  Base model: {session.get('base_model')}  |  Input shape: {session.get('input_shape')}")
+
             from app.services.shared_state import data_manager
             if not data_manager.is_split_ready(dataset_id):
                 raise ValueError(
@@ -440,9 +454,11 @@ class Trainer:
 
             classes     = data_manager.get_dataset_labels(dataset_id)
             num_classes = len(classes)
+            job_log_broker.log(training_id, f"Dataset {dataset_id}: {num_classes} classes -> {classes}")
 
             train_dir, val_dir = self._export_dataset_to_temp_dir(dataset_id, task)
             temp_dir = os.path.dirname(train_dir)
+            job_log_broker.log(training_id, "Dataset exported to temp directory - building pipeline...")
 
             if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
                 train_ds, val_ds = self._build_image_pipeline(train_dir, val_dir, session, classes)
@@ -472,6 +488,7 @@ class Trainer:
             device_pref = session.get("device", "auto")
             device_str, device_used = self._resolve_device(device_pref)
             session["device_used"] = device_used
+            job_log_broker.log(training_id, f"Compute device: {device_used} (requested: {device_pref})")
             self._save_to_disk()
 
             # mixed_float16 is a GPU-oriented optimization (it relies on
@@ -595,6 +612,7 @@ class Trainer:
                 session["status"] = "cancelled"
                 session["completed_at"] = time.time()
                 self._save_to_disk()
+                job_log_broker.log(training_id, "Training cancelled before any epoch completed - nothing saved.", level="warning")
                 return
 
             model.save(save_path)
@@ -649,11 +667,23 @@ class Trainer:
             }
             self._save_to_disk()
 
+            if was_cancelled:
+                job_log_broker.log(training_id, f"Training cancelled after {len(session['metrics'])} epoch(s). Partial model saved.", level="warning")
+            else:
+                job_log_broker.log(training_id, f"Training completed successfully. Model saved to {save_path}")
+
         except Exception as e:
+            import traceback
             session = self.training_sessions.get(training_id, {})
             session["status"] = "failed"
             session["error"]  = str(e)
             self._save_to_disk()
+            # Log the FULL traceback to the job console, not just str(e) -
+            # this is exactly what was missing when a training crash (e.g.
+            # the Lambda-layer deserialization error) only ever showed up
+            # in the backend's own terminal and never reached the frontend.
+            job_log_broker.log(training_id, f"Training FAILED: {e}", level="error")
+            job_log_broker.log(training_id, traceback.format_exc(), level="error")
         finally:
             self.active_training[training_id] = False
 
@@ -737,8 +767,21 @@ class Trainer:
         self._save_to_disk()
         return True
 
-    def get_trained_models(self) -> List[dict]:
-        return list(self.trained_models.values())
+    def get_trained_models(self, include_archived: bool = False) -> List[dict]:
+        """
+        By default, excludes models whose underlying training session has
+        been archived - previously archiving a training run only hid it
+        from the training history list, but the model it produced kept
+        showing up everywhere else (Optimization Studio's model picker,
+        the Dashboard, etc), which defeated the point of archiving it.
+        """
+        models = list(self.trained_models.values())
+        if include_archived:
+            return models
+        return [
+            m for m in models
+            if not self.training_sessions.get(m.get("training_id"), {}).get("archived", False)
+        ]
 
     def delete_trained_model(self, model_id: str) -> bool:
         if model_id in self.trained_models:

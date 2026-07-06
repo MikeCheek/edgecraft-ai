@@ -46,7 +46,7 @@ class DataManager:
         """Persist only JSON metadata (datasets, samples, labels).
 
         Previously _save_to_disk() also looped over self.sample_data and
-        rewrote every .bin file already on disk — O(n) disk writes on every
+        rewrote every .bin file already on disk - O(n) disk writes on every
         single upload.  Binary files are now written once on ingest and never
         touched again unless the sample is deleted.
         """
@@ -94,7 +94,7 @@ class DataManager:
     # Datasets
     # ------------------------------------------------------------------
 
-    def create_dataset(self, name: str, task: str) -> dict:
+    def create_dataset(self, name: str, task: str, description: str = "") -> dict:
         dataset_id = str(uuid.uuid4())
         dataset = {
             "id": dataset_id,
@@ -102,6 +102,12 @@ class DataManager:
             "task": task,
             "sample_count": 0,
             "created_at": time.time(),
+            # NEW: free-form metadata the user (or an LLM prompt builder) can
+            # attach to a dataset. `description` is user-editable text.
+            # `metadata` is a small bag for anything else (e.g. cached image
+            # stats) so we don't have to keep adding top-level columns.
+            "description": description or "",
+            "metadata": {},
         }
         self.datasets[dataset_id] = dataset
         self.dataset_labels[dataset_id] = []
@@ -114,6 +120,31 @@ class DataManager:
         self.datasets[dataset_id]["name"] = new_name
         self._save_metadata()
         return True
+
+    def update_dataset_metadata(
+        self,
+        dataset_id: str,
+        description: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> Optional[dict]:
+        """Update the free-form description and/or metadata bag for a dataset.
+
+        `metadata` is shallow-merged into the existing metadata dict rather
+        than replacing it wholesale, so callers can update a single key
+        (e.g. just `image_stats`) without clobbering others (e.g. a
+        previously-set `notes` field).
+        """
+        if dataset_id not in self.datasets:
+            return None
+        dataset = self.datasets[dataset_id]
+        if "metadata" not in dataset:
+            dataset["metadata"] = {}
+        if description is not None:
+            dataset["description"] = description
+        if metadata:
+            dataset["metadata"].update(metadata)
+        self._save_metadata()
+        return dataset
 
     def delete_dataset(self, dataset_id: str) -> bool:
         if dataset_id not in self.datasets:
@@ -139,7 +170,14 @@ class DataManager:
     # ------------------------------------------------------------------
 
     def add_sample(
-        self, dataset_id: str, label: str, task: str, data: bytes, filename: str
+        self,
+        dataset_id: str,
+        label: str,
+        task: str,
+        data: bytes,
+        filename: str,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
     ) -> str:
         if dataset_id not in self.datasets:
             raise ValueError("Dataset not found")
@@ -152,8 +190,11 @@ class DataManager:
             "filename": filename,
             "timestamp": time.time(),
             "split": "unassigned",
+            "size_bytes": len(data),
+            "width": width,
+            "height": height,
         }
-        # Write binary first, then update metadata — avoids orphaned records
+        # Write binary first, then update metadata - avoids orphaned records
         self._write_sample_file(sample_id, data)
 
         self.datasets[dataset_id]["sample_count"] += 1
@@ -175,6 +216,10 @@ class DataManager:
         FIX: binary files are written one-by-one during ingest, not batched
         into self.sample_data and then re-flushed along with every previously
         stored file.  Metadata is saved once at the end.
+
+        Each item may optionally carry "width"/"height" (already-probed
+        image dimensions from the zip extractor) so per-dataset image-size
+        stats can be computed later without re-reading every file from disk.
         """
         if dataset_id not in self.datasets:
             raise ValueError("Dataset not found")
@@ -186,6 +231,7 @@ class DataManager:
             sample_id = str(uuid.uuid4())
 
             split = item.get("split", "unassigned")
+            content = item["content"]
 
             self.samples[sample_id] = {
                 "id": sample_id,
@@ -195,9 +241,12 @@ class DataManager:
                 "filename": item["filename"],
                 "timestamp": time.time(),
                 "split": split,
+                "size_bytes": len(content),
+                "width": item.get("width"),
+                "height": item.get("height"),
             }
-            # Write the binary immediately — one file, one write, done.
-            self._write_sample_file(sample_id, item["content"])
+            # Write the binary immediately - one file, one write, done.
+            self._write_sample_file(sample_id, content)
             sample_ids.append(sample_id)
             new_labels.add(item["label"])
 
@@ -392,3 +441,110 @@ class DataManager:
             "by_task": by_task,
             "by_label": by_label,
         }
+
+    def get_dataset_image_stats(self, dataset_id: str) -> dict:
+        """Aggregate image-size / aspect-ratio / storage stats for a dataset.
+
+        Uses the width/height/size_bytes already captured at ingest time
+        (see zip_processor.py and the /upload endpoint), so this is just an
+        aggregation over already-known numbers - no re-reading of image
+        files from disk. Samples ingested before this feature existed will
+        have width/height = None and are simply excluded from the
+        dimension-based stats (they still count toward total size).
+
+        The result is also cached onto the dataset's `metadata.image_stats`
+        so it can be included cheaply in LLM prompt context; it's
+        recomputed (and re-cached) every time this is called since it's
+        called on-demand, not on every sample add.
+        """
+        if dataset_id not in self.datasets:
+            raise ValueError("Dataset not found")
+
+        samples = [s for s in self.samples.values() if s["dataset_id"] == dataset_id]
+        widths = [s["width"] for s in samples if s.get("width")]
+        heights = [s["height"] for s in samples if s.get("height")]
+        sizes = [s["size_bytes"] for s in samples if s.get("size_bytes")]
+
+        ext_counts: Dict[str, int] = {}
+        for s in samples:
+            ext = os.path.splitext(s.get("filename", ""))[1].lower() or "unknown"
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+
+        stats = {
+            "total_samples": len(samples),
+            "samples_with_dimensions": len(widths),
+            "formats": ext_counts,
+            "total_size_bytes": sum(sizes) if sizes else 0,
+            "avg_size_bytes": round(sum(sizes) / len(sizes), 1) if sizes else None,
+        }
+
+        if widths and heights:
+            ratios = [w / h for w, h in zip(widths, heights) if h]
+            resolution_counts: Dict[str, int] = {}
+            for w, h in zip(widths, heights):
+                key = f"{w}x{h}"
+                resolution_counts[key] = resolution_counts.get(key, 0) + 1
+            most_common_resolutions = sorted(
+                resolution_counts.items(), key=lambda kv: kv[1], reverse=True
+            )[:5]
+
+            stats.update({
+                "width": {"min": min(widths), "max": max(widths), "avg": round(sum(widths) / len(widths), 1)},
+                "height": {"min": min(heights), "max": max(heights), "avg": round(sum(heights) / len(heights), 1)},
+                "aspect_ratio": {
+                    "min": round(min(ratios), 3),
+                    "max": round(max(ratios), 3),
+                    "avg": round(sum(ratios) / len(ratios), 3),
+                },
+                "most_common_resolutions": [
+                    {"resolution": res, "count": cnt} for res, cnt in most_common_resolutions
+                ],
+                "uniform_dimensions": len(set(zip(widths, heights))) == 1,
+            })
+        else:
+            stats.update({
+                "width": None,
+                "height": None,
+                "aspect_ratio": None,
+                "most_common_resolutions": [],
+                "uniform_dimensions": None,
+            })
+
+        # Cache onto the dataset record so other callers (e.g. the LLM
+        # advisor) can read it cheaply without recomputing.
+        if dataset_id in self.datasets:
+            self.datasets[dataset_id].setdefault("metadata", {})
+            self.datasets[dataset_id]["metadata"]["image_stats"] = stats
+            self.datasets[dataset_id]["metadata"]["image_stats_computed_at"] = time.time()
+            self._save_metadata()
+
+        return stats
+
+    def bulk_relabel_by_regex(self, dataset_id: str, regex_pattern: str) -> int:
+        import re
+        try:
+            compiled_regex = re.compile(regex_pattern)
+        except re.error:
+            raise ValueError("Invalid regular expression")
+
+        count = 0
+        new_labels = set()
+
+        for s in self.samples.values():
+            if s["dataset_id"] == dataset_id:
+                match = compiled_regex.search(s["filename"])
+                if match:
+                    new_label = match.group(1) if match.groups() else match.group(0)
+                    if new_label != s["label"]:
+                        s["label"] = new_label
+                        new_labels.add(new_label)
+                        count += 1
+
+        if count > 0:
+            if dataset_id not in self.dataset_labels:
+                self.dataset_labels[dataset_id] = []
+            combined_labels = set(self.dataset_labels[dataset_id]) | new_labels
+            self.dataset_labels[dataset_id] = sorted(combined_labels)
+            self._save_metadata()
+
+        return count

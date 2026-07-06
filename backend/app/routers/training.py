@@ -144,9 +144,9 @@ async def delete_training_session(training_id: str):
         return {"status": "error", "message": str(e)}
 
 @router.get("/models")
-async def list_trained_models():
+async def list_trained_models(include_archived: bool = False):
     try:
-        return {"status": "success", "models": trainer.get_trained_models()}
+        return {"status": "success", "models": trainer.get_trained_models(include_archived=include_archived)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -159,12 +159,31 @@ async def list_all_sessions(include_archived: bool = False):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/active")
+async def get_active_training(task: str = None):
+    """
+    Returns the currently running/initialized training session, if any -
+    optionally filtered to a specific task. Used by the frontend to
+    reattach to an in-progress job after navigating away and back (or
+    reloading the page), instead of losing track of it.
+    """
+    try:
+        sessions = trainer.get_all_sessions(include_archived=True)
+        active = [s for s in sessions if s.get("status") in ("initialized", "running")]
+        if task:
+            active = [s for s in active if s.get("task") == task]
+        active.sort(key=lambda s: s.get("created_at", 0), reverse=True)
+        return {"status": "success", "session": active[0] if active else None}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @router.post("/recommend")
 async def recommend_training_config(request: TrainingRecommendRequest):
     """
-    LLM-assisted (with a rule-based fallback) suggestion for base_model +
-    hyperparameters BEFORE starting a training run, given the task, the
-    dataset's actual stats, and the board the user plans to deploy to.
+    LLM-assisted suggestion for base_model + hyperparameters BEFORE starting
+    a training run, given the task, the dataset's actual stats, and the
+    board the user plans to deploy to. Raises a real error (returned as
+    {"status": "error", ...}) if the LLM call fails - no mock/fallback data.
     """
     try:
         dataset = data_manager.get_dataset(request.dataset_id)
@@ -174,11 +193,23 @@ async def recommend_training_config(request: TrainingRecommendRequest):
         labels = data_manager.get_dataset_labels(request.dataset_id)
         split_summary = data_manager.get_split_summary(request.dataset_id)
 
+        # NEW: pull in the user-authored description and the auto-computed
+        # image-size/aspect-ratio/format stats so the LLM can reason about
+        # e.g. "images are wildly inconsistent in size, recommend a fixed
+        # resize + augmentation" or "this is clearly a wake-word style
+        # dataset per the description" instead of just raw counts.
+        try:
+            image_stats = data_manager.get_dataset_image_stats(request.dataset_id)
+        except Exception:
+            image_stats = None
+
         dataset_stats = {
             "sample_count": dataset.get("sample_count", 0),
             "num_classes": len(labels),
             "labels": labels,
             "split_summary": split_summary,
+            "description": dataset.get("description", ""),
+            "image_stats": image_stats,
         }
 
         recommendation = await llm_advisor.recommend_training_params(

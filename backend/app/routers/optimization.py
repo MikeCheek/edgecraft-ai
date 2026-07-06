@@ -41,7 +41,6 @@ FRONTEND_TO_INTERNAL_METHOD = {
 }
 INTERNAL_TO_FRONTEND_METHOD = {v: k for k, v in FRONTEND_TO_INTERNAL_METHOD.items()}
 
-
 def _to_internal_method(method: str) -> str:
     # Accept either naming style so older/other callers don't break.
     if method in FRONTEND_TO_INTERNAL_METHOD:
@@ -53,7 +52,6 @@ def _to_internal_method(method: str) -> str:
         detail=f"Unknown optimization method '{method}'. "
                f"Expected one of {list(FRONTEND_TO_INTERNAL_METHOD.keys())}",
     )
-
 
 # --- Request Schemas ---
 class OptimizationRequest(BaseModel):
@@ -107,6 +105,24 @@ async def get_optimization_history():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/active")
+async def get_active_optimization(training_id: str = None):
+    """
+    Returns the currently running optimization session, if any -
+    optionally filtered to a specific training_id. Used by the frontend to
+    reattach to an in-progress job after navigating away and back (or
+    reloading the page).
+    """
+    try:
+        sessions = list_optimization_sessions()
+        active = [s for s in sessions if s.get("status") == "running"]
+        if training_id:
+            active = [s for s in active if s.get("training_id") == training_id]
+        active.sort(key=lambda s: s.get("created_at", 0), reverse=True)
+        return {"status": "success", "session": active[0] if active else None}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # NOTE: path order matches the frontend's apiClient
 # (`/optimization/status/${id}`, not `/optimization/${id}/status`).
 @router.get("/status/{optimization_id}")
@@ -155,21 +171,51 @@ async def export_as_c_array(optimization_id: str):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/hardware_presets")
+async def get_hardware_presets():
+    """Catalog of known camera modules and display modules (id, human
+    label, default pins, style) for populating the Deployment tab's
+    dropdowns. The frontend picks one, sends its id back as
+    `camera_config.module_preset` / `display_config.module_preset` in the
+    export/preview request, and can still override individual pins on top."""
+    try:
+        return {"status": "success", **exporter.list_hardware_presets()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 class ExportConfigRequest(BaseModel):
     board: str
+    # Legacy manual pin override, applied on top of whatever the chosen
+    # camera_config.module_preset resolves to. Kept for backward
+    # compatibility with any caller not yet using presets.
     camera_pins: Optional[dict] = None
+    # {
+    #   "enabled": bool,                     # optional; defaults to True for integrated presets
+    #   "module_preset": "AI_THINKER_ESP32_CAM" | "ESP32_S3_CAM_OV3660" | "CUSTOM",
+    #   "module_type": "integrated" | "external",   # optional override of the preset's default
+    #   "pins_override": {"xclk": 15, ...},         # optional per-pin overrides
+    # }
+    # See GET /api/optimization/hardware_presets for the full list of preset ids.
+    camera_config: Optional[dict] = None
+    # {
+    #   "enabled": bool,
+    #   "module_preset": "NONE" | "ST7735_TEXT_HUD" | "ST7735_PIXEL_HUD",
+    #   "cs": .., "dc": .., "rst": .., "sck": .., "mosi": .., "backlight": ..  # optional pin overrides
+    # }
     display_config: Optional[dict] = None
 
 @router.post("/export/{optimization_id}")
 async def export_project(optimization_id: str, request: ExportConfigRequest):
     """Download a full Arduino/C++ project (model_data.h + sketch.ino +
-    README.md) for the given board, wired for the user's actual pin
-    configuration (camera pins for ESP32-CAM, optional attached display)."""
+    README.md) for the given board, wired for the user's actual hardware
+    configuration (a named camera module preset or hand-wired pins, and an
+    optional attached status display, also from a named preset)."""
     try:
         zip_bytes = exporter.generate_export_package(
             optimization_id, request.board,
             camera_pins=request.camera_pins,
             display_config=request.display_config,
+            camera_config=request.camera_config,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -194,6 +240,7 @@ async def preview_export_sketch(optimization_id: str, request: ExportConfigReque
             optimization_id, request.board,
             camera_pins=request.camera_pins,
             display_config=request.display_config,
+            camera_config=request.camera_config,
         )
         return {"status": "success", "sketch": sketch}
     except Exception as e:

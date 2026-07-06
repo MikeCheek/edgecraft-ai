@@ -1,5 +1,6 @@
 import os
 import aiohttp
+import asyncio
 import json
 import logging
 
@@ -22,12 +23,27 @@ class LLMAdvisor:
         dataset_id = training_config.get("dataset_id") or context.get("dataset_id")
 
         # 2. Safely Extract Dataset Context
+        # BUGFIX: `dataset_info` never actually has a "labels" key - labels
+        # are tracked separately in data_manager.dataset_labels, not nested
+        # inside the dataset dict. The old check `"labels" in dataset_info`
+        # was therefore always False, so `labels` was always the literal
+        # string "Unknown" and the LLM never saw the real class names.
+        # Also added: the dataset's user-authored `description` and the
+        # auto-computed image-size/aspect-ratio stats, so the model can
+        # reason about resolution/augmentation choices grounded in what the
+        # dataset actually contains, not just a sample count.
         dataset_info = {}
         labels = []
+        description = ""
+        image_stats = None
         if dataset_id:
-            dataset_info = data_manager.get_dataset(dataset_id)
-            # If your datasets store labels differently, adjust this:
-            labels = list(dataset_info.get("labels", {}).keys()) if "labels" in dataset_info else "Unknown"
+            dataset_info = data_manager.get_dataset(dataset_id) or {}
+            labels = data_manager.get_dataset_labels(dataset_id)
+            description = dataset_info.get("description", "")
+            try:
+                image_stats = data_manager.get_dataset_image_stats(dataset_id)
+            except Exception:
+                image_stats = None
 
         # 3. Prevent Context Window Overflow (Limit to last 10 epochs)
         if len(metrics_history) > 10:
@@ -62,11 +78,13 @@ class LLMAdvisor:
         - Platform: EdgeCraft AI (TinyML deployment)
         - Task Type: {task}
         - Base Architecture: {training_config.get('base_model', 'Unknown Base Model')}
-        
+
         [DATASET CONTEXT]
         - Total Samples: {dataset_info.get('sample_count', 'Unknown')}
-        - Target Classes: {labels}
+        - Target Classes: {labels if labels else 'Unknown'}
         - Validation Split: {training_config.get('validation_split', 'Unknown')}
+        - Description: {description or 'Not provided'}
+        - Image Stats: {json.dumps(image_stats, indent=2) if image_stats else 'Not available (non-image task or no dimension data captured yet)'}
 
         [CURRENT HYPERPARAMETERS]
         - Target Epochs: {training_config.get('epochs', 'Unknown')}
@@ -76,7 +94,7 @@ class LLMAdvisor:
         [METRICS HISTORY (Last {len(metrics_summary)} Epochs)]
         {json.dumps(metrics_summary, indent=2)}
 
-        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes.
+        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.
         """
 
         # 6. Dispatch to your LLM API Wrapper (e.g., OpenRouter, OpenAI, or Ollama)
@@ -91,10 +109,17 @@ class LLMAdvisor:
             elif provider == "ollama":
                 return await self._call_ollama(messages, model_name)
             else:
-                return self._mock_suggestions()
+                raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
         except Exception as e:
-            logger.error(f"LLM Advisor Error: {e}")
-            return self._mock_suggestions()
+            # NOTE: this used to swallow every failure and silently return
+            # generic mock advice via _mock_suggestions(), so a broken API
+            # key, a network error, or a bad model name all looked exactly
+            # like a successful, real suggestion to the user. Now the real
+            # error propagates up to the router, which returns it as
+            # {"status": "error", "message": ...} for the frontend to show.
+            detail = str(e) or e.__class__.__name__
+            logger.error(f"LLM Advisor Error ({provider}): {detail}")
+            raise RuntimeError(f"LLM suggestion request failed ({provider}): {detail}") from e
 
     async def _call_openrouter(self, messages, model_name):
         # SECURE: Pulling directly from the backend environment
@@ -113,30 +138,48 @@ class LLMAdvisor:
             "messages": messages,
             "response_format": {"type": "json_object"} # OpenRouter strict JSON mode
         }
-        
+
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(url, headers=headers, json=payload, timeout=45) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        content = data["choices"][0]["message"]["content"]
+                async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as response:
+                    body_text = await response.text()
+                    if response.status != 200:
+                        raise RuntimeError(
+                            f"OpenRouter returned HTTP {response.status}: {body_text[:500]}"
+                        )
 
-                        # Clean up markdown code blocks if the LLM ignores the response_format
-                        if content.startswith("```json"):
-                            content = content.replace("```json", "").replace("```", "").strip()
-                        elif content.startswith("```"):
-                            content = content.replace("```", "").strip()
+                    data = json.loads(body_text)
+                    if "error" in data:
+                        # OpenRouter puts API-level errors (bad model id, rate
+                        # limit, no credit, etc.) in a 200 response body.
+                        raise RuntimeError(f"OpenRouter API error: {data['error']}")
 
+                    content = data["choices"][0]["message"]["content"]
+
+                    # Clean up markdown code blocks if the LLM ignores the response_format
+                    if content.startswith("```json"):
+                        content = content.replace("```json", "").replace("```", "").strip()
+                    elif content.startswith("```"):
+                        content = content.replace("```", "").strip()
+
+                    try:
                         parsed = json.loads(content)
-                        # Handle varied JSON root structures
-                        if isinstance(parsed, dict) and "suggestions" in parsed:
-                            return parsed["suggestions"]
-                        return parsed
-                    else:
-                        logger.error(f"OpenRouter returned status {response.status}: {await response.text()}")
-            except Exception as e:
-                logger.error(f"OpenRouter connection error: {e}")
-        return self._mock_suggestions()
+                    except json.JSONDecodeError as je:
+                        raise RuntimeError(
+                            f"OpenRouter response was not valid JSON: {je}. Raw content: {content[:500]}"
+                        ) from je
+
+                    # Handle varied JSON root structures
+                    if isinstance(parsed, dict) and "suggestions" in parsed:
+                        return parsed["suggestions"]
+                    return parsed
+            except aiohttp.ClientError as e:
+                # e.g. connection refused, DNS failure, SSL error - these
+                # often stringify to "" on their own, so always include the
+                # exception type name too.
+                raise RuntimeError(f"Could not reach OpenRouter ({type(e).__name__}: {e})") from e
+            except asyncio.TimeoutError as e:
+                raise RuntimeError("OpenRouter request timed out after 45s") from e
 
     async def _call_ollama(self, messages, model_name):
         url = "http://localhost:11434/api/generate"
@@ -148,21 +191,30 @@ class LLMAdvisor:
         }
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(url, json=payload, timeout=45) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        response_text = data.get("response", "[]")
-                        try:
-                            parsed = json.loads(response_text)
-                            if isinstance(parsed, dict) and "suggestions" in parsed:
-                                return parsed["suggestions"]
-                            return parsed
-                        except json.JSONDecodeError:
-                            pass
-            except Exception as e:
-                logger.error(f"Ollama connection error: {e}")
-        return self._mock_suggestions()
-        
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as response:
+                    body_text = await response.text()
+                    if response.status != 200:
+                        raise RuntimeError(f"Ollama returned HTTP {response.status}: {body_text[:500]}")
+
+                    data = json.loads(body_text)
+                    response_text = data.get("response", "")
+                    try:
+                        parsed = json.loads(response_text)
+                    except json.JSONDecodeError as je:
+                        raise RuntimeError(
+                            f"Ollama response was not valid JSON: {je}. Raw content: {response_text[:500]}"
+                        ) from je
+
+                    if isinstance(parsed, dict) and "suggestions" in parsed:
+                        return parsed["suggestions"]
+                    return parsed
+            except aiohttp.ClientError as e:
+                raise RuntimeError(
+                    f"Could not reach local Ollama at {url} ({type(e).__name__}: {e}). "
+                    "Is Ollama running? (ollama serve)"
+                ) from e
+            except asyncio.TimeoutError as e:
+                raise RuntimeError("Ollama request timed out after 45s") from e
     # ------------------------------------------------------------------
     # Board-specific optimization advice (used by /optimization/llm-optimize)
     # ------------------------------------------------------------------
@@ -295,8 +347,7 @@ class LLMAdvisor:
         """
         Suggest a starting base_model + hyperparameters for a NEW training
         run, given the task, dataset shape, and the board the user intends
-        to deploy to. Falls back to rule-based defaults tuned for edge
-        deployment if no LLM is reachable.
+        to deploy to.
         """
         from app.services.mcu_advisor import MCUAdvisor
 
@@ -328,28 +379,32 @@ class LLMAdvisor:
         EfficientNet, ResNet50V2, Custom3LayerCNN for image tasks, or MFCC_CNN, AudioLSTM,
         AudioGRU for audio tasks) and full hyperparameters optimised for this specific
         microcontroller's memory constraints, not just for accuracy. Favor smaller,
-        efficient architectures when RAM/Flash are tight.
+        efficient architectures when RAM/Flash are tight. If the dataset's image_stats
+        show non-uniform aspect ratios or resolutions much larger/smaller than your
+        recommended input_shape, mention that in your reasoning and factor it into the
+        augmentation/preprocessing advice.
         """
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
-        try:
-            if provider == "openrouter":
-                result = await self._call_openrouter(messages, model_name)
-            elif provider == "ollama":
-                result = await self._call_ollama(messages, model_name)
-            else:
-                result = None
-            if isinstance(result, dict) and "base_model" in result:
-                return result
-            if isinstance(result, list) and result and "base_model" in result[0]:
-                return result[0]
-        except Exception as e:
-            logger.error(f"recommend_training_params LLM error: {e}")
+        if provider == "openrouter":
+            result = await self._call_openrouter(messages, model_name)
+        elif provider == "ollama":
+            result = await self._call_ollama(messages, model_name)
+        else:
+            raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
 
-        return self._rule_based_training_recommendation(task, dataset_stats, target_board)
+        if isinstance(result, dict) and "base_model" in result:
+            return result
+        if isinstance(result, list) and result and "base_model" in result[0]:
+            return result[0]
+
+        raise RuntimeError(
+            f"LLM response did not contain a usable recommendation (missing 'base_model'). "
+            f"Raw response: {str(result)[:500]}"
+        )
 
     @staticmethod
     def _rule_based_training_recommendation(task: str, dataset_stats: dict, target_board: str) -> dict:
@@ -400,48 +455,3 @@ class LLMAdvisor:
                 f"your dataset size ({sample_count or 'unknown'} samples) to reduce overfitting risk."
             ),
         }
-
-    def _mock_suggestions(self):
-        return [
-            {
-                "suggestion": "⚠️ Live LLM API Offline (Tuning Tip: Adjust Learning Rate & Batch Size)",
-                "reasoning": (
-                    "The live LLM Advisor API is currently down or unable to connect. As an automated "
-                    "FAQ fallback: If your training metrics are stagnant, unstable, or your loss is "
-                    "exploding, your learning rate is likely misconfigured for your batch structure."
-                ),
-                "parameters_to_adjust": {
-                    "learning_rate": 0.001, 
-                    "batch_size": 32
-                },
-                "estimated_improvement": "Stabilizes gradient descent and ensures reliable, steady loss reduction."
-            },
-            {
-                "suggestion": "FAQ: Optimize Resolution for Target Hardware constraints (Avoid OOM)",
-                "reasoning": (
-                    "Why is my training slow or crashing on the target edge chip? Massive image dimensions "
-                    "exhaust hardware micro-RAM. Downscaling images to traditional TinyML standards (like 96x96) "
-                    "allows complex convolutional layers to run comfortably inside tight hardware boundaries."
-                ),
-                "parameters_to_adjust": {
-                    "image_width": 96, 
-                    "image_height": 96, 
-                    "base_model": "MobileNetV3Small"
-                },
-                "estimated_improvement": "Drastically slashes model RAM/Flash footprint by ~50% to 70%."
-            },
-            {
-                "suggestion": "FAQ: Mitigate Overfitting (High Train Accuracy vs. Poor Val Accuracy)",
-                "reasoning": (
-                    "Why does my model score 98% on training but fails completely on validation? The network is "
-                    "memorizing your exact assets rather than learning generic visual concepts. Injecting robust "
-                    "data augmentation rules (flips, slight shifts) and boosting dropout parameters addresses this."
-                ),
-                "parameters_to_adjust": {
-                    "dropout_rate": 0.3, 
-                    "epochs": 50,
-                    "validation_split": 0.20
-                },
-                "estimated_improvement": "Bridges the accuracy generalization gap and stabilizes validation fluctuations."
-            }
-        ]

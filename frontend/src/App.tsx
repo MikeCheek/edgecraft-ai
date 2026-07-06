@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { DataCollector, ModelTrainer, OptimizationStudio, DeploymentPanel, LLMAdvisor, DashboardOverview, DatasetManager } from './components';
+import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
+import { DataCollector, ModelTrainer, OptimizationStudio, DeploymentPanel, LLMAdvisor, DashboardOverview, DatasetManager, ModelTree } from './components';
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
 import { TinyMLTask, TargetBoard } from './types';
@@ -16,19 +17,29 @@ import {
   Lightbulb,
   ChevronDown,
   Check,
-  CpuIcon
+  CpuIcon,
+  GitBranch,
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 import { useLocalStorage } from './hooks/useLocalStorage';
+
+const NAV_ITEMS = [
+  { path: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { path: '/collect', label: 'Data Collection', icon: Database },
+  { path: '/train', label: 'Model Training', icon: BrainCircuit },
+  { path: '/optimize', label: 'Optimization', icon: Cpu },
+  { path: '/models', label: 'Models', icon: GitBranch },
+  { path: '/deploy', label: 'Deployment', icon: Code2 },
+];
 
 export default function App() {
   const { state, dispatch } = useAppContext();
   const isHealthy = useHealthCheck();
   const { request, apiClient } = useAPI();
+  const navigate = useNavigate();
 
   const [selectedTask, setSelectedTask] = useLocalStorage<TinyMLTask>('ec_task', 'IMAGE_CLASSIFICATION');
   const [selectedBoard, setSelectedBoard] = useLocalStorage<TargetBoard>('ec_board', 'ESP32_S3_N16R8');
-  const [activeTab, setActiveTab] = useLocalStorage<'dashboard' | 'collect' | 'train' | 'optimize' | 'deploy'>('ec_tab', 'dashboard');
 
   // Local UI State for the custom Global Config dropdown
   const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -105,16 +116,19 @@ export default function App() {
           <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">EdgeCraft AI</h1>
         </div>
         <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
-          {[
-            { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-            { id: 'collect', label: 'Data Collection', icon: Database },
-            { id: 'train', label: 'Model Training', icon: BrainCircuit },
-            { id: 'optimize', label: 'Optimization', icon: Cpu },
-            { id: 'deploy', label: 'Deployment', icon: Code2 },
-          ].map((item) => (
-            <button key={item.id} onClick={() => setActiveTab(item.id as any)} className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 font-medium ${activeTab === item.id ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30' : 'text-gray-400 hover:bg-slate-800/50 hover:text-gray-200'}`}>
-              <item.icon className={`w-5 h-5 ${activeTab === item.id ? 'text-purple-400' : 'text-gray-500'}`} /> {item.label}
-            </button>
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              end={item.end}
+              className={({ isActive }) => `w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 font-medium ${isActive ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30' : 'text-gray-400 hover:bg-slate-800/50 hover:text-gray-200'}`}
+            >
+              {({ isActive }) => (
+                <>
+                  <item.icon className={`w-5 h-5 ${isActive ? 'text-purple-400' : 'text-gray-500'}`} /> {item.label}
+                </>
+              )}
+            </NavLink>
           ))}
         </nav>
       </aside>
@@ -273,58 +287,74 @@ export default function App() {
 
         <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
           <div className="max-w-6xl mx-auto animate-slideIn">
-            <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
-              <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />
-            </div>
+            <Routes>
+              <Route path="/" element={
+                <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />
+              } />
 
-            <div className={activeTab === 'collect' ? 'block' : 'hidden'}>
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
-                <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
-              </div>
-            </div>
-
-            <div className={activeTab === 'train' ? 'block' : 'hidden'}>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
-                <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
-                  <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                    <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
-                    <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
-                  </div>
+              <Route path="/collect" element={
+                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
+                  <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
                 </div>
+              } />
 
-                {state.currentTraining?.status === 'completed' && (
-                  <div className="space-y-6 animate-slideIn">
-                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
-                      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500"></div>
-                      <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-                        <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
-                      </h3>
-                      <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
-                      <LLMAdvisor
-                        trainingId={state.currentTraining?.id}
-                        metrics={state.currentTraining?.metrics}
-                        status={state.currentTraining?.status}
-                      />
+              <Route path="/train" element={
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
+                  <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
+                      <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
                     </div>
                   </div>
-                )}
-              </div>
-            </div>
 
-            <div className={activeTab === 'optimize' ? 'block' : 'hidden'}>
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
-                <OptimizationStudio models={state.trainedModels} />
-              </div>
-            </div>
+                  {state.currentTraining?.status === 'completed' && (
+                    <div className="space-y-6 animate-slideIn">
+                      <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500"></div>
+                        <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+                          <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
+                        </h3>
+                        <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
+                        <LLMAdvisor
+                          trainingId={state.currentTraining?.id}
+                          metrics={state.currentTraining?.metrics}
+                          status={state.currentTraining?.status}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              } />
 
-            <div className={activeTab === 'deploy' ? 'block' : 'hidden'}>
-              <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
-                <DeploymentPanel board={selectedBoard} />
-              </div>
-            </div>
+              <Route path="/optimize" element={
+                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
+                  <OptimizationStudio models={state.trainedModels} />
+                </div>
+              } />
+
+              <Route path="/models" element={
+                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><GitBranch className="w-6 h-6 text-emerald-400" /> Models Explorer</h2>
+                  <p className="text-sm text-gray-400 mb-6 -mt-3">
+                    Every dataset you've trained on, the models trained from it, and every optimized variant generated
+                    from each model. Click a model to open it in Optimization, or a completed optimization to open it in Deployment.
+                  </p>
+                  <ModelTree
+                    onSelectModel={(m) => navigate(`/optimize?model=${m.training_id}`)}
+                    onSelectOptimization={(opt) => navigate(`/deploy?optimization=${opt.id}`)}
+                  />
+                </div>
+              } />
+
+              <Route path="/deploy" element={
+                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
+                  <DeploymentPanel board={selectedBoard} />
+                </div>
+              } />
+            </Routes>
           </div>
         </main>
       </div>

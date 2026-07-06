@@ -13,7 +13,7 @@ class APIClient {
   private uploadClient: AxiosInstance
 
   constructor() {
-    this.client = axios.create({ baseURL: API_BASE, timeout: 30_000 })
+    this.client = axios.create({ baseURL: API_BASE, timeout: 300_000 })
     this.uploadClient = axios.create({ baseURL: API_BASE, timeout: 600_000 })
   }
 
@@ -25,12 +25,35 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/storage/overview')
   }
 
+  async getModelTree(includeArchived: boolean = false) {
+    const res = await this.client.get('/models/tree', {
+      params: { include_archived: includeArchived }
+    })
+    return res.data
+  }
+
+  /** Detects a training job already in progress (used to reattach after
+   * navigating away/reloading instead of losing track of it). */
+  async getActiveTraining(task?: string) {
+    const res = await this.client.get('/training/active', { params: { task } })
+    return res.data
+  }
+
+  /** Same idea for optimization jobs. */
+  async getActiveOptimization(trainingId?: string) {
+    const res = await this.client.get('/optimization/active', {
+      params: { training_id: trainingId }
+    })
+    return res.data
+  }
+
   // --- Datasets ---
 
-  async createDataset(name: string, task: string) {
+  async createDataset(name: string, task: string, description?: string) {
     return this.client.post<ApiResponse<any>>('/datasets/create', {
       name,
-      task
+      task,
+      description: description ?? ''
     })
   }
 
@@ -64,6 +87,30 @@ class APIClient {
   }> {
     const res = await this.client.get(`/datasets/split_summary/${datasetId}`)
     return res.data
+  }
+
+  // --- Dataset metadata (description + auto-computed image/storage stats) ---
+  // NEW: backs the "Dataset Info" panel in DatasetExplorer.
+
+  /** PATCH /api/datasets/{dataset_id}/metadata - update the free-text
+   * description and/or the metadata bag. Both fields are optional so the
+   * caller can update just one (e.g. just `{ description }`). */
+  async updateDatasetMetadata(
+    datasetId: string,
+    body: { description?: string; metadata?: Record<string, any> }
+  ) {
+    return this.client.patch<ApiResponse<any>>(
+      `/datasets/${datasetId}/metadata`,
+      body
+    )
+  }
+
+  /** GET /api/datasets/{dataset_id}/image_stats - aggregate width/height/
+   * aspect-ratio/format/size stats computed from the dataset's samples. */
+  async getDatasetImageStats(datasetId: string) {
+    return this.client.get<ApiResponse<any>>(
+      `/datasets/${datasetId}/image_stats`
+    )
   }
 
   // --- Single-file upload ---
@@ -141,14 +188,34 @@ class APIClient {
     uploadId: string,
     datasetId: string,
     task: string,
-    mapping: any[]
+    mapping: any[],
+    labelStrategy: string = 'folder',
+    regexPattern?: string
   ) {
-    const res = await this.client.post('/datasets/upload_zip/process', {
-      upload_id: uploadId,
-      dataset_id: datasetId,
-      task,
-      mapping
-    })
+    // BUGFIX: this used the default 300s (`this.client`) timeout. Large
+    // archives - especially now that extraction also probes each image's
+    // width/height for the dataset-stats feature - can legitimately take
+    // longer than that, and the request has no way to resume (unlike the
+    // chunked upload), so a lengthy real extraction shouldn't be aborted
+    // client-side while it's still working. 30 minutes gives real headroom
+    // without being unbounded.
+    //
+    // Also NEW: forwards `label_strategy`/`regex_pattern` (previously
+    // dropped here even though ZipTreeMapper already collected them),
+    // which is what actually applies the filename-regex labeling on the
+    // backend instead of silently falling back to folder labels.
+    const res = await this.client.post(
+      '/datasets/upload_zip/process',
+      {
+        upload_id: uploadId,
+        dataset_id: datasetId,
+        task,
+        mapping,
+        label_strategy: labelStrategy,
+        regex_pattern: regexPattern
+      },
+      { timeout: 1_800_000 }
+    )
     return res.data
   }
 
@@ -158,12 +225,16 @@ class APIClient {
     task: string,
     mapping: any[]
   ) {
-    const res = await this.client.post('/remote_datasets/process', {
-      download_id: downloadId,
-      dataset_id: datasetId,
-      task,
-      mapping
-    })
+    const res = await this.client.post(
+      '/remote_datasets/process',
+      {
+        download_id: downloadId,
+        dataset_id: datasetId,
+        task,
+        mapping
+      },
+      { timeout: 1_800_000 }
+    )
     return res.data
   }
 
@@ -355,7 +426,11 @@ class APIClient {
 
   async getAvailableDevices(): Promise<{
     status: string
-    devices: { cpu_available: boolean; gpu_available: boolean; gpus: { name: string; compute_capability: any }[] }
+    devices: {
+      cpu_available: boolean
+      gpu_available: boolean
+      gpus: { name: string; compute_capability: any }[]
+    }
   }> {
     const res = await this.client.get('/training/devices')
     return res.data
@@ -388,11 +463,15 @@ class APIClient {
   }
 
   async unarchiveTraining(trainingId: string) {
-    return this.client.post<ApiResponse<any>>(`/training/unarchive/${trainingId}`)
+    return this.client.post<ApiResponse<any>>(
+      `/training/unarchive/${trainingId}`
+    )
   }
 
   async deleteTrainingSession(trainingId: string) {
-    return this.client.delete<ApiResponse<any>>(`/training/session/${trainingId}`)
+    return this.client.delete<ApiResponse<any>>(
+      `/training/session/${trainingId}`
+    )
   }
 
   /**
@@ -407,11 +486,9 @@ class APIClient {
     provider?: 'ollama' | 'openrouter'
     model_name?: string
   }) {
-    return this.client.post<ApiResponse<any>>(
-      '/training/recommend',
-      params,
-      { timeout: 60_000 }
-    )
+    return this.client.post<ApiResponse<any>>('/training/recommend', params, {
+      timeout: 60_000
+    })
   }
 
   // --- Optimization ---
@@ -439,13 +516,66 @@ class APIClient {
   }
 
   /**
+   * NEW: catalog of known camera/display module presets (id, label,
+   * default pins, style) for populating the Deployment tab's dropdowns.
+   */
+  async getHardwarePresets() {
+    return this.client.get<ApiResponse<any>>('/optimization/hardware_presets')
+  }
+
+  /**
+   * NEW: live ".ino" text preview (no zip/download) for the Deployment tab,
+   * so the sketch can be shown as the user edits board/camera/display
+   * choices without triggering a file download each time.
+   */
+  async previewExportSketch(
+    optimizationId: string,
+    board: string,
+    config?: {
+      camera_pins?: Record<string, number>
+      camera_config?: Record<string, any>
+      display_config?: Record<string, any>
+    }
+  ) {
+    return this.client.post<ApiResponse<any>>(
+      `/optimization/export-preview/${optimizationId}`,
+      {
+        board,
+        camera_pins: config?.camera_pins,
+        camera_config: config?.camera_config,
+        display_config: config?.display_config
+      }
+    )
+  }
+
+  /**
    * Download a full Arduino/C++ project (model_data.h + sketch.ino + README.md)
    * for the given board, built from the REAL optimized model bytes.
    */
-  async exportProject(optimizationId: string, board: string, config?: { camera_pins?: Record<string, number>; display_config?: Record<string, any> }) {
+  async exportProject(
+    optimizationId: string,
+    board: string,
+    config?: {
+      camera_pins?: Record<string, number>
+      // BUGFIX: `camera_config` (module_preset, enabled, module_type,
+      // pins_override) was accepted in the type signature's neighbourhood
+      // but never actually read here, so there was no way to select a
+      // camera module (e.g. "ESP32-S3-CAM (OV3660)") or opt a non-ESP32_CAM
+      // board into an external camera - it silently always fell back to
+      // the board's bare default. Now forwarded to the backend like
+      // camera_pins/display_config already were.
+      camera_config?: Record<string, any>
+      display_config?: Record<string, any>
+    }
+  ) {
     const resp = await this.client.post(
       `/optimization/export/${optimizationId}`,
-      { board, camera_pins: config?.camera_pins, display_config: config?.display_config },
+      {
+        board,
+        camera_pins: config?.camera_pins,
+        camera_config: config?.camera_config,
+        display_config: config?.display_config
+      },
       { responseType: 'blob' }
     )
     const url = URL.createObjectURL(resp.data as Blob)
@@ -519,6 +649,27 @@ class APIClient {
 
   async getOptimizationHistory() {
     return this.client.get<ApiResponse<any>>('/optimization/history')
+  }
+
+  async previewZipRegex(uploadId: string, regexPattern: string) {
+    const res = await axios.post(
+      `${API_BASE}/datasets/upload_zip/preview_regex`,
+      {
+        upload_id: uploadId,
+        regex_pattern: regexPattern
+      }
+    )
+    return res.data
+  }
+
+  async relabelDatasetBulkRegex(datasetId: string, regexPattern: string) {
+    const res = await axios.post(
+      `${API_BASE}/datasets/${datasetId}/relabel_bulk_regex`,
+      {
+        regex_pattern: regexPattern
+      }
+    )
+    return res.data
   }
 }
 

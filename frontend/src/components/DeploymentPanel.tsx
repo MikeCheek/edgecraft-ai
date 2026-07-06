@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor, Code2, Copy, Check } from 'lucide-react';
-import { useAppContext } from '../context/AppContext';
+import { useSearchParams } from 'react-router-dom';
+import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor, Code2, Copy, Check, GitBranch, ChevronDown } from 'lucide-react';
 import { useAPI } from '../hooks/useAPI';
 import { TargetBoard } from '../types';
+import { ModelTree } from './ModelTree';
 
 const API_BASE = 'http://localhost:8000/api';
 
@@ -36,13 +37,45 @@ interface BoardEvaluation {
 }
 
 export function DeploymentPanel({ board }: DeploymentPanelProps) {
-  const { state } = useAppContext();
   const { apiClient } = useAPI();
-  const optimizationId = state.currentOptimization?.id;
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // NOTE: this used to read `state.currentOptimization?.id` from
+  // AppContext - but nothing in the app ever dispatched SET_OPTIMIZATION,
+  // so that value was permanently undefined and this panel always showed
+  // "complete optimization first" even when completed optimizations
+  // existed. It now has its own real selector (backed by the same
+  // dataset -> model -> optimization tree used in the Models Explorer),
+  // and supports deep-linking via ?optimization=<id> (e.g. from clicking
+  // a node in that tree).
+  const [optimizationId, setOptimizationIdState] = useState<string | null>(searchParams.get('optimization'));
+  const [showPicker, setShowPicker] = useState(!optimizationId);
+  const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
+
+  const setOptimizationId = (id: string | null, label?: string) => {
+    setOptimizationIdState(id);
+    setSelectedLabel(label ?? null);
+    setShowPicker(false);
+    setSearchParams(id ? { optimization: id } : {});
+  };
 
   const [cameraPins, setCameraPins] = useState({ ...DEFAULT_CAMERA_PINS });
+  // ESP32-CAM has an integrated camera, so it's on by default there.
+  // Any other board can still opt in to an externally-wired camera module
+  // for live inference - this is what drives the "attach by pins or
+  // integrated module" choice.
+  const [cameraEnabled, setCameraEnabled] = useState(board === 'ESP32_CAM');
+  const isIntegratedCamera = board === 'ESP32_CAM';
   const [displayEnabled, setDisplayEnabled] = useState(false);
   const [displayPins, setDisplayPins] = useState({ ...DEFAULT_DISPLAY_PINS });
+
+  // Keep the camera toggle in sync when the globally-selected board changes
+  // (e.g. switching to ESP32-CAM should turn its integrated camera on;
+  // switching away shouldn't leave a stale "external camera" config active
+  // for a board that may not have one wired up).
+  useEffect(() => {
+    setCameraEnabled(board === 'ESP32_CAM');
+  }, [board]);
 
   const [evaluation, setEvaluation] = useState<BoardEvaluation | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
@@ -74,12 +107,17 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     return out;
   }, [cameraPins]);
 
+  const buildCameraConfig = useCallback(() => ({
+    enabled: cameraEnabled,
+    module_type: isIntegratedCamera ? 'integrated' : 'external',
+  }), [cameraEnabled, isIntegratedCamera]);
+
   // Live "ready to flash" preview - refetched whenever board/pins/optimization change
   useEffect(() => {
     if (!optimizationId) { setPreview(null); return; }
     setPreviewLoading(true);
-    const body: any = { board, display_config: buildDisplayConfig() };
-    if (board === 'ESP32_CAM') body.camera_pins = buildCameraPins();
+    const body: any = { board, display_config: buildDisplayConfig(), camera_config: buildCameraConfig() };
+    if (cameraEnabled) body.camera_pins = buildCameraPins();
 
     const timeout = setTimeout(() => {
       fetch(`${API_BASE}/optimization/export-preview/${optimizationId}`, {
@@ -94,7 +132,7 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     }, 400); // debounce pin edits
 
     return () => clearTimeout(timeout);
-  }, [optimizationId, board, cameraPins, displayEnabled, displayPins, buildDisplayConfig, buildCameraPins]);
+  }, [optimizationId, board, cameraPins, cameraEnabled, displayEnabled, displayPins, buildDisplayConfig, buildCameraPins, buildCameraConfig]);
 
   const handleEvaluate = async () => {
     if (!optimizationId) return;
@@ -121,8 +159,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     setIsExporting(true);
     setExportError(null);
     try {
-      const body: any = { board, display_config: buildDisplayConfig() };
-      if (board === 'ESP32_CAM') body.camera_pins = buildCameraPins();
+      const body: any = { board, display_config: buildDisplayConfig(), camera_config: buildCameraConfig() };
+      if (cameraEnabled) body.camera_pins = buildCameraPins();
 
       const resp = await fetch(`${API_BASE}/optimization/export/${optimizationId}`, {
         method: 'POST',
@@ -156,17 +194,48 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     setTimeout(() => setCopied(false), 1500);
   };
 
-  if (!optimizationId) {
+  if (!optimizationId || showPicker) {
     return (
-      <div className="p-8 text-center text-gray-400">
-        <Cpu className="w-10 h-10 mx-auto mb-3 opacity-40" />
-        <p>Complete an optimization in the Optimization tab first, then come back here to configure your board and export a ready-to-flash sketch.</p>
+      <div className="space-y-4">
+        {optimizationId && (
+          <button
+            onClick={() => setShowPicker(false)}
+            className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+          >
+            ← Back to configuration
+          </button>
+        )}
+        <div className="flex items-center gap-2 mb-1">
+          <GitBranch size={16} className="text-emerald-400" />
+          <h3 className="text-sm font-semibold text-white">Select an Optimized Model to Deploy</h3>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          Pick any completed optimization below - only optimizations that finished successfully can be exported.
+        </p>
+        <ModelTree
+          selectedOptimizationId={optimizationId}
+          onSelectOptimization={(opt, model) => setOptimizationId(opt.id, `${model.name} · ${opt.method}`)}
+        />
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-xs text-slate-400">
+          <GitBranch size={13} className="text-emerald-400" />
+          {selectedLabel && <span className="text-slate-300 font-medium">{selectedLabel}</span>}
+        </div>
+        <button
+          onClick={() => setShowPicker(true)}
+          className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300"
+        >
+          Change model <ChevronDown size={12} />
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Left: configuration */}
       <div className="space-y-5">
         <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700">
@@ -178,29 +247,53 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
           </p>
         </div>
 
-        {board === 'ESP32_CAM' && (
-          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
+        <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
+          {isIntegratedCamera ? (
             <h4 className="text-sm font-semibold text-white flex items-center gap-2">
-              <Camera className="w-4 h-4 text-cyan-400" /> Camera Pins
+              <Camera className="w-4 h-4 text-cyan-400" /> Integrated Camera (OV2640)
             </h4>
-            <p className="text-xs text-gray-500">
-              Defaults match the common AI-Thinker ESP32-CAM module. Adjust if your board wires the camera differently.
-            </p>
-            <div className="grid grid-cols-3 gap-2">
-              {Object.entries(cameraPins).map(([key, value]) => (
-                <label key={key} className="text-xs text-gray-400">
-                  {key.toUpperCase()}
-                  <input
-                    type="number"
-                    value={value}
-                    onChange={(e) => setCameraPins((prev) => ({ ...prev, [key]: e.target.value === '' ? '' : Number(e.target.value) }))}
-                    className="mt-1 w-full px-2 py-1.5 bg-slate-800 border border-slate-600 rounded text-white text-sm focus:border-cyan-500 focus:outline-none"
-                  />
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
+          ) : (
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={cameraEnabled}
+                onChange={(e) => setCameraEnabled(e.target.checked)}
+                className="rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0"
+              />
+              <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                <Camera className="w-4 h-4 text-cyan-400" /> Attach an external camera module (via GPIO) for live inference
+              </h4>
+            </label>
+          )}
+
+          {cameraEnabled && (
+            <>
+              <p className="text-xs text-gray-500">
+                {isIntegratedCamera
+                  ? "Defaults match the common AI-Thinker ESP32-CAM module. Adjust if your board wires the camera differently."
+                  : "Wire an OV2640 (or compatible) camera module to these GPIOs. Defaults follow the common AI-Thinker pinout as a starting point - adjust to match your actual wiring."}
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {Object.entries(cameraPins).map(([key, value]) => (
+                  <label key={key} className="text-xs text-gray-400">
+                    {key.toUpperCase()}
+                    <input
+                      type="number"
+                      value={value}
+                      onChange={(e) => setCameraPins((prev) => ({ ...prev, [key]: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 bg-slate-800 border border-slate-600 rounded text-white text-sm focus:border-cyan-500 focus:outline-none"
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-500">
+                The exported sketch streams live inference from the camera and prints every class's confidence
+                to Serial each cycle, plus the best pick. If a display is also enabled below, it shows a live
+                preview of the camera feed with the current prediction overlaid.
+              </p>
+            </>
+          )}
+        </div>
 
         <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
           <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -217,7 +310,9 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
           {displayEnabled && (
             <>
               <p className="text-xs text-gray-500">
-                Shows the live prediction + confidence on a small SPI TFT. Requires the Adafruit GFX + ST7735 libraries.
+                {cameraEnabled
+                  ? "Shows a live preview of the camera feed with the prediction + confidence overlaid. Requires the Adafruit GFX + ST7735 libraries."
+                  : "Shows the current prediction + confidence as text on a small SPI TFT. Requires the Adafruit GFX + ST7735 libraries."}
               </p>
               <div className="grid grid-cols-3 gap-2">
                 {(['cs', 'dc', 'rst', 'sck', 'mosi'] as const).map((key) => (
@@ -325,6 +420,7 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
             <p className="text-sm text-gray-500">Preview will appear here once configuration is valid.</p>
           )}
         </div>
+      </div>
       </div>
     </div>
   );

@@ -155,7 +155,9 @@ def _get_or_load_keras(path: str):
     if path not in _model_cache:
         tf = _load_tf()
         logger.info(f"Loading Keras model from {path}")
-        _model_cache[path] = tf.keras.models.load_model(path)
+        # safe_mode=False: see the identical note in optimizer.py - safe
+        # because we only ever load models this backend trained itself.
+        _model_cache[path] = tf.keras.models.load_model(path, safe_mode=False)
     return _model_cache[path]
 
 # ---------------------------------------------------------------------------

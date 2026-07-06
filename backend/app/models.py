@@ -31,6 +31,31 @@ QuantizationMethod = Literal[
 
 DatasetSplit = Literal["train", "val", "test", "unassigned"]
 
+class ImageDimensionStats(BaseModel):
+    min: float
+    max: float
+    avg: float
+
+class ImageResolutionCount(BaseModel):
+    resolution: str
+    count: int
+
+class DatasetImageStats(BaseModel):
+    """Aggregate image-size / aspect-ratio / storage stats for a dataset,
+    computed from samples so an LLM (or the UI) can reason about things like
+    'these images are wildly inconsistent in aspect ratio' or 'this dataset
+    is mostly 96x96 grayscale-sized, fine for an ESP32-CAM'."""
+    total_samples: int
+    samples_with_dimensions: int
+    formats: Dict[str, int] = {}
+    total_size_bytes: int = 0
+    avg_size_bytes: Optional[float] = None
+    width: Optional[ImageDimensionStats] = None
+    height: Optional[ImageDimensionStats] = None
+    aspect_ratio: Optional[Dict[str, float]] = None
+    most_common_resolutions: List[ImageResolutionCount] = []
+    uniform_dimensions: Optional[bool] = None
+
 class DatasetInfo(BaseModel):
     """Information about a created dataset"""
     id: str
@@ -38,6 +63,11 @@ class DatasetInfo(BaseModel):
     task: TaskType
     sample_count: int
     created_at: float
+    # NEW: user-editable free text (what the dataset is, where it came from,
+    # known quirks) and a small metadata bag (currently just cached
+    # image_stats) - both surfaced to the LLM advisor as extra context.
+    description: str = ""
+    metadata: Dict[str, Any] = {}
 
 class DatasetSample(BaseModel):
     """Single dataset sample"""
@@ -48,6 +78,9 @@ class DatasetSample(BaseModel):
     filename: str
     timestamp: float
     split: DatasetSplit = "unassigned"
+    size_bytes: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 class TrainingConfig(BaseModel):
     """Training configuration"""

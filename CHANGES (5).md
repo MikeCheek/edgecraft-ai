@@ -5,9 +5,196 @@ existing folders. Everything below was verified end-to-end with a real
 dataset → train → optimize → evaluate → export run (TensorFlow actually
 executing, not mocked), plus a `gcc` compile check of the generated C header.
 
+**⚠️ New frontend dependency**: this round adds real URL routing via
+`react-router-dom`. Run `npm install react-router-dom` in the frontend
+folder before starting the dev server.
+
 ---
 
-## -2. Latest round: archive/cancel, storage overview, deployment tab
+## -5. Latest round: Chirale header fix, live camera inference for any board
+
+### The Chirale_TensorFlowLite.h header bug
+- Real bug, thank you for catching it: the generated sketches included
+  `<TensorFlowLite.h>` (matching the old, now-archived Google
+  `Arduino_TensorFlowLite` library's convention), but the actual library
+  you're meant to install - **Chirale_TensorFlowLite** - installs a header
+  called `Chirale_TensorFlowLite.h`. Fixed the include, the in-sketch
+  comment, and the README so all three agree on the real library and header
+  name.
+
+### Live camera inference, for any board - integrated or wired via pins
+- Camera support was previously hardcoded to `board == "ESP32_CAM"` only.
+  It's now a real `camera_config` (`enabled`, `module_type`) that any board
+  can opt into:
+  - **ESP32-CAM**: integrated camera, on by default, pins pre-filled with
+    the common AI-Thinker pinout (still editable for other module variants).
+  - **Any other board**: a new "Attach an external camera module (via GPIO)"
+    checkbox in the Deployment tab reveals the same pin configuration form,
+    for a camera module you've wired up yourself (e.g. an OV2640 breakout
+    on a plain ESP32-S3 dev board).
+- **Fixed a real bug found while building this**: `frameToModelInput()`
+  only ever handled 1-byte-per-pixel (grayscale) capture correctly - for a
+  3-channel (RGB) model input, the camera is configured for `RGB565` (2
+  bytes/pixel), but the old code still read it as one raw byte per pixel,
+  silently feeding garbage into the model. Fixed to properly decode RGB565
+  (5/6/5-bit channels) into normalised R/G/B samples per pixel.
+- **Full Serial output**: `printPrediction()` used to print only the single
+  best (argmax) class. It now prints a `--- Prediction ---` block listing
+  **every** class with its confidence percentage, then a `Best: <label>
+  (<confidence>%)` summary line - "in serial I should see all the results
+  complete."
+- **Live display UI**: when both a camera and a status display are
+  enabled, the exported sketch now shows a basic live UI - the actual
+  downsampled camera frame (drawn via `drawRGBBitmap`) with the current
+  prediction and confidence overlaid underneath, refreshed every inference
+  cycle - not just a static text readout. This reuses the same
+  downsampling pass that feeds the model, so there's no extra capture/
+  conversion overhead for the preview.
+- Same double-brace f-string bug as last time (`{{}}` inside an expression
+  field, parsed as a set containing an unhashable dict) crept back in while
+  rewriting this file - caught and fixed again, plus re-ran the systematic
+  scan across the whole file to confirm no other instances.
+- Verified with 8 combinations (ESP32-CAM ×grayscale/RGB ×with/without
+  display, external camera on ESP32-S3, display-only, no-camera-no-display,
+  Arduino Nano) - all generate valid, brace-balanced C++ - plus a real
+  end-to-end API test (train → optimize → export) confirming the actual
+  downloaded zip contains the live-preview function and full Serial dump.
+
+## -4. Previous round: real routing, job-resume, dataset/model tree, deployment fix
+
+### Tabs are now real routes, and running jobs survive navigation/reload
+- Replaced the `activeTab` local-state + conditional-`<div>` tab system
+  with actual `react-router-dom` routes: `/`, `/collect`, `/train`,
+  `/optimize`, `/models` (new), `/deploy`. The sidebar now uses `<NavLink>`
+  so the URL bar reflects where you are and back/forward/refresh work
+  properly.
+- **"If a job is running it should reload that state"**: new backend
+  endpoints `GET /api/training/active?task=X` and
+  `GET /api/optimization/active?training_id=X` return whichever job is
+  currently `running`/`initialized`. `ModelTrainer` and `OptimizationStudio`
+  now call these on mount and automatically reattach (resume polling +
+  reconnect the live console) instead of showing a blank form when you
+  navigate away and back, or reload the page mid-job.
+
+### Dataset/model selection, and the archived-runs leak
+- **Real bug fixed**: archiving a training session only ever hid it from
+  the training history list - the *model* it produced kept showing up
+  everywhere (Optimization Studio's picker, Dashboard, etc.) because
+  `trained_models` and `training_sessions` are separate stores and nothing
+  cross-referenced them. `Trainer.get_trained_models()` now excludes
+  models whose training session is archived by default (matching what
+  "archive" actually implies), with `include_archived=true` still
+  available for anyone who wants to see everything.
+- **New dataset filter** in Optimization Studio's model picker - previously
+  every trained model across every dataset was one long flat list with no
+  way to narrow it down.
+
+### Dataset → Model → Optimized Variant tree
+- New `GET /api/models/tree`: a single aggregated endpoint joining
+  datasets, the models trained from each, and every optimized variant
+  generated from each model (with method, size, compression ratio, and
+  accuracy/speedup deltas), respecting the archived filter above.
+- New `ModelTree.tsx` component: a collapsible tree UI for the above.
+  Clicking a model jumps to Optimization Studio with that model
+  pre-selected (`/optimize?model=<training_id>`); clicking a completed
+  optimization jumps to Deployment with it pre-selected
+  (`/deploy?optimization=<id>`).
+- New **Models** page (nav sidebar) showing the full tree as its own
+  dedicated view, in addition to it powering the pickers below.
+
+### The Deployment tab bug ("always says complete optimization first")
+- Root cause: `DeploymentPanel` read `state.currentOptimization?.id` from
+  global app state - but **nothing in the app ever dispatched
+  `SET_OPTIMIZATION`**, so that value was permanently `undefined` no
+  matter how many completed optimizations existed. It was structurally
+  impossible for this to ever work.
+- Rewritten with its own real selector: opens the same dataset → model →
+  optimization tree above when nothing is selected yet (or when you click
+  "Change model"), supports deep-linking via `?optimization=<id>`, and
+  only lets you pick optimizations that actually finished successfully.
+
+## -3. Previous round: crash fixes, no more silent LLM mock fallback, real errors in the UI, live job console
+
+### The optimization crash (Lambda deserialization)
+- Root cause: Keras 3 blocks deserializing `Lambda` layers containing a raw
+  Python lambda by default (an arbitrary-code-execution guard for untrusted
+  `.keras` files). The channel-adapter Lambda added earlier (for feeding
+  grayscale input into RGB-pretrained backbones) tripped this on every
+  reload. Fixed by passing `safe_mode=False` in the two places that load a
+  `.keras` file this backend itself produced (`optimizer.py`,
+  `inference_engine.py`) - safe here because we never load third-party or
+  user-uploaded model files, only ones we trained ourselves.
+- **A second bug hid behind the first**: once `safe_mode=False` was in
+  place, those same Lambda layers failed to reconstruct with
+  `NotImplementedError: We could not automatically infer the shape of the
+  Lambda's output`, because none of them declared `output_shape=`. Fixed
+  in all four Lambda layers (`model_factory.py` ×3, `optimizer.py` ×1) and
+  verified with an actual save→reload round-trip.
+
+### No more silent mock fallback for LLM suggestions
+- `LLMAdvisor.generate_suggestions()`, `_call_openrouter()`, and
+  `_call_ollama()` used to catch *any* failure (bad API key, network error,
+  invalid model name, malformed response) and silently return generic
+  canned "mock" advice that looked exactly like a real suggestion. Removed
+  `_mock_suggestions()` entirely - failures now raise a real, specific
+  error (e.g. "OpenRouter returned HTTP 401: ...", "OpenRouter response was
+  not valid JSON: ...") that propagates to the frontend instead.
+- Also fixed the empty `"OpenRouter connection error: "` log line - some
+  aiohttp/asyncio exceptions stringify to nothing on their own, so error
+  messages now always include the exception type name too.
+- `recommend_training_params()` (pre-training "Suggest Optimal Config") had
+  the same silent-fallback pattern to rule-based defaults; it now raises
+  real errors as well instead of quietly substituting a heuristic answer.
+
+### Errors weren't reaching the frontend at all
+- `LLMAdvisor.tsx` called `useAPI()`'s `request()` (which does capture
+  backend error messages) but never destructured or displayed its `error`
+  state - a failed LLM call looked like nothing happened. Now shown in a
+  red banner.
+- `ModelTrainer`'s "Suggest Optimal Config" had the same issue: on failure
+  it always showed a generic "No recommendation returned." instead of the
+  real backend message. Fixed to surface the actual error.
+- **The big one**: the optimization polling loop in `OptimizationStudio`
+  read the failure detail from `sj?.data?.error` - but the status endpoint
+  returns a *flat* object with no `.data` nesting, so this was always
+  `undefined` and silently replaced with a generic "Optimization failed"
+  string. On top of that, a broken `catch` block (`if (e.message !==
+  "failed") continue;`) swallowed even that generic message, so a real
+  failure just kept polling for up to 6 minutes before eventually showing
+  a misleading "Timed out waiting for optimization" - never the actual
+  cause. Rewrote the polling loop to read `sj?.error` directly and stop
+  immediately with the real message on failure.
+
+### Live job console (WebSocket log streaming)
+- New `app/services/job_logs.py`: an in-memory per-job ring buffer +
+  WebSocket broadcaster. `job_log_broker.log(job_id, message)` is callable
+  from any thread (training/optimization run via FastAPI's
+  `BackgroundTasks`, i.e. a worker thread, not the event loop) and hops
+  back onto the main asyncio loop via `run_coroutine_threadsafe` to push
+  to connected clients.
+- New `GET (ws) /ws/logs/{job_id}`: sends buffered history on connect, then
+  streams new lines live. job_id is a training_id or optimization_id.
+- `trainer.py` and `optimizer.py` now log real progress to this broker:
+  session start, dataset/model info, device used, per-epoch metrics (or
+  per-method-step for optimization), completion, cancellation, and -
+  critically - **the full exception traceback on failure**, not just the
+  one-line summary. This is exactly what was missing for the Lambda crash:
+  it only ever appeared in the backend's own terminal before.
+- New frontend `TerminalLogPanel.tsx`: a collapsible, auto-scrolling,
+  color-coded (info/warning/error) terminal view that connects to the
+  right job's WebSocket. Wired into `ModelTrainer` (auto-expands on
+  failure) and `OptimizationStudio` (follows whichever optimization was
+  most recently triggered).
+- Verified end-to-end: connected a WebSocket client *while* a real
+  training job was running in a background thread and confirmed every
+  epoch line arrived live, not just on reconnect/history-replay.
+
+### Also fixed while in the area
+- Two more leftover mojibake artifacts in `OptimizationStudio.tsx` from
+  the original corrupted upload: a stray `text-slateald-400` CSS class
+  and a corrupted checkmark (`"? Selected"` → `"✓ Selected"`).
+
+## -2. Previous round: archive/cancel, storage overview, deployment tab
 
 ### Hide/archive/cancel past trainings
 - Training sessions now have an `archived` flag. New endpoints:

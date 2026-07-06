@@ -22,12 +22,35 @@ export type QuantizationMethod =
 
 export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
 
+// NEW: dataset-wide image size / aspect-ratio / storage stats, computed by
+// the backend from per-sample width/height/size_bytes captured at ingest.
+export interface DatasetImageStats {
+  total_samples: number
+  samples_with_dimensions: number
+  formats: Record<string, number>
+  total_size_bytes: number
+  avg_size_bytes?: number | null
+  width?: { min: number; max: number; avg: number } | null
+  height?: { min: number; max: number; avg: number } | null
+  aspect_ratio?: { min: number; max: number; avg: number } | null
+  most_common_resolutions: { resolution: string; count: number }[]
+  uniform_dimensions?: boolean | null
+}
+
 export interface DatasetInfo {
   id: string
   name: string
   task: TinyMLTask
   sample_count: number
   created_at: number
+  // NEW: user-editable free text description, plus a small metadata bag
+  // (currently just a cached `image_stats`) surfaced to the LLM advisor.
+  description?: string
+  metadata?: {
+    image_stats?: DatasetImageStats
+    image_stats_computed_at?: number
+    [key: string]: any
+  }
 }
 
 export interface DatasetSample {
@@ -38,6 +61,9 @@ export interface DatasetSample {
   filename: string
   timestamp: number
   split?: DatasetSplit
+  size_bytes?: number
+  width?: number | null
+  height?: number | null
 }
 
 export interface TrainingConfig {
@@ -172,4 +198,5 @@ export interface TreeItem {
   split: string
   label: string
   ignore: boolean
+  files?: string[]
 }

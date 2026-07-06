@@ -23,6 +23,7 @@ import {
 } from './constants';
 import PastSessionPopup from './PastSessionPopUp';
 import SelectOrCustom from './SelectOrCustom';
+import { TerminalLogPanel } from '../TerminalLogPanel';
 
 // ---------------------------------------------------------------------------
 // ModelTrainer
@@ -142,6 +143,22 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     fetchDatasets();
     fetchPastSessions();
     setBaseModel(getTaskDefaults(task).base_model);
+  }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reattach to a training job already in progress for this task - without
+  // this, navigating to another tab and back (or just reloading the page)
+  // would lose track of a running job entirely and show a blank "Start
+  // Training" form even though something is actively training server-side.
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.getActiveTraining(task).then((res: any) => {
+      if (cancelled) return;
+      if (res?.status === 'success' && res.session) {
+        setTrainingId(res.session.id);
+        pollStatus(res.session.id);
+      }
+    }).catch(() => { /* best-effort - just don't reattach if this fails */ });
+    return () => { cancelled = true; };
   }, [task]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -298,7 +315,11 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         }
         setSuggestionReasoning(rec.reasoning ?? null);
       } else {
-        setSuggestionError('No recommendation returned.');
+        // request() swallows the backend's real error into its own `error`
+        // state and returns null here - previously this branch always
+        // showed a generic "No recommendation returned." regardless of the
+        // actual cause (bad API key, network error, invalid model, etc).
+        setSuggestionError(error ?? 'No recommendation returned.');
       }
     } catch (e: any) {
       setSuggestionError(e?.message ?? 'Failed to get suggestion.');
@@ -1094,6 +1115,13 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 {(status as any).error}
               </div>
             )}
+
+            {/* Live console output */}
+            <TerminalLogPanel
+              jobId={trainingId}
+              title="Training Console"
+              defaultOpen={status.status === 'failed'}
+            />
           </div>
         </div>
       )}

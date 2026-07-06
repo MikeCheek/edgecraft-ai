@@ -12,6 +12,9 @@ from typing import Dict, Any, Optional, List
 import numpy as np
 import tensorflow as tf
 
+from app.services.job_logs import job_log_broker
+from app.services.model_factory import AudioToRGB
+
 logger = logging.getLogger(__name__)
 
 # --- Paths -------------------------------------------------------------------
@@ -195,19 +198,31 @@ def optimize(optimization_id: str, model_base_dir: str) -> None:
     session = _optimization_sessions[optimization_id]
     session["status"] = "running"
     _save_sessions()
+    job_log_broker.log(optimization_id, f"Optimization {optimization_id} starting - method: {session.get('frontend_method', session.get('method'))}")
 
     try:
         training_id = session["training_id"]
         model_path = _resolve_trained_model_path(training_id)
         session["original_size_bytes"] = model_path.stat().st_size
+        job_log_broker.log(optimization_id, f"Loading trained model from {model_path} ({session['original_size_bytes']/1024:.1f} KB)")
 
-        model = tf.keras.models.load_model(str(model_path))
+        # safe_mode=False: kept as a defensive default in case any future
+        # code path introduces a real layers.Lambda(...). The channel-tiling
+        # / grayscale-to-RGB / audio-to-RGB layers that used to be raw
+        # Lambdas (which both triggered this guard AND could crash later
+        # with "NameError: name 'tf' is not defined" on retrace - see
+        # ChannelTile3/GrayscaleToRGB/AudioToRGB in model_factory.py) are now
+        # proper registered Layer subclasses, so this flag is no longer
+        # strictly required for them - but it's harmless to leave on since
+        # we only ever load models THIS backend trained and saved itself.
+        model = tf.keras.models.load_model(str(model_path), safe_mode=False)
 
         method = session["method"]
         output_dir = OPTIMIZATION_DIR / optimization_id
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "model.tflite"
 
+        job_log_broker.log(optimization_id, f"Running {method} conversion...")
         if method == "dynamic_range":
             tflite_data, metrics = _dynamic_range_quantization(model)
         elif method == "float16":
@@ -226,6 +241,7 @@ def optimize(optimization_id: str, model_base_dir: str) -> None:
             raise ValueError(f"Unknown optimization method: {method}")
 
         output_path.write_bytes(tflite_data)
+        job_log_broker.log(optimization_id, f"Conversion done - optimized size: {len(tflite_data)/1024:.1f} KB")
 
         session["output_path"] = str(output_path)
         session["metrics"] = metrics
@@ -235,6 +251,7 @@ def optimize(optimization_id: str, model_base_dir: str) -> None:
 
         # --- Real test-set evaluation: original vs optimized -------------------
         try:
+            job_log_broker.log(optimization_id, "Evaluating original vs optimized on the test set...")
             ctx = _get_training_context(training_id)
             if ctx["task"] and ctx["dataset_id"] and ctx["input_shape"] and ctx["labels"]:
                 from app.services.evaluator import evaluate_original_vs_optimized
@@ -248,23 +265,39 @@ def optimize(optimization_id: str, model_base_dir: str) -> None:
                     labels=ctx["labels"],
                 )
                 session["comparison"] = comparison
+                deltas = comparison.get("deltas", {})
+                job_log_broker.log(
+                    optimization_id,
+                    f"Evaluation done - accuracy delta: {deltas.get('accuracy_delta', 0)*100:+.2f}pp, "
+                    f"speedup: {deltas.get('speedup_factor', 1)}x, size reduction: {deltas.get('size_reduction_pct', 0)}%",
+                )
             else:
                 session["comparison"] = {"error": "Insufficient training context to evaluate on test set."}
+                job_log_broker.log(optimization_id, "Skipped test-set evaluation - insufficient training context.", level="warning")
         except Exception as eval_exc:
             logger.warning(f"[{optimization_id}] Test-set evaluation failed: {eval_exc}")
             session["comparison"] = {"error": str(eval_exc)}
+            job_log_broker.log(optimization_id, f"Test-set evaluation failed: {eval_exc}", level="warning")
 
         session["status"] = "completed"
         session["completed_at"] = time.time()
         _save_sessions()
         logger.info(f"[{optimization_id}] Optimization completed -> {output_path}")
+        job_log_broker.log(optimization_id, "Optimization completed successfully.")
 
     except Exception as exc:
+        import traceback
         session["status"] = "failed"
         session["error"] = str(exc)
         session["completed_at"] = time.time()
         _save_sessions()
         logger.exception(f"[{optimization_id}] Optimization failed: {exc}")
+        # Full traceback to the live job console - this is exactly what was
+        # missing when an optimization crashed (e.g. the Lambda-layer
+        # deserialization error): it only ever appeared in the backend's
+        # own terminal, never reaching the frontend.
+        job_log_broker.log(optimization_id, f"Optimization FAILED: {exc}", level="error")
+        job_log_broker.log(optimization_id, traceback.format_exc(), level="error")
 
 # --- Method implementations ----------------------------------------------------
 
@@ -434,12 +467,7 @@ def _transfer_learning_optimization(model: tf.keras.Model):
 
     if is_audio:
         inp = tf.keras.Input(shape=input_shape, name="mfcc_input")
-        x = tf.keras.layers.Lambda(
-            lambda t: tf.image.resize(
-                tf.repeat(t, 3, axis=-1), [96, 96]
-            ),
-            name="audio_to_rgb",
-        )(inp)
+        x = AudioToRGB(target_size=(96, 96), name="audio_to_rgb")(inp)
     else:
         inp = tf.keras.Input(shape=input_shape, name="image_input")
         x = tf.keras.layers.Resizing(96, 96)(inp)

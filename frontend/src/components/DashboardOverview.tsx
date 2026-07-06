@@ -92,7 +92,7 @@ export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) 
         <div className="bg-slate-800/50 p-6 rounded-xl border border-slate-700 col-span-1">
           <h3 className="text-lg font-semibold text-white mb-4 border-b border-slate-700 pb-2">Distribution by Label</h3>
           {labels.length > 0 ? (
-            <div className="space-y-4">
+            <div className="space-y-4 max-h-[40vh] overflow-y-scroll">
               {labels.map(([label, count]) => (
                 <div key={label}>
                   <div className="flex justify-between text-sm mb-1">

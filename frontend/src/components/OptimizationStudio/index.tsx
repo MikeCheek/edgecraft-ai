@@ -3,6 +3,7 @@
 // inference side-by-side with real server-side inference.
 
 import React, { useState, useCallback, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Camera, Mic, Upload, Link, ChevronDown, Zap, History, X,
   Settings, Play, CheckCircle, AlertCircle, Loader, TrendingUp,
@@ -10,6 +11,7 @@ import {
 import { AudioUploadTab, AudioUrlTab, AudioMicTab } from "./AudioTabs";
 import ComparisonPanel from "./ComparisonPanel";
 import { ImageUploadTab, ImageUrlTab, ImageCameraTab } from "./ImageTabs";
+import { TerminalLogPanel } from "../TerminalLogPanel";
 import {
   TrainedModel,
   ImageTab,
@@ -122,10 +124,46 @@ interface ComparisonMetrics {
 // Main Component
 // ---------------------------------------------------------------------------
 const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const modelParam = searchParams.get("model"); // a training_id, e.g. from the Models Explorer tree
+
+  // --- Dataset filter (previously there was no way to narrow the model
+  // picker down to a single dataset, so with more than a handful of models
+  // it became a long, hard-to-scan flat list). ---
+  const datasetOptions = Array.from(
+    new Map(
+      models
+        .filter((m) => m.dataset_id)
+        .map((m) => [m.dataset_id as string, m.dataset_name || (m.dataset_id as string)])
+    ).entries()
+  );
+  const [datasetFilter, setDatasetFilter] = useState<string>("");
+  const filteredModels = datasetFilter ? models.filter((m) => m.dataset_id === datasetFilter) : models;
+
   // --- Model selection ---
-  const [selectedModelId, setSelectedModelId] = useState<string>(models[0]?.id ?? "");
+  const initialModelId = modelParam
+    ? models.find((m) => m.training_id === modelParam)?.id ?? models[0]?.id ?? ""
+    : models[0]?.id ?? "";
+  const [selectedModelId, setSelectedModelId] = useState<string>(initialModelId);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const selectedModel = models.find((m) => m.id === selectedModelId) ?? null;
+
+  // If the model list loads asynchronously after mount (common - it's
+  // fetched once at the App level), make sure a `?model=` deep link still
+  // resolves once the data actually arrives instead of only on first render.
+  useEffect(() => {
+    if (!modelParam || selectedModelId) return;
+    const match = models.find((m) => m.training_id === modelParam);
+    if (match) setSelectedModelId(match.id);
+  }, [modelParam, models, selectedModelId]);
+
+  // Keep the dataset filter in sync with a deep-linked model so it doesn't
+  // appear to "disappear" if a different dataset filter was left selected.
+  useEffect(() => {
+    if (selectedModel?.dataset_id && datasetFilter && selectedModel.dataset_id !== datasetFilter) {
+      setDatasetFilter("");
+    }
+  }, [selectedModel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Optimization session selection (for .tflite) ---
   const [optimizationId, setOptimizationId] = useState<string | null>(null);
@@ -136,6 +174,35 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
   const [optimizationRuns, setOptimizationRuns] = useState<Record<OptimizationMethod, OptimizationRun>>(
     {} as Record<OptimizationMethod, OptimizationRun>
   );
+  // Tracks the most recently triggered optimization job so the live
+  // console panel below the options grid always follows the latest run.
+  const [activeLogJobId, setActiveLogJobId] = useState<string | null>(null);
+
+  // Reattach to an optimization job already in progress for the selected
+  // model - without this, navigating away and back (or reloading) loses
+  // track of a running optimization entirely.
+  useEffect(() => {
+    if (!selectedModel?.training_id) return;
+    let cancelled = false;
+    fetch(`${API_BASE}/optimization/active?training_id=${selectedModel.training_id}`)
+      .then((r) => r.json())
+      .then((res) => {
+        if (cancelled || res?.status !== "success" || !res.session) return;
+        const session = res.session;
+        setActiveLogJobId(session.id);
+        setOptimizationRuns((prev) => ({
+          ...prev,
+          [session.frontend_method ?? session.method]: {
+            method: session.frontend_method ?? session.method,
+            status: "running",
+            optimizationId: session.id,
+            error: null,
+          },
+        }));
+      })
+      .catch(() => { /* best-effort */ });
+    return () => { cancelled = true; };
+  }, [selectedModel?.training_id]);
 
   // --- Version mode ---
   const [versionMode, setVersionMode] = useState<VersionMode>("both");
@@ -243,6 +310,7 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
 
         const json = await resp.json();
         const oid: string = json.optimization_id;
+        setActiveLogJobId(oid);
 
         // Poll for completion
         setOptimizationRuns((prev) => ({
@@ -253,27 +321,36 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
         const poll = async () => {
           for (let i = 0; i < 120; i++) {
             await new Promise((r) => setTimeout(r, 3000));
+            let sj: any;
             try {
               const sr = await fetch(`${API_BASE}/optimization/status/${oid}`);
-              const sj = await sr.json();
-              const s = sj?.status ?? sj?.data?.status;
-              if (s === "completed") {
-                setOptimizationRuns((prev) => ({
-                  ...prev,
-                  [method]: { method, status: "completed", optimizationId: oid, error: null },
-                }));
-                // Auto-select this optimization for the optimized slot
-                setOptimizationId(oid);
-                return;
-              }
-              if (s === "failed") {
-                throw new Error(sj?.data?.error ?? "Optimization failed");
-              }
-            } catch (e: any) {
-              if (e.message !== "failed") continue;
+              sj = await sr.json();
+            } catch {
+              continue; // transient network hiccup while polling - just retry
+            }
+
+            // NOTE: the status endpoint returns a FLAT object
+            // ({status, error, metrics, comparison, ...}) - there is no
+            // nested `.data` field. Reading `sj?.data?.error` here always
+            // returned undefined, so a real failure (e.g. a Python
+            // traceback from a crashed optimization) was silently replaced
+            // with a generic "Optimization failed" string, and a broken
+            // catch block below then swallowed even that, eventually
+            // showing a misleading "Timed out" message instead of the
+            // actual cause.
+            const s = sj?.status;
+            if (s === "completed") {
               setOptimizationRuns((prev) => ({
                 ...prev,
-                [method]: { method, status: "failed", optimizationId: oid, error: e.message },
+                [method]: { method, status: "completed", optimizationId: oid, error: null },
+              }));
+              setOptimizationId(oid);
+              return;
+            }
+            if (s === "failed") {
+              setOptimizationRuns((prev) => ({
+                ...prev,
+                [method]: { method, status: "failed", optimizationId: oid, error: sj?.error || "Optimization failed (no error detail returned)." },
               }));
               return;
             }
@@ -571,6 +648,34 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
 
         <div className="p-6 space-y-6">
 
+          {/* --- Dataset filter --- */}
+          {datasetOptions.length > 1 && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+                Filter by Dataset
+              </label>
+              <select
+                value={datasetFilter}
+                onChange={(e) => {
+                  setDatasetFilter(e.target.value);
+                  // The currently selected model may not belong to the
+                  // newly chosen dataset - clear it so the picker doesn't
+                  // silently keep showing a model outside the filter.
+                  const stillValid = models.find(
+                    (m) => m.id === selectedModelId && (!e.target.value || m.dataset_id === e.target.value)
+                  );
+                  if (!stillValid) setSelectedModelId("");
+                }}
+                className="w-full bg-white/5 border border-white/15 rounded-xl px-4 py-2.5 text-sm text-white focus:border-violet-500 focus:outline-none"
+              >
+                <option value="">All datasets</option>
+                {datasetOptions.map(([id, name]) => (
+                  <option key={id} value={id}>{name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* --- Model selector --- */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-widest text-slate-400">
@@ -621,10 +726,12 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
 
               {dropdownOpen && (
                 <div className="absolute z-50 top-full mt-1 w-full bg-slate-800 border border-white/15 rounded-xl shadow-2xl overflow-hidden">
-                  {models.length === 0 && (
-                    <p className="text-sm text-slate-500 px-4 py-3 italic">No trained models yet.</p>
+                  {filteredModels.length === 0 && (
+                    <p className="text-sm text-slate-500 px-4 py-3 italic">
+                      {datasetFilter ? "No trained models for this dataset." : "No trained models yet."}
+                    </p>
                   )}
-                  {models.map((m) => {
+                  {filteredModels.map((m) => {
                     const metrics = renderMetricsSummary(m);
                     return (
                       <button
@@ -633,6 +740,7 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
                           setSelectedModelId(m.id);
                           setOptimizationId(null);
                           setDropdownOpen(false);
+                          setSearchParams(m.training_id ? { model: m.training_id } : {});
                         }}
                         className={`w-full flex items-center gap-3 px-4 py-3 text-sm hover:bg-white/10 transition-colors text-left ${m.id === selectedModelId ? "bg-indigo-600/20" : ""
                           }`}
@@ -730,7 +838,7 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
                             {status === "completed" && oid && (
                               <div className="mt-1.5 flex items-center gap-2">
                                 <CheckCircle size={11} className="text-emerald-400 shrink-0" />
-                                <span className="text-[10px] text-slateald-400 font-mono text-slate-300">
+                                <span className="text-[10px] font-mono text-slate-300">
                                   id: {oid.slice(0, 8)}…
                                 </span>
                                 <button
@@ -740,7 +848,7 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
                                       : "bg-white/10 text-slate-300 hover:bg-violet-500/20 hover:text-violet-300"
                                     }`}
                                 >
-                                  {optimizationId === oid ? "? Selected" : "Use for inference"}
+                                  {optimizationId === oid ? "✓ Selected" : "Use for inference"}
                                 </button>
                               </div>
                             )}
@@ -786,6 +894,9 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
               )}
             </div>
           )}
+
+          {/* --- Live console output for the most recently triggered job --- */}
+          <TerminalLogPanel jobId={activeLogJobId} title="Optimization Console" />
 
           {/* --- Test-Set Comparison: real accuracy/latency/size, original vs optimized --- */}
           {optimizationId && (

@@ -1,3 +1,4 @@
+import re
 import io
 import os
 from PIL import Image
@@ -30,6 +31,8 @@ WRITE_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
 _READ_BUF = bytearray(2 * 1024 * 1024)
 ZIP_PROCESSING_BATCH_SIZE = 500
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
+
 async def _run_in_executor(fn, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_DISK_EXECUTOR, fn, *args)
@@ -41,12 +44,21 @@ def _cleanup_file(path: str):
     except Exception:
         pass
 
+def _probe_image_dims(content: bytes):
+    """Best-effort (width, height) probe; returns (None, None) on anything
+    that isn't a readable image (e.g. .wav files, corrupt images)."""
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            return img.width, img.height
+    except Exception:
+        return None, None
+
 # --- Dataset CRUD ---
 
 @router.post("/create")
-async def create_dataset(name: str = Body(...), task: str = Body(...)):
+async def create_dataset(name: str = Body(...), task: str = Body(...), description: str = Body("")):
     try:
-        dataset = await _run_in_executor(data_manager.create_dataset, name, task)
+        dataset = await _run_in_executor(data_manager.create_dataset, name, task, description)
         return {"status": "success", "dataset": dataset}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -65,6 +77,41 @@ async def rename_dataset(dataset_id: str, new_name: str = Body(...)):
     if success:
         return {"status": "success"}
     return {"status": "error", "message": "Dataset not found"}
+
+# --- Metadata (description + auto-computed dataset-wide stats for the LLM) ---
+
+@router.patch("/{dataset_id}/metadata")
+async def update_dataset_metadata(
+    dataset_id: str,
+    description: str = Body(None),
+    metadata: dict = Body(None),
+):
+    """Lets the user attach a free-text description (and, if ever needed,
+    arbitrary extra metadata keys) to a dataset. Both fields are optional so
+    the caller can update just one."""
+    try:
+        dataset = await _run_in_executor(
+            data_manager.update_dataset_metadata, dataset_id, description, metadata
+        )
+        if dataset is None:
+            return {"status": "error", "message": "Dataset not found"}
+        return {"status": "success", "dataset": dataset}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.get("/{dataset_id}/image_stats")
+async def get_dataset_image_stats(dataset_id: str):
+    """Aggregate image size / aspect-ratio / storage stats for a dataset -
+    consumed by both the UI and the LLM advisor prompt so parameter
+    suggestions (input resolution, augmentation, etc.) can be grounded in
+    what the dataset actually looks like."""
+    try:
+        stats = await _run_in_executor(data_manager.get_dataset_image_stats, dataset_id)
+        return {"status": "success", "stats": stats}
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/dataset/{dataset_id}")
 async def delete_dataset(dataset_id: str):
@@ -89,8 +136,12 @@ async def upload_dataset_sample(
 ):
     try:
         content = await file.read()
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        width, height = (None, None)
+        if ext in IMAGE_EXTENSIONS:
+            width, height = await _run_in_executor(_probe_image_dims, content)
         sample_id = await _run_in_executor(
-            data_manager.add_sample, dataset_id, label, task, content, file.filename
+            data_manager.add_sample, dataset_id, label, task, content, file.filename, width, height
         )
         return {"status": "success", "sample_id": sample_id}
     except Exception as e:
@@ -180,6 +231,9 @@ async def zip_upload_status(upload_id: str):
     return {"status": "success", "upload_id": upload_id, "received_chunks": received}
 
 def _assemble_and_process_zip(upload_dir: str, total_chunks: int, dataset_id: str, task: str) -> int:
+    # NOTE: kept for backward compatibility - not currently called by any
+    # route. The active flow is finalize -> scan_zip_tree -> (user maps
+    # folders in the UI) -> process_zip_upload -> extract_zip_with_mapping.
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
 
     # Assemble chunks into a single file from CHUNK_DIR/{upload_id}
@@ -366,14 +420,11 @@ async def finalize_zip_upload(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assembly crash: {str(e)}")
 
-@router.post("/upload_zip/process")
-async def process_zip_upload(
+@router.post("/upload_zip/preview_regex")
+async def preview_zip_regex(
     upload_id: str = Body(...),
-    dataset_id: str = Body(...),
-    task: str = Body(...),
-    mapping: list = Body(...)
+    regex_pattern: str = Body(...)
 ):
-    """Executes the extraction using the confirmed folder mapping."""
     upload_dir = os.path.join(CHUNK_DIR, upload_id)
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
 
@@ -381,11 +432,90 @@ async def process_zip_upload(
         raise HTTPException(status_code=404, detail="Assembled ZIP not found")
 
     try:
-        count = await _run_in_executor(extract_zip_with_mapping, assembled_zip_path, dataset_id, task, mapping)
+        compiled_regex = re.compile(regex_pattern)
+    except re.error as e:
+        raise HTTPException(status_code=400, detail=f"Invalid regex: {e}")
+
+    def _preview():
+        classes = {}
+        samples = []
+        with zipfile.ZipFile(assembled_zip_path, 'r') as z:
+            for info in z.infolist():
+                if info.is_dir() or info.filename.startswith("__MACOSX"): continue
+                filename = info.filename.split("/")[-1]
+                match = compiled_regex.search(filename)
+                if match:
+                    label = match.group(1) if match.groups() else match.group(0)
+                    classes[label] = classes.get(label, 0) + 1
+                    if len(samples) < 5:
+                        samples.append({"filename": filename, "label": label})
+
+        return {
+            "classes": sorted([{"name": k, "count": v} for k, v in classes.items()], key=lambda x: x["count"], reverse=True),
+            "samples": samples
+        }
+
+    try:
+        result = await _run_in_executor(_preview)
+        return {"status": "success", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Update the process_zip_upload endpoint signature and call
+@router.post("/upload_zip/process")
+async def process_zip_upload(
+    upload_id: str = Body(...),
+    dataset_id: str = Body(...),
+    task: str = Body(...),
+    mapping: list = Body(...),
+    label_strategy: str = Body("folder"), # NEW
+    regex_pattern: str = Body(None)       # NEW
+):
+    """Executes the extraction using the confirmed folder mapping and regex.
+
+    BUGFIX: extract_zip_with_mapping() used to raise a bare NameError on
+    every "filename regex" apply because app/utils/zip_processor.py never
+    imported `re` - so this endpoint always 500'd before processing a single
+    file whenever label_strategy == "filename". That import is now added.
+    extract_zip_with_mapping() also now returns a small dict (processed
+    count + how many files didn't match the regex + any regex compile
+    error) instead of a bare int, so the frontend can show the user exactly
+    what happened instead of a silent mismatch between "preview" and
+    "apply".
+    """
+    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
+
+    if not os.path.exists(assembled_zip_path):
+        raise HTTPException(status_code=404, detail="Assembled ZIP not found")
+
+    try:
+        result = await _run_in_executor(
+            extract_zip_with_mapping, assembled_zip_path, dataset_id, task, mapping, label_strategy, regex_pattern
+        )
         shutil.rmtree(upload_dir, ignore_errors=True)
-        return {"status": "success", "count": count}
+        return {
+            "status": "success",
+            "count": result["processed"],
+            "unmatched_regex": result["unmatched_regex"],
+            "regex_error": result["regex_error"],
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction crash: {str(e)}")
+
+# Add the Dataset Explorer bulk relabeling endpoint
+@router.post("/{dataset_id}/relabel_bulk_regex")
+async def bulk_relabel_dataset_regex(
+    dataset_id: str,
+    regex_pattern: str = Body(..., embed=True)
+):
+    try:
+        count = await _run_in_executor(data_manager.bulk_relabel_by_regex, dataset_id, regex_pattern)
+        return {"status": "success", "relabelled_count": count}
+    # except ValueError as e:
+    #     return JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- Samples & Metadata ---
 
@@ -528,7 +658,14 @@ async def rename_label(dataset_id: str, old_label: str = Body(...), new_label: s
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-@router.delete("/labels/{dataset_id}/{label}")
+# BUGFIX ("delete samples by label" -> 405 Method Not Allowed): this route
+# was DELETE-only. If the frontend's apiClient sends this as a POST (a
+# common pattern for calls that need a body, or if a proxy/browser retries
+# with a different verb), FastAPI correctly reports 405 because no route
+# matched with that exact verb. Accepting both DELETE and POST for the same
+# handler removes that mismatch regardless of which verb the frontend
+# actually sends.
+@router.api_route("/labels/{dataset_id}/{label}", methods=["DELETE", "POST"])
 async def delete_label(dataset_id: str, label: str):
     try:
         count = await _run_in_executor(data_manager.delete_label, dataset_id, label)

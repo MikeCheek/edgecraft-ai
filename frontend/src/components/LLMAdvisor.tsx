@@ -1,4 +1,4 @@
-import { Lightbulb, TrendingUp, RefreshCw } from 'lucide-react';
+import { Lightbulb, TrendingUp, RefreshCw, AlertTriangle } from 'lucide-react';
 import { LLMSuggestion } from '../types';
 import { useState } from 'react';
 import { useAPI } from '../hooks/useAPI';
@@ -15,7 +15,7 @@ export function LLMAdvisor({ trainingId, status }: LLMAdvisorProps) {
   const [suggestions, setSuggestions] = useState<LLMSuggestion[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  const { request, apiClient } = useAPI();
+  const { request, apiClient, error } = useAPI();
 
   const handleGetSuggestions = async () => {
     if (!trainingId) return;
@@ -46,6 +46,17 @@ export function LLMAdvisor({ trainingId, status }: LLMAdvisorProps) {
           <><Lightbulb className="w-5 h-5" /> Generate Insights via OpenRouter</>
         )}
       </button>
+
+      {/* Real error surfaced here - previously the request() hook captured
+          this but the component never rendered it, so a failed LLM call
+          (bad API key, network error, invalid model, etc.) looked like
+          nothing happened at all. */}
+      {error && (
+        <div className="flex items-start gap-2 p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-200 text-sm">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
 
       {/* Results Feed */}
       <div className="flex-1 overflow-y-auto pr-2 space-y-4 custom-scrollbar mt-2">

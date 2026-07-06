@@ -1,9 +1,10 @@
-import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2 } from "lucide-react";
+import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2, Regex, Info } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
 import { useAPI } from "../../hooks/useAPI";
 import { DatasetInfo, DatasetSample } from "../../types";
 import ClassManager from "./ClassManager";
 import SampleCard from "./SampleCard";
+import DatasetInfoPanel from "./DatasetInfoPanel";
 
 interface ExplorerProps {
   dataset: DatasetInfo;
@@ -35,12 +36,19 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const [isLoading, setIsLoading] = useState(true);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [showClassManager, setShowClassManager] = useState(false);
+  // NEW: dataset description + auto-computed image/storage stats panel
+  const [showInfoPanel, setShowInfoPanel] = useState(false);
 
   // Auto-Split State
   const [trainPct, setTrainPct] = useState(70);
   const [valPct, setValPct] = useState(20);
   const [testPct, setTestPct] = useState(10);
   const [isSplitting, setIsSplitting] = useState(false);
+
+  // NEW: Regex Bulk Relabel State
+  const [showRegexModal, setShowRegexModal] = useState(false);
+  const [bulkRegex, setBulkRegex] = useState('^([^_]+)');
+  const [isBulkRelabeling, setIsBulkRelabeling] = useState(false);
 
   const fetchAll = useCallback(async () => {
     setIsLoading(true);
@@ -117,6 +125,25 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     setViewMode('groups');
   };
 
+  const handleBulkRelabel = async () => {
+    if (!bulkRegex.trim()) return;
+    setIsBulkRelabeling(true);
+    try {
+      // Add `relabelDatasetBulkRegex` to apiClient methods
+      const res = await request(() => apiClient.relabelDatasetBulkRegex(dataset.id, bulkRegex)) as any;
+      if (res && res.status === 'success') {
+        alert(`Successfully updated labels for ${res.relabelled_count} samples.`);
+        await fetchAll();
+        onChanged();
+      }
+    } catch (e) {
+      alert("Failed to apply regex relabeling.");
+    } finally {
+      setIsBulkRelabeling(false);
+      setShowRegexModal(false);
+    }
+  };
+
   // --- Derived Data ---
 
   const visible = samples.filter(s => {
@@ -150,7 +177,34 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-      <div className="w-full max-w-5xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
+      <div className="w-full max-w-5xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden relative">
+
+        {/* NEW: Regex Modal Overlay */}
+        {showRegexModal && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+            <div className="bg-slate-900 border border-slate-700 p-6 rounded-xl w-[400px] shadow-2xl">
+              <h3 className="text-white font-bold mb-2 flex items-center gap-2"><Regex className="text-indigo-400" /> Bulk Relabel via Regex</h3>
+              <p className="text-xs text-gray-400 mb-4">Recomputes class labels for all existing files in this dataset using their filenames. The operation is handled fully on the backend.</p>
+              <input
+                type="text"
+                value={bulkRegex}
+                onChange={e => setBulkRegex(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white font-mono text-sm mb-4 focus:border-indigo-500 outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setShowRegexModal(false)} className="px-4 py-2 text-xs text-gray-400 hover:text-white">Cancel</button>
+                <button
+                  onClick={handleBulkRelabel}
+                  disabled={isBulkRelabeling}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs font-bold flex items-center gap-2"
+                >
+                  {isBulkRelabeling ? <RefreshCw size={14} className="animate-spin" /> : null}
+                  Execute Relabel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 bg-slate-800/50">
@@ -162,6 +216,14 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button onClick={() => setShowInfoPanel(v => !v)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showInfoPanel ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
+              <Info className="w-4 h-4" /> Dataset Info
+            </button>
+            <button onClick={() => setShowRegexModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600 transition">
+              <Regex className="w-4 h-4" /> Regex Relabel
+            </button>
             <button onClick={() => setShowClassManager(v => !v)}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showClassManager ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
               <Tags className="w-4 h-4" /> Manage Classes
@@ -171,6 +233,17 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
             </button>
           </div>
         </div>
+
+        {/* NEW: Dataset Info panel - description editor + image/storage stats */}
+        {showInfoPanel && (
+          <div className="px-6 py-4 border-b border-slate-700 bg-slate-800/20">
+            <DatasetInfoPanel
+              datasetId={dataset.id}
+              initialDescription={dataset.description}
+              onChanged={onChanged}
+            />
+          </div>
+        )}
 
         {showClassManager && (
           <div className="px-6 py-4 border-b border-slate-700 bg-slate-800/20">

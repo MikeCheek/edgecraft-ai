@@ -1,8 +1,71 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+import keras as _keras_top  # needed for keras.saving.register_keras_serializable below
 from tensorflow.keras import layers, regularizers
 from typing import Tuple
+
+
+# ---------------------------------------------------------------------------
+# Custom layers (replacing layers.Lambda(lambda ...) - see note below)
+# ---------------------------------------------------------------------------
+# layers.Lambda wrapping a raw Python lambda (e.g. `lambda t: tf.repeat(...)`)
+# looks fine at first: the model builds, trains, and even reloads with
+# safe_mode=False. But the reconstructed lambda's __globals__ doesn't
+# reliably carry over the enclosing module's imports after
+# deserialization, so the FIRST time the model needs to be retraced -
+# which TFLite conversion always does - it can fail with
+# `NameError: name 'tf' is not defined` deep inside TensorFlow's tracing
+# machinery. A properly registered Layer subclass has a real `call()`
+# method (no serialized bytecode closures at all), so it doesn't have
+# this problem, and doesn't even need Lambda's safe_mode=False escape
+# hatch since the Keras-3 "unsafe Lambda deserialization" guard only
+# applies to actual Lambda layers.
+@_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
+class ChannelTile3(keras.layers.Layer):
+    """Tiles a 1-channel (grayscale) input to 3 channels, e.g. so it can
+    feed an ImageNet-pretrained (RGB-only) backbone."""
+
+    def call(self, inputs):
+        return tf.repeat(inputs, 3, axis=-1)
+
+    def compute_output_shape(self, input_shape):
+        return tuple(input_shape[:-1]) + (3,)
+
+
+@_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
+class GrayscaleToRGB(keras.layers.Layer):
+    """Converts a 1-channel image to 3-channel RGB via
+    tf.image.grayscale_to_rgb (used by the Visual Wake Words model)."""
+
+    def call(self, inputs):
+        return tf.image.grayscale_to_rgb(inputs)
+
+    def compute_output_shape(self, input_shape):
+        return tuple(input_shape[:-1]) + (3,)
+
+
+@_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
+class AudioToRGB(keras.layers.Layer):
+    """Tiles a 1-channel MFCC/spectrogram input to 3 channels and resizes
+    it to a fixed spatial size, so it can feed an ImageNet-pretrained
+    backbone (used by the transfer-learning optimization path)."""
+
+    def __init__(self, target_size=(96, 96), **kwargs):
+        super().__init__(**kwargs)
+        self.target_size = tuple(target_size)
+
+    def call(self, inputs):
+        return tf.image.resize(tf.repeat(inputs, 3, axis=-1), list(self.target_size))
+
+    def compute_output_shape(self, input_shape):
+        return (input_shape[0], self.target_size[0], self.target_size[1], 3)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"target_size": self.target_size})
+        return config
+
 
 class ModelFactory:
     """Factory for creating TinyML models for different tasks.
@@ -101,7 +164,7 @@ class ModelFactory:
             inp = keras.Input(shape=input_shape)
             x = data_augmentation(inp) if data_augmentation else inp
             if channels != 3:
-                x = layers.Lambda(lambda t: tf.repeat(t, 3, axis=-1), name="channel_adapter")(x)
+                x = ChannelTile3(name="channel_adapter")(x)
             x = base(x)
             x = layers.GlobalAveragePooling2D()(x)
             x = layers.Dropout(dropout_rate)(x)
@@ -121,7 +184,7 @@ class ModelFactory:
             inp = keras.Input(shape=input_shape)
             x = data_augmentation(inp) if data_augmentation else inp
             if channels != 3:
-                x = layers.Lambda(lambda t: tf.repeat(t, 3, axis=-1), name="channel_adapter")(x)
+                x = ChannelTile3(name="channel_adapter")(x)
             x = base(x)
             x = layers.GlobalAveragePooling2D()(x)
             x = layers.Dense(256, activation="relu", kernel_regularizer=reg)(x)
@@ -142,7 +205,7 @@ class ModelFactory:
             inp = keras.Input(shape=input_shape)
             x = data_augmentation(inp) if data_augmentation else inp
             if channels != 3:
-                x = layers.Lambda(lambda t: tf.repeat(t, 3, axis=-1), name="channel_adapter")(x)
+                x = ChannelTile3(name="channel_adapter")(x)
             x = base(x)
             x = layers.GlobalAveragePooling2D()(x)
             x = layers.Dense(256, activation="relu", kernel_regularizer=reg)(x)
@@ -186,7 +249,7 @@ class ModelFactory:
         )
         base.trainable = False
         model = keras.Sequential([
-            layers.Lambda(lambda x: tf.image.grayscale_to_rgb(x), input_shape=input_shape),
+            GrayscaleToRGB(input_shape=input_shape, name="grayscale_to_rgb"),
             base,
             layers.GlobalAveragePooling2D(),
             layers.Dense(128, activation="relu", kernel_regularizer=reg),
