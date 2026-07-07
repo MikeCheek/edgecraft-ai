@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   backend:
     build:
@@ -9,10 +7,28 @@ services:
       - "8000:8000"
     environment:
       - DEBUG=true
-      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost
+      # NOTE: CORS origins are currently hardcoded in app/main.py, not read
+      # from env. If you add `http://localhost` there (for the dockerized
+      # frontend on port 80), you can drop this var — it's a no-op today.
+      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost
+      # Needed if you want OpenRouter LLM suggestions to work from inside Docker.
+      # Put OPENROUTER_API_KEY in backend/.env (kept out of this file / git).
+    env_file:
+      - ./backend/.env
     volumes:
-      - ./backend/models:/app/models
-      - ./backend/datasets:/app/datasets
+      # Real runtime storage paths (Trainer/DataManager default to "data_storage",
+      # relative to the backend's working directory in the container).
+      - ./backend/data_storage:/app/data_storage
+      # Optimized .tflite outputs currently live under the OS temp dir
+      # (tempfile.gettempdir()/edgecraft_optimizations) — mount that too,
+      # or better: fix optimizer.py to use a configurable, non-temp path.
+      - ./backend/optimizations:/tmp/edgecraft_optimizations
+    extra_hosts:
+      # Lets the backend reach an Ollama instance running on the host machine
+      # via OLLAMA_BASE_URL=http://localhost:11434 (which otherwise resolves
+      # to the container itself). Works on Linux with Docker 20.10+; Docker
+      # Desktop (Mac/Windows) provides host.docker.internal automatically.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -26,10 +42,13 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    # NOTE: the frontend currently hardcodes API_BASE = "http://localhost:8000/api"
+    # in its source (useAPI.ts, OptimizationStudio, remoteDatasetApi.ts) instead
+    # of reading any env var, so this setting has no effect until that's fixed.
+    # It happens to work anyway here because the backend port is published to
+    # the host and the browser (not the container) makes the request — but
+    # only once CORS above allows the `http://localhost` origin.
     environment:
-      - VITE_API_BASE_URL=http://backend:8000/api
-
-volumes:
-  models:
-  datasets:
+      - VITE_API_BASE_URL=http://localhost:8000/api
