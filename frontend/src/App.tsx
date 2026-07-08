@@ -19,6 +19,7 @@ import {
   Check,
   CpuIcon,
   GitBranch,
+  HardDrive
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 import { useLocalStorage } from './hooks/useLocalStorage';
@@ -44,6 +45,9 @@ export default function App() {
   // Local UI State for the custom Global Config dropdown
   const [isConfigOpen, setIsConfigOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Storage state for the header indicator
+  const [storageOverview, setStorageOverview] = useState<any | null>(null);
 
   const openRouterModels = [
     { id: 'openrouter/free', label: 'OpenRouter Free', specs: 'Automatic selection' },
@@ -72,9 +76,15 @@ export default function App() {
     if (rawModels && rawModels.models) {
       dispatch({ type: 'SET_MODELS', payload: rawModels.models });
     }
+
+    // Fetch storage for the header
+    const rawStorage = await request(() => apiClient.getStorageOverview());
+    if (rawStorage && rawStorage.overview) {
+      setStorageOverview(rawStorage.overview);
+    }
   };
 
-  useEffect(() => { if (isHealthy) fetchStatsAndModels(); }, [isHealthy]);
+  useEffect(() => { if (isHealthy) fetchStatsAndModels(); }, [isHealthy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTaskChange = (task: TinyMLTask) => {
     setSelectedTask(task);
@@ -86,7 +96,6 @@ export default function App() {
     dispatch({ type: 'SET_BOARD', payload: board });
   };
 
-  // Human readable lookups for modern item formatting
   const taskOptions: { id: TinyMLTask; label: string; desc: string }[] = [
     { id: 'IMAGE_CLASSIFICATION', label: 'Image Classification', desc: 'Categorize whole images' },
     { id: 'OBJECT_DETECTION', label: 'Object Detection', desc: 'Locate and classify items' },
@@ -137,20 +146,30 @@ export default function App() {
         {/* Header containing custom Global Config */}
         <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-50">
 
-          {/* Health Status Indicator */}
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full mr-4">
-            <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
-              <Activity className="w-3 h-3 text-gray-500" /> Backend API
-            </span>
-            <div className="flex items-center gap-1.5 ml-1">
-              <span className="relative flex h-2 w-2">
-                {isHealthy && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
-                <span className={`relative inline-flex rounded-full h-2 w-2 ${isHealthy ? 'bg-green-500' : 'bg-red-500'}`}></span>
+          <div className="flex items-center gap-4">
+            {/* Health Status Indicator */}
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full">
+              <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
+                <Activity className="w-3 h-3 text-gray-500" /> Backend API
               </span>
-              <span className={`text-[10px] font-bold uppercase tracking-wider ${isHealthy ? 'text-green-400' : 'text-red-400'}`}>
-                {isHealthy ? 'Online' : 'Offline'}
-              </span>
+              <div className="flex items-center gap-1.5 ml-1">
+                <span className="relative flex h-2 w-2">
+                  {isHealthy && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>}
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${isHealthy ? 'bg-green-500' : 'bg-red-500'}`}></span>
+                </span>
+                <span className={`text-[10px] font-bold uppercase tracking-wider ${isHealthy ? 'text-green-400' : 'text-red-400'}`}>
+                  {isHealthy ? 'Online' : 'Offline'}
+                </span>
+              </div>
             </div>
+
+            {/* Quick Storage Indicator */}
+            {storageOverview && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full" title="Storage Used">
+                <HardDrive className="w-3 h-3 text-emerald-400" />
+                <span className="text-xs text-gray-300 font-mono">{storageOverview.total_storage_human}</span>
+              </div>
+            )}
           </div>
 
           {/* Redesigned Premium Global Configuration Menu */}

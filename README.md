@@ -17,6 +17,25 @@ Then open **http://localhost:5173**. Full details in [Getting Started](#getting-
 
 ---
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><strong>Dashboard</strong><br/><img src="docs/dashboard.png" alt="EdgeCraft dashboard overview" width="100%"/></td>
+    <td width="50%"><strong>Dataset Overview</strong><br/><img src="docs/dataset-overview.png" alt="Dataset overview and management" width="100%"/></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Training History</strong><br/><img src="docs/training-history.png" alt="Live training metrics and job history" width="100%"/></td>
+    <td width="50%"><strong>Optimization Studio</strong><br/><img src="docs/optimization-studio.png" alt="Optimization studio with quantization comparisons" width="100%"/></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Deployment</strong><br/><img src="docs/deployment.png" alt="Arduino project export and deployment configuration" width="100%"/></td>
+    <td width="50%"></td>
+  </tr>
+</table>
+
+---
+
 ## Key Features
 
 **Data:** upload samples or bulk-import a labeled ZIP (with visual folder→label mapping and regex relabeling), manage classes/splits, live storage overview.
@@ -116,7 +135,7 @@ Full interactive docs at `http://localhost:8000/docs`.
 
 ---
 
-## TODO / Roadmap
+<!-- ## TODO / Roadmap
 
 **Near-term**
 
@@ -141,7 +160,7 @@ Full interactive docs at `http://localhost:8000/docs`.
 - [ ] Collaborative/federated training
 - [ ] Optional opt-in encrypted cloud backup
 
----
+--- -->
 
 ## License
 

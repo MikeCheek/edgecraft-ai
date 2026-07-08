@@ -51,6 +51,10 @@ async def _bind_job_log_broker_loop():
 
 @app.get("/api/health")
 async def health_check():
+    """
+    Keep this async! It runs instantly on the main thread loop 
+    and won't be blocked if heavy tasks are offloaded.
+    """
     return {
         "status": "healthy",
         "message": "EdgeCraft AI Backend is running"
@@ -58,35 +62,23 @@ async def health_check():
 
 @app.get("/api/info")
 async def get_info():
+    """
+    Returns core static configuration metadata instantly.
+    """
     return {
         "name": "EdgeCraft AI Backend",
         "version": "0.3.0",
-        "tasks": [
-            "IMAGE_CLASSIFICATION",
-            "OBJECT_DETECTION",
-            "VISUAL_WAKE_WORDS",
-            "KEYWORD_SPOTTING",
-            "AUDIO_CLASSIFICATION"
-        ],
-        "boards": [
-            "ESP32_S3_N16R8",
-            "ESP32_CAM",
-            "RASPBERRY_PI_PICO_2_W",
-            "ARDUINO_NANO_33_BLE"
-        ],
-        "models": {
-            "image": ["MobileNetV2", "MobileNetV3Small", "MobileNetV1_0.25", "EfficientNet", "ResNet50V2", "Custom3LayerCNN"],
-            "audio": ["MFCC_CNN", "WaveNet", "AudioLSTM", "AudioGRU"],
-            "text":  ["TinyBERT"]
-        }
+        "tasks": ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS", "KEYWORD_SPOTTING", "AUDIO_CLASSIFICATION"],
+        "boards": ["ESP32_S3_N16R8", "ESP32_CAM", "RASPBERRY_PI_PICO_2_W", "ARDUINO_NANO_33_BLE"]
     }
 
 @app.get("/api/storage/overview")
-async def get_storage_overview():
+def get_storage_overview():
     """
-    Full backend storage report: per-dataset sample counts/sizes/file-type
-    breakdowns, trained model sizes, optimized (.tflite) output sizes, and
-    overall disk usage - all computed live from what's actually on disk.
+    REMOVED 'async' keyword. 
+    By defining this as a standard synchronous function 'def', FastAPI 
+    automatically delegates the heavy disk crawl to an internal external threadpool. 
+    This allows /api/health to keep running smoothly on the event loop!
     """
     try:
         from app.services.storage_overview import get_storage_overview as _overview
@@ -95,12 +87,10 @@ async def get_storage_overview():
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/models/tree")
-async def get_models_tree(include_archived: bool = False):
+def get_models_tree(include_archived: bool = False):
     """
-    Dataset -> Trained Model -> Optimized Variant, all in one tree so the
-    frontend can show (and let the user select from) the full lineage
-    instead of several disconnected flat dropdowns. Archived training runs
-    (and the models they produced) are excluded by default.
+    REMOVED 'async' keyword. Offloads complex database/file mapping scans
+    to background worker threads.
     """
     try:
         from app.services.model_tree import get_model_tree

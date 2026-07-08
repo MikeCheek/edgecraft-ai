@@ -9,12 +9,19 @@ import { ApiResponse } from '../types'
 const API_BASE = 'http://localhost:8000/api'
 
 class APIClient {
-  private client: AxiosInstance
-  private uploadClient: AxiosInstance
+  private client: AxiosInstance // For standard metadata (Fast)
+  private heavyClient: AxiosInstance // For processing/disk scans
+  private uploadClient: AxiosInstance // For stream pipes
 
   constructor() {
-    this.client = axios.create({ baseURL: API_BASE, timeout: 300_000 })
-    this.uploadClient = axios.create({ baseURL: API_BASE, timeout: 600_000 })
+    // Basic structural requests fail fast if backend stalls
+    this.client = axios.create({ baseURL: API_BASE, timeout: 5000 })
+
+    // Disk scans & processing queues get breathing room
+    this.heavyClient = axios.create({ baseURL: API_BASE, timeout: 30000 })
+
+    // Massive archive operations
+    this.uploadClient = axios.create({ baseURL: API_BASE, timeout: 600000 })
   }
 
   async health() {
@@ -22,7 +29,7 @@ class APIClient {
   }
 
   async getStorageOverview() {
-    return this.client.get<ApiResponse<any>>('/storage/overview')
+    return this.heavyClient.get<ApiResponse<any>>('/storage/overview')
   }
 
   async getModelTree(includeArchived: boolean = false) {
