@@ -613,6 +613,24 @@ async def update_sample_split(sample_id: str, split: str = Body(..., embed=True)
         return {"status": "error", "message": "Sample not found"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    
+@router.patch("/sample/{sample_id}/image")
+async def update_sample_image(sample_id: str, file: UploadFile = File(...)):
+    """Overwrite a sample's image content in place - backs the Dataset
+    Explorer's crop tool. Keeps label/split/id unchanged; re-probes
+    width/height from the new bytes so image_stats (and the LLM advisor
+    prompt that reads it) stays accurate after a crop."""
+    try:
+        content = await file.read()
+        width, height = await _run_in_executor(_probe_image_dims, content)
+        success = await _run_in_executor(
+            data_manager.update_sample_data, sample_id, content, width, height
+        )
+        if not success:
+            return {"status": "error", "message": "Sample not found"}
+        return {"status": "success", "width": width, "height": height}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @router.get("/image/{sample_id}")
 async def get_sample_image(sample_id: str):

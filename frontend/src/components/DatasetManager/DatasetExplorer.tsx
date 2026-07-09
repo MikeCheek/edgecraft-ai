@@ -5,6 +5,7 @@ import { DatasetInfo, DatasetSample } from "../../types";
 import ClassManager from "./ClassManager";
 import SampleCard from "./SampleCard";
 import DatasetInfoPanel from "./DatasetInfoPanel";
+import ImageEditorModal from "./ImageEditorModal";
 
 interface ExplorerProps {
   dataset: DatasetInfo;
@@ -24,6 +25,8 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const { request, apiClient } = useAPI();
   const [samples, setSamples] = useState<DatasetSample[]>([]);
   const [allLabels, setAllLabels] = useState<string[]>([]);
+
+  const [viewingSample, setViewingSample] = useState<DatasetSample | null>(null);
 
   // View & Pagination State
   const [viewMode, setViewMode] = useState<'groups' | 'samples'>('groups');
@@ -144,6 +147,17 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     }
   };
 
+  const handleSaveCrop = async (blob: Blob) => {
+    if (!viewingSample) return;
+    const res = await apiClient.updateSampleImage(viewingSample.id, blob);
+    if (res.status !== 'success') {
+      alert(res.message || 'Crop failed');
+      return;
+    }
+    await fetchAll();
+    onChanged();
+  };
+
   // --- Derived Data ---
 
   const visible = samples.filter(s => {
@@ -204,6 +218,15 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
               </div>
             </div>
           </div>
+        )}
+
+        {viewingSample && (
+          <ImageEditorModal
+            imageUrl={`${apiBase}/datasets/image/${viewingSample.id}${viewingSample.updated_at ? `?v=${viewingSample.updated_at}` : ''}`}
+            sampleLabel={viewingSample.label}
+            onClose={() => setViewingSample(null)}
+            onSaveCrop={handleSaveCrop}
+          />
         )}
 
         {/* Header */}
@@ -383,7 +406,8 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
                     {visible.slice(0, visibleCount).map(s => (
                       <SampleCard key={s.id} sample={s} allLabels={allLabels} apiBase={apiBase}
-                        onRelabel={handleRelabel} onSplitChange={handleSplitChange} onDelete={handleDelete} />
+                        onRelabel={handleRelabel} onSplitChange={handleSplitChange} onDelete={handleDelete}
+                        onView={setViewingSample} />
                     ))}
                   </div>
 

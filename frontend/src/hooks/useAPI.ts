@@ -272,6 +272,24 @@ class APIClient {
     )
   }
 
+  async updateSampleImage(
+    sampleId: string,
+    blob: Blob
+  ): Promise<{
+    status: string
+    width?: number
+    height?: number
+    message?: string
+  }> {
+    const fd = new FormData()
+    fd.append('file', blob, 'crop.png')
+    const res = await this.uploadClient.patch(
+      `/datasets/sample/${sampleId}/image`,
+      fd
+    )
+    return res.data
+  }
+
   async getDatasetLabels(datasetId: string) {
     return this.client.get<ApiResponse<any>>(`/datasets/labels/${datasetId}`)
   }

@@ -238,7 +238,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         {isFullyAssigned && (
                           <span className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 bg-emerald-900/20 border border-emerald-500/30 rounded-lg mr-1"
                             title={`train: ${summary!.train} • val: ${summary!.val} • test: ${summary!.test}`}>
-                            ? Split
+                            ✓ Split
                           </span>
                         )}
 

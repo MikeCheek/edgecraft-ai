@@ -64,6 +64,7 @@ export interface DatasetSample {
   size_bytes?: number
   width?: number | null
   height?: number | null
+  updated_at?: number
 }
 
 export interface TrainingConfig {

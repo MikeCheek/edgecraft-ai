@@ -548,3 +548,33 @@ class DataManager:
             self._save_metadata()
 
         return count
+    
+    def update_sample_data(
+        self,
+        sample_id: str,
+        data: bytes,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> bool:
+        """Overwrite a sample's binary content in place - used by the
+        Dataset Explorer's crop tool. Keeps id/dataset_id/label/split
+        unchanged; only size_bytes (and width/height, if the new content
+        was successfully re-probed) are refreshed.
+
+        Sets `updated_at` so the frontend can cache-bust the image URL -
+        GET /image/{sample_id} serves an `immutable` Cache-Control header
+        keyed by sample_id, which never changes here, so without a
+        version query param the browser would keep showing the pre-crop
+        bytes indefinitely.
+        """
+        if sample_id not in self.samples:
+            return False
+        self._write_sample_file(sample_id, data)
+        self.samples[sample_id]["size_bytes"] = len(data)
+        if width is not None:
+            self.samples[sample_id]["width"] = width
+        if height is not None:
+            self.samples[sample_id]["height"] = height
+        self.samples[sample_id]["updated_at"] = time.time()
+        self._save_metadata()
+        return True

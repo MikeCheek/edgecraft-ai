@@ -1,4 +1,4 @@
-import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2 } from 'lucide-react';
+import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2, Maximize2 } from 'lucide-react';
 import React, { useState } from 'react'
 import { DatasetSample } from '../../types';
 
@@ -9,9 +9,10 @@ interface SampleCardProps {
   onRelabel: (id: string, newLabel: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onSplitChange: (id: string, newSplit: string) => Promise<void>;
+  onView: (sample: DatasetSample) => void; // NEW
 }
 
-function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitChange }: SampleCardProps) {
+function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitChange, onView }: SampleCardProps) {
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(sample.label);
   const [customLabel, setCustomLabel] = useState('');
@@ -52,13 +53,23 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
           </div>
         ) : (
           <img
-            src={`${apiBase}/datasets/image/${sample.id}`}
+            src={`${apiBase}/datasets/image/${sample.id}${sample.updated_at ? `?v=${sample.updated_at}` : ''}`}
             alt={sample.label}
             loading="lazy"
             decoding="async"
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover cursor-pointer"
+            onClick={() => onView(sample)}
             onError={() => setImgError(true)}
           />
+        )}
+        {!isAudio && !imgError && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onView(sample); }}
+            className="absolute top-1 left-1 p-1 bg-slate-900/80 hover:bg-indigo-600 rounded-md opacity-0 group-hover:opacity-100 transition-opacity"
+            title="View fullscreen"
+          >
+            <Maximize2 className="w-3 h-3 text-white" />
+          </button>
         )}
         <button
           onClick={handleDelete}
