@@ -624,6 +624,16 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/optimization/llm-status')
   }
 
+  /**
+   * .env-driven view of which LLM providers (OpenRouter / local Ollama)
+   * are actually usable on this backend. Used at startup to auto-select
+   * the only available provider, or to offer a choice (remembered via
+   * AppContext's llmProvider) when both are present.
+   */
+  async getLLMConfig() {
+    return this.client.get<ApiResponse<any>>('/optimization/llm-config')
+  }
+
   async getLLMSuggestions(
     trainingId: string,
     provider: 'ollama' | 'openrouter',
@@ -660,7 +670,7 @@ class APIClient {
     )
   }
 
-  // ── Inference ──────────────────────────────────────────────────────────────
+  // ?? Inference ??????????????????????????????????????????????????????????????
 
   async getInferenceHistory(limit: number = 100) {
     return this.client.get<ApiResponse<any>>(

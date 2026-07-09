@@ -21,9 +21,15 @@ export function LLMAdvisor({ trainingId, status }: LLMAdvisorProps) {
     if (!trainingId) return;
 
     setIsLoading(true);
-    // Fires using the globally selected model from AppContext
+    // Provider (and, for Ollama, its model) come from AppContext - set
+    // automatically when the backend .env only exposes one provider, or
+    // picked by the user in the Global Config panel when both OpenRouter
+    // and Ollama are available (see App.tsx's "AI Studio Assistant" section).
+    const modelName = state.llmProvider === 'ollama'
+      ? (state.llmConfig?.ollama_model || 'phi3')
+      : state.llmModel;
     const result = await request(() =>
-      apiClient.getLLMSuggestions(trainingId, 'openrouter', state.llmModel)
+      apiClient.getLLMSuggestions(trainingId, state.llmProvider, modelName)
     );
     setIsLoading(false);
 
@@ -43,7 +49,7 @@ export function LLMAdvisor({ trainingId, status }: LLMAdvisorProps) {
         {isLoading ? (
           <><RefreshCw className="w-5 h-5 animate-spin" /> Analyzing Metrics...</>
         ) : (
-          <><Lightbulb className="w-5 h-5" /> Generate Insights via OpenRouter</>
+          <><Lightbulb className="w-5 h-5" /> Generate Insights via {state.llmProvider === 'ollama' ? 'Ollama' : 'OpenRouter'}</>
         )}
       </button>
 

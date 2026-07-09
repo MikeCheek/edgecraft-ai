@@ -8,6 +8,46 @@ from app.services.shared_state import data_manager
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Ollama configuration (backend .env driven)
+# ---------------------------------------------------------------------------
+# OLLAMA_ENABLED=true   -> unlocks provider="ollama" for the LLM endpoints
+# OLLAMA_MODEL=<name>   -> default local model to use (falls back to "phi3")
+# OLLAMA_HOST=<url>     -> base URL of the Ollama server (falls back to
+#                          http://localhost:11434)
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "phi3"
+
+
+def _ollama_enabled() -> bool:
+    return os.environ.get("OLLAMA_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+
+
+def _ollama_host() -> str:
+    return os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST).rstrip("/")
+
+
+def _ollama_default_model() -> str:
+    return os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+
+
+def get_provider_config() -> dict:
+    """
+    Server-side, .env-driven view of which LLM providers are actually
+    usable right now. The frontend calls GET /api/optimization/llm-config
+    to read this at startup so it can:
+      - auto-select the only available provider, or
+      - offer the user a choice (remembered client-side) when both
+        OPENROUTER_API_KEY and OLLAMA_ENABLED=true are present.
+    """
+    return {
+        "openrouter_available": bool(os.environ.get("OPENROUTER_API_KEY")),
+        "ollama_available": _ollama_enabled(),
+        "ollama_model": _ollama_default_model(),
+        "ollama_host": _ollama_host(),
+    }
+
+
 class LLMAdvisor:
     async def generate_suggestions(self, context, provider="openrouter", model_name="google/gemini-2.0-flash-lite-preview-02-05:free"):
         # 1. Safely Extract Training Context
@@ -107,6 +147,12 @@ class LLMAdvisor:
             if provider == "openrouter":
                 return await self._call_openrouter(messages, model_name)
             elif provider == "ollama":
+                if not _ollama_enabled():
+                    raise ValueError(
+                        "Ollama is not enabled on this backend. Set OLLAMA_ENABLED=true "
+                        "in the backend .env (optionally with OLLAMA_MODEL / OLLAMA_HOST), "
+                        "or switch the provider back to 'openrouter'."
+                    )
                 return await self._call_ollama(messages, model_name)
             else:
                 raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
@@ -182,7 +228,17 @@ class LLMAdvisor:
                 raise RuntimeError("OpenRouter request timed out after 45s") from e
 
     async def _call_ollama(self, messages, model_name):
-        url = "http://localhost:11434/api/generate"
+        # BUGFIX: previously hardcoded to localhost, ignoring OLLAMA_HOST.
+        # Also, callers may still be passing an OpenRouter-style model id
+        # (e.g. "google/gemini-2.0-flash-lite-preview-02-05:free") left
+        # over from switching providers without changing the model field -
+        # that's never a valid local Ollama tag, so fall back to the
+        # configured OLLAMA_MODEL (or "phi3") whenever the incoming
+        # model_name is empty or clearly an OpenRouter id.
+        if not model_name or "/" in model_name:
+            model_name = _ollama_default_model()
+
+        url = f"{_ollama_host()}/api/generate"
         payload = {
             "model": model_name,
             "prompt": messages[-1]["content"] if messages else "",
@@ -392,6 +448,12 @@ class LLMAdvisor:
         if provider == "openrouter":
             result = await self._call_openrouter(messages, model_name)
         elif provider == "ollama":
+            if not _ollama_enabled():
+                raise ValueError(
+                    "Ollama is not enabled on this backend. Set OLLAMA_ENABLED=true "
+                    "in the backend .env (optionally with OLLAMA_MODEL / OLLAMA_HOST), "
+                    "or switch the provider back to 'openrouter'."
+                )
             result = await self._call_ollama(messages, model_name)
         else:
             raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")

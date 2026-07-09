@@ -4,7 +4,7 @@ import uuid
 import time
 import random
 import contextlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 class DataManager:
     """Persistent data management for datasets"""
@@ -25,6 +25,15 @@ class DataManager:
         # event loop long enough to hit the frontend 30 s axios timeout.
         self.dataset_labels: Dict[str, List[str]] = {}
 
+        # NEW: in-memory indices, never persisted to disk - rebuilt from
+        # self.samples on every load. These turn every dataset-scoped (or
+        # label-scoped) lookup from an O(total_samples) scan into an
+        # O(matching_samples) lookup. They're what get_samples(),
+        # _sync_labels(), get_dataset_image_stats(), delete_label(), and
+        # rename_label() all use now instead of iterating self.samples.
+        self.samples_by_dataset: Dict[str, Set[str]] = {}
+        self.samples_by_label: Dict[Tuple[str, str], Set[str]] = {}
+
         self._load_from_disk()
 
     def _get_compatible_tasks(self, task: str) -> set:
@@ -37,6 +46,45 @@ class DataManager:
         if task in audio_tasks:
             return audio_tasks
         return {task}
+
+    # ------------------------------------------------------------------
+    # Index maintenance (NEW)
+    # ------------------------------------------------------------------
+    # Kept private and called from every mutation site so self.samples and
+    # the indices never drift apart. Rebuilt from scratch on load, updated
+    # incrementally everywhere else.
+
+    def _index_add(self, sample_id: str, dataset_id: str, label: str) -> None:
+        self.samples_by_dataset.setdefault(dataset_id, set()).add(sample_id)
+        self.samples_by_label.setdefault((dataset_id, label), set()).add(sample_id)
+
+    def _index_remove(self, sample_id: str, dataset_id: str, label: str) -> None:
+        bucket = self.samples_by_dataset.get(dataset_id)
+        if bucket is not None:
+            bucket.discard(sample_id)
+            if not bucket:
+                del self.samples_by_dataset[dataset_id]
+        label_bucket = self.samples_by_label.get((dataset_id, label))
+        if label_bucket is not None:
+            label_bucket.discard(sample_id)
+            if not label_bucket:
+                del self.samples_by_label[(dataset_id, label)]
+
+    def _index_relabel(self, sample_id: str, dataset_id: str, old_label: str, new_label: str) -> None:
+        if old_label == new_label:
+            return
+        old_bucket = self.samples_by_label.get((dataset_id, old_label))
+        if old_bucket is not None:
+            old_bucket.discard(sample_id)
+            if not old_bucket:
+                del self.samples_by_label[(dataset_id, old_label)]
+        self.samples_by_label.setdefault((dataset_id, new_label), set()).add(sample_id)
+
+    def _rebuild_indices(self) -> None:
+        self.samples_by_dataset = {}
+        self.samples_by_label = {}
+        for sample_id, s in self.samples.items():
+            self._index_add(sample_id, s["dataset_id"], s["label"])
 
     # ------------------------------------------------------------------
     # Persistence
@@ -79,12 +127,17 @@ class DataManager:
                 self.datasets = data.get("datasets", {})
                 self.samples = data.get("samples", {})
                 self.dataset_labels = data.get("dataset_labels", {})
+        # NEW: (re)build the in-memory indices from whatever we just loaded
+        # (or from an empty self.samples on a fresh install).
+        self._rebuild_indices()
 
     def _sync_labels(self, dataset_id: str):
+        # FIX: was `s["dataset_id"] == dataset_id` over ALL samples
+        # (O(total_samples)). Now walks only this dataset's sample ids via
+        # the index (O(samples_in_dataset)).
         existing = {
-            s["label"]
-            for s in self.samples.values()
-            if s["dataset_id"] == dataset_id
+            self.samples[sid]["label"]
+            for sid in self.samples_by_dataset.get(dataset_id, ())
         }
         registered = set(self.dataset_labels.get(dataset_id, []))
         merged = sorted(registered | existing)
@@ -196,6 +249,7 @@ class DataManager:
         }
         # Write binary first, then update metadata - avoids orphaned records
         self._write_sample_file(sample_id, data)
+        self._index_add(sample_id, dataset_id, label)
 
         self.datasets[dataset_id]["sample_count"] += 1
 
@@ -232,11 +286,12 @@ class DataManager:
 
             split = item.get("split", "unassigned")
             content = item["content"]
+            label = item["label"]
 
             self.samples[sample_id] = {
                 "id": sample_id,
                 "dataset_id": dataset_id,
-                "label": item["label"],
+                "label": label,
                 "task": task,
                 "filename": item["filename"],
                 "timestamp": time.time(),
@@ -247,8 +302,9 @@ class DataManager:
             }
             # Write the binary immediately - one file, one write, done.
             self._write_sample_file(sample_id, content)
+            self._index_add(sample_id, dataset_id, label)
             sample_ids.append(sample_id)
-            new_labels.add(item["label"])
+            new_labels.add(label)
 
         self.datasets[dataset_id]["sample_count"] += len(items)
 
@@ -266,13 +322,16 @@ class DataManager:
         if sample_id not in self.samples:
             return False
 
-        dataset_id = self.samples[sample_id]["dataset_id"]
+        sample = self.samples[sample_id]
+        dataset_id = sample["dataset_id"]
+        label = sample["label"]
         if dataset_id in self.datasets:
             self.datasets[dataset_id]["sample_count"] = max(
                 0, self.datasets[dataset_id]["sample_count"] - 1
             )
 
         del self.samples[sample_id]
+        self._index_remove(sample_id, dataset_id, label)
 
         file_path = os.path.join(self.storage_dir, f"{sample_id}.bin")
 
@@ -286,10 +345,15 @@ class DataManager:
         return True
 
     def get_samples(self, dataset_id: Optional[str] = None) -> List[dict]:
-        samples = list(self.samples.values())
+        # FIX: was a full scan + filter over every sample in the store
+        # (O(total_samples)) even when asking for one small dataset.
+        # Now an O(samples_in_dataset) index lookup.
         if dataset_id:
-            samples = [s for s in samples if s["dataset_id"] == dataset_id]
-        return samples
+            return [
+                self.samples[sid]
+                for sid in self.samples_by_dataset.get(dataset_id, ())
+            ]
+        return list(self.samples.values())
 
     def get_sample_data(self, sample_id: str) -> Optional[bytes]:
         """Read sample binary from disk on demand (no RAM cache)."""
@@ -300,18 +364,25 @@ class DataManager:
         return None
 
     def clear_dataset_samples(self, dataset_id: str) -> int:
-        sample_ids = [
-            s["id"] for s in self.samples.values() if s["dataset_id"] == dataset_id
-        ]
+        # FIX (perf): this used to call delete_sample() in a loop with its
+        # default save_metadata=True, so wiping a 1,000-sample dataset did
+        # 1,000 full rewrites of db.json. Now every delete in the loop skips
+        # the save, and we flush once at the end. Also now sourced from the
+        # index instead of a full scan of self.samples.
+        sample_ids = list(self.samples_by_dataset.get(dataset_id, ()))
         for s_id in sample_ids:
-            self.delete_sample(s_id)
+            self.delete_sample(s_id, save_metadata=False)
+        if sample_ids:
+            self._save_metadata()
         return len(sample_ids)
 
     def relabel_sample(self, sample_id: str, new_label: str) -> bool:
         if sample_id not in self.samples:
             return False
         dataset_id = self.samples[sample_id]["dataset_id"]
+        old_label = self.samples[sample_id]["label"]
         self.samples[sample_id]["label"] = new_label
+        self._index_relabel(sample_id, dataset_id, old_label, new_label)
         if dataset_id not in self.dataset_labels:
             self.dataset_labels[dataset_id] = []
         if new_label not in self.dataset_labels[dataset_id]:
@@ -332,7 +403,9 @@ class DataManager:
         self, dataset_id: str, train_pct: int, val_pct: int, test_pct: int
     ) -> int:
         """Randomly divide the dataset maintaining class distribution."""
-        samples = [s for s in self.samples.values() if s["dataset_id"] == dataset_id]
+        # FIX: was a full scan over every sample in the store to find this
+        # dataset's samples; now an index lookup.
+        samples = [self.samples[sid] for sid in self.samples_by_dataset.get(dataset_id, ())]
         by_label: Dict[str, list] = {}
         for s in samples:
             by_label.setdefault(s["label"], []).append(s)
@@ -362,10 +435,15 @@ class DataManager:
         screen warning badge and to gate training on a precomputed split)."""
         if dataset_id not in self.datasets:
             raise ValueError("Dataset not found")
+        # FIX (bug + perf): this used to iterate ALL samples across every
+        # dataset and filter by dataset_id inline - O(total_samples) for a
+        # single-dataset answer. On an install with many datasets this was
+        # by far the worst offender, since it's called on every dataset
+        # screen load. Now O(samples_in_dataset) via the index.
         summary = {"train": 0, "val": 0, "test": 0, "unassigned": 0}
-        for s in self.samples.values():
-            if s["dataset_id"] == dataset_id:
-                summary[s.get("split", "unassigned")] += 1
+        for sid in self.samples_by_dataset.get(dataset_id, ()):
+            s = self.samples[sid]
+            summary[s.get("split", "unassigned")] += 1
         return summary
 
     def is_split_ready(self, dataset_id: str) -> bool:
@@ -397,32 +475,38 @@ class DataManager:
         return label
 
     def rename_label(self, dataset_id: str, old_label: str, new_label: str) -> int:
-        count = 0
-        for s in self.samples.values():
-            if s["dataset_id"] == dataset_id and s["label"] == old_label:
-                s["label"] = new_label
-                count += 1
+        # FIX: was a full scan over every sample in the store; now uses the
+        # (dataset_id, label) index to touch only the matching samples.
+        ids = list(self.samples_by_label.get((dataset_id, old_label), ()))
+        for sid in ids:
+            self.samples[sid]["label"] = new_label
+        if ids:
+            self.samples_by_label.pop((dataset_id, old_label), None)
+            self.samples_by_label.setdefault((dataset_id, new_label), set()).update(ids)
+
         if dataset_id in self.dataset_labels:
             labels = set(self.dataset_labels[dataset_id])
             labels.discard(old_label)
             labels.add(new_label)
             self.dataset_labels[dataset_id] = sorted(labels)
-        if count:
+        if ids:
             self._save_metadata()
-        return count
+        return len(ids)
 
     def delete_label(self, dataset_id: str, label: str) -> int:
-        ids = [
-            s["id"]
-            for s in self.samples.values()
-            if s["dataset_id"] == dataset_id and s["label"] == label
-        ]
+        # FIX (perf + the same "N deletes, N saves" issue as
+        # clear_dataset_samples): was scanning all samples to find matches,
+        # then calling delete_sample() in a loop with its default
+        # save_metadata=True. Now sourced from the (dataset_id, label)
+        # index and saved once.
+        ids = list(self.samples_by_label.get((dataset_id, label), ()))
         for sid in ids:
-            self.delete_sample(sid)
+            self.delete_sample(sid, save_metadata=False)
         if dataset_id in self.dataset_labels:
             self.dataset_labels[dataset_id] = [
                 lbl for lbl in self.dataset_labels[dataset_id] if lbl != label
             ]
+        if ids or dataset_id in self.dataset_labels:
             self._save_metadata()
         return len(ids)
 
@@ -431,6 +515,11 @@ class DataManager:
     # ------------------------------------------------------------------
 
     def get_statistics(self) -> dict:
+        # Genuinely global aggregates (across every dataset), so there's no
+        # index shortcut here - this one has to touch every sample. Left
+        # as a plain scan; if this ever gets called on a hot path, the next
+        # step would be incremental counters updated in add/delete/relabel
+        # rather than recomputing from scratch each call.
         by_task: Dict[str, int] = {}
         by_label: Dict[str, int] = {}
         for sample in self.samples.values():
@@ -460,7 +549,9 @@ class DataManager:
         if dataset_id not in self.datasets:
             raise ValueError("Dataset not found")
 
-        samples = [s for s in self.samples.values() if s["dataset_id"] == dataset_id]
+        # FIX: was a full scan over every sample in the store; now uses the
+        # dataset index.
+        samples = [self.samples[sid] for sid in self.samples_by_dataset.get(dataset_id, ())]
         widths = [s["width"] for s in samples if s.get("width")]
         heights = [s["height"] for s in samples if s.get("height")]
         sizes = [s["size_bytes"] for s in samples if s.get("size_bytes")]
@@ -530,15 +621,20 @@ class DataManager:
         count = 0
         new_labels = set()
 
-        for s in self.samples.values():
-            if s["dataset_id"] == dataset_id:
-                match = compiled_regex.search(s["filename"])
-                if match:
-                    new_label = match.group(1) if match.groups() else match.group(0)
-                    if new_label != s["label"]:
-                        s["label"] = new_label
-                        new_labels.add(new_label)
-                        count += 1
+        # FIX: was iterating every sample in the store and filtering by
+        # dataset_id inline; now restricted to this dataset's samples via
+        # the index, and the label index is kept in sync per-match.
+        for sid in list(self.samples_by_dataset.get(dataset_id, ())):
+            s = self.samples[sid]
+            match = compiled_regex.search(s["filename"])
+            if match:
+                new_label = match.group(1) if match.groups() else match.group(0)
+                if new_label != s["label"]:
+                    old_label = s["label"]
+                    s["label"] = new_label
+                    self._index_relabel(sid, dataset_id, old_label, new_label)
+                    new_labels.add(new_label)
+                    count += 1
 
         if count > 0:
             if dataset_id not in self.dataset_labels:
@@ -548,7 +644,7 @@ class DataManager:
             self._save_metadata()
 
         return count
-    
+
     def update_sample_data(
         self,
         sample_id: str,

@@ -12,13 +12,18 @@ Recommended free models (pull one before enabling):
 """
 
 import json
+import os
 import urllib.request
 import urllib.error
 from typing import Optional, Dict, List
 
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "phi3"
-
+# BUGFIX: these used to be hardcoded, so a backend .env with
+# OLLAMA_HOST=http://some-other-host:11434 or OLLAMA_MODEL=mistral was
+# silently ignored by this module (llm_advisor.py's own _call_ollama had
+# the same bug, fixed separately there). Now both fall back to the same
+# localhost:11434 / "phi3" defaults when unset, matching llm_advisor.py.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "phi3")
 
 class LocalLLMAdvisor:
     """Interface with a local Ollama LLM for intelligent ML suggestions."""

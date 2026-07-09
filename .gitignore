@@ -28,3 +28,4 @@ backend.*
 frontend.*
 
 backend/data_storage/
+.aider*

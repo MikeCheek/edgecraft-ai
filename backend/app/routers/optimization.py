@@ -6,7 +6,7 @@ import io
 
 from app.services.shared_state import trainer
 from app.services.mcu_advisor import MCUAdvisor
-from app.services.llm_advisor import LLMAdvisor
+from app.services.llm_advisor import LLMAdvisor, get_provider_config
 from app.services.local_llm_advisor import LocalLLMAdvisor
 from app.services.optimizer import (
     create_optimization_session,
@@ -269,6 +269,22 @@ async def get_llm_status():
     """Check whether a local Ollama LLM is available."""
     try:
         return {"status": "success", "llm": local_llm.get_status()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.get("/llm-config")
+async def get_llm_provider_config():
+    """
+    .env-driven view of which LLM providers (OpenRouter / local Ollama) are
+    actually usable, so the frontend can pick a sensible default instead of
+    always hardcoding 'openrouter':
+      - only OPENROUTER_API_KEY set        -> openrouter only
+      - only OLLAMA_ENABLED=true set       -> ollama only
+      - both set                           -> frontend lets the user choose
+        (and remembers the choice, see AppContext's llmProvider)
+    """
+    try:
+        return {"status": "success", "config": get_provider_config()}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

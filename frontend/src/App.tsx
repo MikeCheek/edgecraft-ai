@@ -19,7 +19,9 @@ import {
   Check,
   CpuIcon,
   GitBranch,
-  HardDrive
+  HardDrive,
+  Server,
+  Cloud
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 import { useLocalStorage } from './hooks/useLocalStorage';
@@ -84,7 +86,40 @@ export default function App() {
     }
   };
 
-  useEffect(() => { if (isHealthy) fetchStatsAndModels(); }, [isHealthy]); // eslint-disable-line react-hooks/exhaustive-deps
+  /**
+   * Reads which LLM providers the backend .env actually makes available
+   * (OPENROUTER_API_KEY / OLLAMA_ENABLED+OLLAMA_MODEL+OLLAMA_HOST) and:
+   *  - stores it in context so any component can render provider-aware UI
+   *  - auto-corrects the persisted provider choice if it points at a
+   *    provider that's no longer available (e.g. user previously picked
+   *    Ollama, then the backend was restarted without OLLAMA_ENABLED)
+   *  - auto-selects the only available provider when just one is present,
+   *    so the user isn't asked to choose between one real option and one
+   *    that will just error out
+   */
+  const fetchLLMConfig = async () => {
+    const rawConfig = await request(() => apiClient.getLLMConfig());
+    if (!rawConfig) return;
+    const config = rawConfig.config || rawConfig;
+    dispatch({ type: 'SET_LLM_CONFIG', payload: config });
+
+    const { openrouter_available, ollama_available } = config;
+    if (ollama_available && !openrouter_available && state.llmProvider !== 'ollama') {
+      dispatch({ type: 'SET_LLM_PROVIDER', payload: 'ollama' });
+    } else if (openrouter_available && !ollama_available && state.llmProvider !== 'openrouter') {
+      dispatch({ type: 'SET_LLM_PROVIDER', payload: 'openrouter' });
+    }
+    // When both (or neither) are available, the user's persisted choice
+    // (default 'openrouter') is left as-is - see the Global Config panel's
+    // "AI Studio Assistant" section for the manual picker.
+  };
+
+  useEffect(() => {
+    if (isHealthy) {
+      fetchStatsAndModels();
+      fetchLLMConfig();
+    }
+  }, [isHealthy]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTaskChange = (task: TinyMLTask) => {
     setSelectedTask(task);
@@ -266,31 +301,72 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Lightbulb className="w-4 h-4 text-yellow-400" />
-                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Studio Assistant (OpenRouter)</h4>
+                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Studio Assistant</h4>
                   </div>
-                  <div className="grid grid-cols-1 gap-1.5">
-                    {openRouterModels.map((model) => {
-                      const isSelected = state.llmModel === model.id;
-                      return (
-                        <button
-                          key={model.id}
-                          onClick={() => dispatch({ type: 'SET_LLM_MODEL', payload: model.id })}
-                          className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between group ${isSelected
-                            ? 'bg-yellow-600/10 border-yellow-500/40 text-yellow-300'
-                            : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
-                            }`}
-                        >
-                          <div className="flex flex-col gap-0.5">
-                            <span className={`font-semibold ${isSelected ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
-                              {model.label}
-                            </span>
-                            <span className="text-[10px] text-slate-500 group-hover:text-slate-400 font-mono">{model.specs}</span>
-                          </div>
-                          {isSelected && <Check className="w-4 h-4 text-yellow-400 shrink-0 ml-2" />}
-                        </button>
-                      );
-                    })}
-                  </div>
+
+                  {/* Provider toggle - only shown when the backend .env actually
+                      makes both OpenRouter (OPENROUTER_API_KEY) and local Ollama
+                      (OLLAMA_ENABLED=true) available. Otherwise the single
+                      available provider is auto-selected (see fetchLLMConfig)
+                      and shown here as a read-only badge. */}
+                  {state.llmConfig && state.llmConfig.openrouter_available && state.llmConfig.ollama_available ? (
+                    <div className="grid grid-cols-2 gap-1.5 mb-2">
+                      <button
+                        onClick={() => dispatch({ type: 'SET_LLM_PROVIDER', payload: 'openrouter' })}
+                        className={`flex items-center justify-center gap-1.5 p-2 rounded-xl border text-xs font-semibold transition-all ${state.llmProvider === 'openrouter'
+                          ? 'bg-yellow-600/10 border-yellow-500/40 text-yellow-300'
+                          : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                          }`}
+                      >
+                        <Cloud className="w-3.5 h-3.5" /> OpenRouter
+                      </button>
+                      <button
+                        onClick={() => dispatch({ type: 'SET_LLM_PROVIDER', payload: 'ollama' })}
+                        className={`flex items-center justify-center gap-1.5 p-2 rounded-xl border text-xs font-semibold transition-all ${state.llmProvider === 'ollama'
+                          ? 'bg-yellow-600/10 border-yellow-500/40 text-yellow-300'
+                          : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                          }`}
+                      >
+                        <Server className="w-3.5 h-3.5" /> Ollama (local)
+                      </button>
+                    </div>
+                  ) : state.llmConfig ? (
+                    <div className="mb-2 px-2.5 py-1.5 rounded-xl border border-slate-800 bg-slate-950/40 text-[10px] text-slate-500 flex items-center gap-1.5">
+                      {state.llmProvider === 'ollama' ? <Server className="w-3 h-3" /> : <Cloud className="w-3 h-3" />}
+                      Using {state.llmProvider === 'ollama' ? 'local Ollama' : 'OpenRouter'} (only provider configured in backend .env)
+                    </div>
+                  ) : null}
+
+                  {state.llmProvider === 'ollama' ? (
+                    <div className="p-2.5 rounded-xl border border-slate-800 bg-slate-950/40 text-xs text-slate-400">
+                      Model: <span className="text-yellow-300 font-mono">{state.llmConfig?.ollama_model || 'phi3'}</span>
+                      <div className="text-[10px] text-slate-500 mt-0.5">Set via OLLAMA_MODEL in the backend .env.</div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-1.5">
+                      {openRouterModels.map((model) => {
+                        const isSelected = state.llmModel === model.id;
+                        return (
+                          <button
+                            key={model.id}
+                            onClick={() => dispatch({ type: 'SET_LLM_MODEL', payload: model.id })}
+                            className={`w-full text-left p-2.5 rounded-xl border text-xs transition-all flex items-center justify-between group ${isSelected
+                              ? 'bg-yellow-600/10 border-yellow-500/40 text-yellow-300'
+                              : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400 hover:text-slate-200'
+                              }`}
+                          >
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`font-semibold ${isSelected ? 'text-white' : 'text-slate-300 group-hover:text-white'}`}>
+                                {model.label}
+                              </span>
+                              <span className="text-[10px] text-slate-500 group-hover:text-slate-400 font-mono">{model.specs}</span>
+                            </div>
+                            {isSelected && <Check className="w-4 h-4 text-yellow-400 shrink-0 ml-2" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* Dropdown Micro Footer info */}

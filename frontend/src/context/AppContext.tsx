@@ -11,6 +11,8 @@ import {
   ModelMetadata,
   TinyMLTask,
   TargetBoard,
+  LLMProvider,
+  LLMProviderConfig,
 } from '../types';
 
 // --- Storage Keys ---
@@ -18,6 +20,10 @@ const STORAGE_KEYS = {
   TASK: 'ec_task',
   BOARD: 'ec_board',
   LLM_MODEL: 'ec_llm',
+  // Which LLM provider (OpenRouter vs local Ollama) the user picked, only
+  // meaningful/shown when the backend .env has both available - see
+  // llmConfig below, populated from GET /api/optimization/llm-config.
+  LLM_PROVIDER: 'ec_llm_provider',
 } as const;
 
 // --- localStorage Helpers ---
@@ -43,7 +49,7 @@ function save(key: string, value: unknown): void {
   try {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    /* quota exceeded — fail silently */
+    /* quota exceeded ù fail silently */
   }
 }
 
@@ -76,6 +82,17 @@ interface AppState {
 
   /** OpenRouter / LLM model identifier string */
   llmModel: string;
+
+  /** Which LLM provider to use for AI-assisted suggestions. Persisted so
+   *  the user's choice (when both are available) is remembered across
+   *  sessions. */
+  llmProvider: LLMProvider;
+
+  /** Server-side .env-driven provider availability, fetched once at
+   *  startup from GET /api/optimization/llm-config. Not persisted - always
+   *  reflects the backend's current .env. Undefined until the first
+   *  successful fetch. */
+  llmConfig?: LLMProviderConfig;
 }
 
 // --- Action Union ---
@@ -90,6 +107,8 @@ type Action =
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload?: string }
   | { type: 'SET_LLM_MODEL'; payload: string }
+  | { type: 'SET_LLM_PROVIDER'; payload: LLMProvider }
+  | { type: 'SET_LLM_CONFIG'; payload: LLMProviderConfig }
   | { type: 'RESET' };
 
 // --- Initial State ---
@@ -100,6 +119,7 @@ const BASE_INITIAL_STATE: AppState = {
   datasetStats: { total_samples: 0, by_task: {}, by_label: {} },
   isLoading: false,
   llmModel: 'openrouter/free',
+  llmProvider: 'openrouter',
 };
 
 /**
@@ -112,13 +132,14 @@ function getInitialState(): AppState {
     currentTask: load<TinyMLTask | undefined>(STORAGE_KEYS.TASK, undefined),
     currentBoard: load<TargetBoard | undefined>(STORAGE_KEYS.BOARD, undefined),
     llmModel: load<string>(STORAGE_KEYS.LLM_MODEL, BASE_INITIAL_STATE.llmModel),
+    llmProvider: load<LLMProvider>(STORAGE_KEYS.LLM_PROVIDER, BASE_INITIAL_STATE.llmProvider),
   };
 }
 
 // --- Reducer ---
 
 /**
- * Pure state reducer — no side-effects.
+ * Pure state reducer ù no side-effects.
  * All localStorage writes happen in the wrapped dispatch below.
  */
 function appReducer(state: AppState, action: Action): AppState {
@@ -150,8 +171,14 @@ function appReducer(state: AppState, action: Action): AppState {
     case 'SET_LLM_MODEL':
       return { ...state, llmModel: action.payload };
 
+    case 'SET_LLM_PROVIDER':
+      return { ...state, llmProvider: action.payload };
+
+    case 'SET_LLM_CONFIG':
+      return { ...state, llmConfig: action.payload };
+
     case 'RESET':
-      // Re-hydrate from (now-cleared) localStorage — dispatch wrapper
+      // Re-hydrate from (now-cleared) localStorage ù dispatch wrapper
       // removes the keys before baseDispatch reaches here.
       return getInitialState();
 
@@ -182,10 +209,11 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
  * access to global app state and a stable dispatch function.
  *
  * localStorage persistence is handled transparently:
- *  - SET_TASK      ? persists currentTask
- *  - SET_BOARD     ? persists currentBoard
- *  - SET_LLM_MODEL ? persists llmModel
- *  - RESET         ? clears all persisted keys then re-hydrates
+ *  - SET_TASK         ? persists currentTask
+ *  - SET_BOARD        ? persists currentBoard
+ *  - SET_LLM_MODEL    ? persists llmModel
+ *  - SET_LLM_PROVIDER ? persists llmProvider (openrouter vs ollama)
+ *  - RESET            ? clears all persisted keys then re-hydrates
  */
 export function AppProvider({ children }: { children: ReactNode }) {
   // Pass getInitialState as the lazy initialiser (3rd arg) so it only
@@ -213,12 +241,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         save(STORAGE_KEYS.LLM_MODEL, action.payload);
         break;
 
+      case 'SET_LLM_PROVIDER':
+        save(STORAGE_KEYS.LLM_PROVIDER, action.payload);
+        break;
+
+      // SET_LLM_CONFIG carries no persistent data - it's a runtime-only
+      // snapshot of the backend's .env, refetched every startup.
+
       case 'RESET':
         // Clear all persisted keys so getInitialState() returns clean defaults.
         Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
         break;
 
-      // All other actions carry no persistent data — pass through directly.
+      // All other actions carry no persistent data ù pass through directly.
       default:
         break;
     }

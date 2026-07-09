@@ -293,13 +293,22 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     setSuggestionError(null);
     setSuggestionReasoning(null);
     try {
+      // Provider (and, for Ollama, its model) come from AppContext - set
+      // automatically when the backend .env only exposes one provider, or
+      // picked by the user in the Global Config panel when both OpenRouter
+      // and Ollama are available (see App.tsx's "AI Studio Assistant"
+      // section). Previously this was hardcoded to 'openrouter' with
+      // state.llmModel, so selecting Ollama here had no effect at all.
+      const modelName = state.llmProvider === 'ollama'
+        ? (state.llmConfig?.ollama_model || 'phi3')
+        : state.llmModel;
       const result = await request(() =>
         apiClient.getTrainingRecommendation({
           task,
           dataset_id: datasetId,
           target_board: state.currentBoard ?? 'ESP32_S3_N16R8',
-          provider: 'openrouter',
-          model_name: state.llmModel,
+          provider: state.llmProvider,
+          model_name: modelName,
         })
       );
       const rec = result?.recommendation;
@@ -453,7 +462,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   {isSuggesting ? (
                     <><RefreshCw className="w-4 h-4 animate-spin" /> Analyzing dataset &amp; hardware target...</>
                   ) : (
-                    <>✨ Suggest Optimal Config for {state.currentBoard?.replace(/_/g, ' ') ?? 'ESP32-S3'}</>
+                    <>✨ Suggest Optimal Config for {state.currentBoard?.replace(/_/g, ' ') ?? 'ESP32-S3'} via {state.llmProvider === 'ollama' ? 'Ollama' : 'OpenRouter'}</>
                   )}
                 </button>
                 {suggestionError && (

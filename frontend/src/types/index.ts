@@ -22,6 +22,21 @@ export type QuantizationMethod =
 
 export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
 
+// Which LLM backend to use for AI-assisted suggestions. Mirrors the
+// `provider` field accepted by /api/optimization/llm-suggest and
+// /api/training/recommend.
+export type LLMProvider = 'openrouter' | 'ollama'
+
+// Server-side, .env-driven view of which providers are actually usable
+// (see GET /api/optimization/llm-config). Drives whether the frontend
+// auto-selects a provider or lets the user choose between them.
+export interface LLMProviderConfig {
+  openrouter_available: boolean
+  ollama_available: boolean
+  ollama_model: string
+  ollama_host: string
+}
+
 // NEW: dataset-wide image size / aspect-ratio / storage stats, computed by
 // the backend from per-sample width/height/size_bytes captured at ingest.
 export interface DatasetImageStats {
