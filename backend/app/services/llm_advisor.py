@@ -228,20 +228,14 @@ class LLMAdvisor:
                 raise RuntimeError("OpenRouter request timed out after 45s") from e
 
     async def _call_ollama(self, messages, model_name):
-        # BUGFIX: previously hardcoded to localhost, ignoring OLLAMA_HOST.
-        # Also, callers may still be passing an OpenRouter-style model id
-        # (e.g. "google/gemini-2.0-flash-lite-preview-02-05:free") left
-        # over from switching providers without changing the model field -
-        # that's never a valid local Ollama tag, so fall back to the
-        # configured OLLAMA_MODEL (or "phi3") whenever the incoming
-        # model_name is empty or clearly an OpenRouter id.
+        # BUGFIX: Switched to /api/chat endpoint for structured message handling.
         if not model_name or "/" in model_name:
             model_name = _ollama_default_model()
 
-        url = f"{_ollama_host()}/api/generate"
+        url = f"{_ollama_host()}/api/chat" # Changed from /api/generate to /api/chat
         payload = {
             "model": model_name,
-            "prompt": messages[-1]["content"] if messages else "",
+            "messages": messages, # Pass the full message list
             "stream": False,
             "format": "json"
         }
@@ -253,7 +247,8 @@ class LLMAdvisor:
                         raise RuntimeError(f"Ollama returned HTTP {response.status}: {body_text[:500]}")
 
                     data = json.loads(body_text)
-                    response_text = data.get("response", "")
+                    # The chat endpoint returns the content directly in data['message']['content']
+                    response_text = data.get("message", {}).get("content", "")
                     try:
                         parsed = json.loads(response_text)
                     except json.JSONDecodeError as je:
