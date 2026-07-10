@@ -94,4 +94,6 @@ class LocalLLMAdvisor:
             return None
 
     def _parse_json_response(self, text: Optional[str]):
-        """Try to extract JSON from a model response (strips markdown fences).
+        """Try to extract JSON from a model response (strips markdown fences)."""
+        # Implementation placeholder for parsing logic
+        pass
