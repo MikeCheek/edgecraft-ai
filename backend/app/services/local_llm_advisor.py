@@ -90,7 +90,17 @@ class LocalLLMAdvisor:
                 data = json.loads(resp.read())
                 # The chat endpoint returns the content in data['message']['content']
                 return data.get("message", {}).get("content", "").strip()
-        except Exception:
+        except urllib.error.HTTPError as e:
+            # Handles 4xx or 5xx errors (e.g., 405 Method Not Allowed)
+            print(f"Ollama API Error ({e.code}): {e.reason}. Check if /api/chat is the correct endpoint for your Ollama version.")
+            return None
+        except urllib.error.URLError as e:
+            # Handles connection failures (e.g., ClientConnectorError)
+            print(f"Connection Error: Could not reach Ollama at {OLLAMA_BASE_URL} ({type(e).__name__}: {e}). Is Ollama running? (ollama serve)")
+            return None
+        except Exception as e:
+            # Catch all other unexpected errors
+            print(f"An unexpected error occurred while calling Ollama: {e}")
             return None
 
     def _parse_json_response(self, text: Optional[str]):
