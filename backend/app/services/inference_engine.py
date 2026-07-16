@@ -13,6 +13,7 @@ import json
 import logging
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -97,6 +98,9 @@ def _preprocess_audio(audio_bytes: bytes, task: str, target_shape: Tuple[int, ..
     mfcc = librosa.feature.mfcc(y=audio, sr=16000, n_mfcc=params["n_mfcc"],
                                  n_fft=params["n_fft"], hop_length=params["hop_length"])
 
+    # Z-score normalization to match training preprocessing (DataProcessor)
+    mfcc = (mfcc - np.mean(mfcc)) / (np.std(mfcc) + 1e-9)
+
     # Pad or truncate time axis to match model's expected time_frames
     # Use the actual model input shape when available
     expected_time = target_shape[1] if len(target_shape) >= 2 else time_frames
@@ -140,10 +144,27 @@ def get_inference_history(limit: int = 100) -> List[Dict[str, Any]]:
     return list(reversed(log[-limit:]))
 
 # ---------------------------------------------------------------------------
-# Model cache
+# Model cache (LRU with max 5 entries to prevent unbounded memory growth)
 # ---------------------------------------------------------------------------
 
-_model_cache: Dict[str, Any] = {}   # cache_key ? interpreter OR keras model
+_MAX_CACHED_MODELS = 5
+
+class _LRUModelCache(OrderedDict):
+    """Simple LRU cache for loaded models. Evicts least-recently-used
+    entries when the cache exceeds _MAX_CACHED_MODELS."""
+    def __init__(self):
+        super().__init__()
+        self.maxsize = _MAX_CACHED_MODELS
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        if len(self) > self.maxsize:
+            evicted_key, _ = self.popitem(last=False)
+            logger.info(f"Evicted cached model: {evicted_key}")
+
+_model_cache = _LRUModelCache()
 
 def _get_or_load_tflite(path: str):
     if path not in _model_cache:

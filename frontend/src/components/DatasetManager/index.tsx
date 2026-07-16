@@ -3,7 +3,9 @@ import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
   Eye, Tags, Download, Upload, AlertTriangle, Shuffle
 } from 'lucide-react';
-import { useAPI } from '../../hooks/useAPI';
+import { CardSkeleton } from '../Skeleton';
+import { useAPI, API_BASE } from '../../hooks/useAPI';
+import { useToast } from '../../context/ToastContext';
 import { TinyMLTask, DatasetInfo } from '../../types';
 import ClassManager from './ClassManager';
 import DataImporter from './DataImporter';
@@ -24,7 +26,7 @@ interface SplitSummary {
 
 export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) {
   const { request, apiClient, error } = useAPI();
-  const apiBase = 'http://localhost:8000/api';
+  const { toast } = useToast();
 
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -113,15 +115,17 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const handleExportFull = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`full-${dataset.id}`);
-    try { window.location.href = `${apiBase}/datasets/export/full/${dataset.id}`; }
-    catch { } finally { setExportingId(null); }
+    try { window.location.href = `${API_BASE}/datasets/export/full/${dataset.id}`; }
+    catch { toast('error', 'Export failed'); }
+    finally { setExportingId(null); }
   };
 
   const handleExportSplit = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`split-${dataset.id}`);
-    try { window.location.href = `${apiBase}/datasets/export/split/${dataset.id}`; }
-    catch { } finally { setExportingId(null); }
+    try { window.location.href = `${API_BASE}/datasets/export/split/${dataset.id}`; }
+    catch { toast('error', 'Export failed'); }
+    finally { setExportingId(null); }
   };
 
   /**
@@ -144,7 +148,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   return (
     <div className="space-y-6">
       {exploringDataset && (
-        <DatasetExplorer dataset={exploringDataset} apiBase={apiBase}
+        <DatasetExplorer dataset={exploringDataset} apiBase={API_BASE}
           onClose={() => setExploringDataset(null)}
           onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
       )}
@@ -165,9 +169,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
 
       {/* Dataset List */}
       {isLoading ? (
-        <div className="text-center py-8 text-gray-400 flex items-center justify-center gap-2">
-          <RefreshCw className="w-4 h-4 animate-spin" /> Loading datasets...
-        </div>
+        <CardSkeleton count={3} />
       ) : datasets.length === 0 ? (
         <div className="text-center py-12 opacity-50">
           <Database className="w-12 h-12 text-gray-500 mx-auto mb-3" />

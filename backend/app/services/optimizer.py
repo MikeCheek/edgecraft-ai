@@ -142,6 +142,67 @@ def list_optimization_sessions() -> List[Dict[str, Any]]:
 
 # --- Locate the trained model file --------------------------------------------
 
+def _load_calibration_samples(training_id: str, input_shape, max_samples: int = 200):
+    """Load real training data samples for INT8 calibration.
+    Returns a list of numpy arrays ready for the representative dataset generator.
+    Falls back to random data if the dataset cannot be loaded."""
+    try:
+        from app.services.shared_state import trainer, data_manager
+        import random as _random
+
+        session = trainer.training_sessions.get(training_id, {})
+        dataset_id = session.get("dataset_id")
+        task = session.get("task", "IMAGE_CLASSIFICATION")
+
+        if not dataset_id:
+            return _random_calibration(input_shape, max_samples)
+
+        train_samples = [
+            s for s in data_manager.get_samples(dataset_id)
+            if s.get("split") == "train"
+        ]
+
+        if not train_samples:
+            return _random_calibration(input_shape, max_samples)
+
+        _random.shuffle(train_samples)
+        samples_to_use = train_samples[:max_samples]
+
+        is_audio = task in ("KEYWORD_SPOTTING", "AUDIO_CLASSIFICATION")
+        result = []
+
+        for s in samples_to_use:
+            raw = data_manager.get_sample_data(s["id"])
+            if raw is None:
+                continue
+            try:
+                if is_audio:
+                    from app.utils.data_processor import DataProcessor
+                    processor = DataProcessor(task=task, input_shape=input_shape)
+                    processed = processor.preprocess_audio(raw)
+                else:
+                    from app.utils.data_processor import DataProcessor
+                    processor = DataProcessor(task=task, input_shape=input_shape)
+                    processed = processor.preprocess_image(raw)
+                result.append(processed)
+            except Exception:
+                continue
+
+        if not result:
+            return _random_calibration(input_shape, max_samples)
+
+        logger.info(f"Loaded {len(result)} real calibration samples for INT8 quantization")
+        return result
+    except Exception as e:
+        logger.warning(f"Could not load real calibration data, using random: {e}")
+        return _random_calibration(input_shape, max_samples)
+
+
+def _random_calibration(input_shape, count: int = 200):
+    """Fallback: generate random calibration data."""
+    return [np.random.rand(1, *input_shape[1:]).astype(np.float32) for _ in range(count)]
+
+
 def _resolve_trained_model_path(training_id: str) -> Path:
     """
     Trainer.train() saves models as `<storage_dir>/<training_id>.keras`
@@ -228,7 +289,7 @@ def optimize(optimization_id: str, model_base_dir: str) -> None:
         elif method == "float16":
             tflite_data, metrics = _float16_quantization(model)
         elif method == "int8":
-            tflite_data, metrics = _int8_quantization(model)
+            tflite_data, metrics = _int8_quantization(model, training_id=training_id)
         elif method == "pruning":
             tflite_data, metrics = _magnitude_pruning(
                 model, sparsity=session["sparsity_level"]
@@ -324,18 +385,19 @@ def _float16_quantization(model: tf.keras.Model):
         "note": "Weights FLOAT16",
     }
 
-def _int8_quantization(model: tf.keras.Model):
+def _int8_quantization(model: tf.keras.Model, training_id: str = None):
     """
     Full INT8 post-training quantization with a representative dataset.
     Weights AND activations are INT8 - smallest model, fastest on MCUs.
+
+    Uses real training data samples when available for calibration,
+    falling back to random data only if the dataset cannot be loaded.
     """
     input_shape = model.input_shape
 
     def representative_data_gen():
-        for _ in range(200):
-            sample = np.random.rand(
-                1, *input_shape[1:]
-            ).astype(np.float32)
+        samples = _load_calibration_samples(training_id, input_shape)
+        for sample in samples:
             yield [sample]
 
     converter = tf.lite.TFLiteConverter.from_keras_model(model)

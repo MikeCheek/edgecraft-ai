@@ -1,9 +1,8 @@
 import axios from 'axios'
-
-const API_BASE = 'http://127.0.0.1:8000/api/remote_datasets'
+import { API_BASE } from '../hooks/useAPI'
 
 const client = axios.create({
-  baseURL: API_BASE,
+  baseURL: `${API_BASE}/remote_datasets`,
   timeout: 600000 // 10 minutes for large downloads
 })
 

@@ -89,12 +89,14 @@ def _process_zip_to_dataset(zip_path: str, dataset_id: str, task: str, download_
                 file_data_list.append((dataset_id, label, task, content, filename))
 
             if len(file_data_list) >= ZIP_PROCESSING_BATCH_SIZE:
-                data_manager.bulk_add_samples(file_data_list)
+                items = [{"label": t[1], "content": t[3], "filename": t[4], "split": "unassigned"} for t in file_data_list]
+                data_manager.bulk_add_samples(dataset_id, task, items)
                 total_processed += len(file_data_list)
                 file_data_list.clear()
 
         if file_data_list:
-            data_manager.bulk_add_samples(file_data_list)
+            items = [{"label": t[1], "content": t[3], "filename": t[4], "split": "unassigned"} for t in file_data_list]
+            data_manager.bulk_add_samples(dataset_id, task, items)
             total_processed += len(file_data_list)
 
     return total_processed
@@ -161,6 +163,7 @@ async def download_stream(
                 download_path = result.get("path")
                 yield _sse_event({"type": "processing", "message": "Extracting archive..."})
                 yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id")})
+                yield _sse_event({"type": "complete", "count": 0})
 
             # ------------------------------------------------------------------
             # Kaggle — queue bridge
@@ -256,17 +259,7 @@ async def download_stream(
 
 # --- Internal Download Implementations ---
 
-## Active downloads tracking (for cancellation)
-_active_downloads: dict[str, dict] = {}
 _SENTINEL = object()  # signals that a download thread is finished
-
-async def _run_in_executor(fn, *args):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_EXECUTOR, fn, *args)
-
-def _sse_event(data: dict) -> str:
-    """Format a dict as an SSE data line."""
-    return f"data: {json.dumps(data)}\n\n"
 
 # ---------------------------------------------------------------------------
 # URL: async generator — yields (downloaded, total) per chunk

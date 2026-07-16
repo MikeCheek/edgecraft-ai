@@ -33,9 +33,6 @@ class TrainingRequest(BaseModel):
     early_stopping: bool = False
     early_stopping_patience: int = 5
     early_stopping_monitor: str = "val_loss"
-
-    dropout_rate: float = 0.0
-    l2_reg: float = 0.0
     trainable_layers: int = 0  # 0 = unfreeze all, >0 = unfreeze last N layers
     freeze_encoder_epochs: int = 0
     augmentation: dict = {}
@@ -73,6 +70,9 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
             early_stopping_monitor=request.early_stopping_monitor,
             dropout_rate=request.dropout_rate,
             l2_reg=request.l2_reg,
+            trainable_layers=request.trainable_layers,
+            freeze_encoder_epochs=request.freeze_encoder_epochs,
+            augmentation=request.augmentation,
             device=request.device,
         )
         background_tasks.add_task(trainer.train, training_id)

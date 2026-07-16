@@ -21,7 +21,8 @@ import {
   GitBranch,
   HardDrive,
   Server,
-  Cloud
+  Cloud,
+  AlertTriangle
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 import { useLocalStorage } from './hooks/useLocalStorage';
@@ -159,12 +160,13 @@ export default function App() {
           </div>
           <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">EdgeCraft AI</h1>
         </div>
-        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
+        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto" role="navigation" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.path}
               to={item.path}
               end={item.end}
+              aria-label={item.label}
               className={({ isActive }) => `w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 font-medium ${isActive ? 'bg-purple-600/20 text-purple-400 border border-purple-500/30' : 'text-gray-400 hover:bg-slate-800/50 hover:text-gray-200'}`}
             >
               {({ isActive }) => (
@@ -211,6 +213,9 @@ export default function App() {
           <div className="relative" ref={dropdownRef}>
             <button
               onClick={() => setIsConfigOpen(!isConfigOpen)}
+              aria-expanded={isConfigOpen}
+              aria-haspopup="true"
+              aria-label="Global configuration settings"
               className={`flex items-center gap-3 bg-slate-900 border px-4 py-1.5 rounded-xl text-sm transition-all duration-200 shadow-md ${isConfigOpen
                 ? 'border-purple-500 ring-2 ring-purple-500/10 text-white'
                 : 'border-slate-700 hover:border-slate-600 text-gray-300 hover:text-white'
@@ -447,6 +452,21 @@ export default function App() {
                 <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
                   <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
                   <DeploymentPanel board={selectedBoard} />
+                </div>
+              } />
+
+              {/* 404 Catch-All */}
+              <Route path="*" element={
+                <div className="flex flex-col items-center justify-center py-20 text-center">
+                  <AlertTriangle className="w-16 h-16 text-yellow-400 mb-6" />
+                  <h2 className="text-3xl font-bold text-white mb-2">Page Not Found</h2>
+                  <p className="text-gray-400 mb-6">The page you're looking for doesn't exist.</p>
+                  <NavLink
+                    to="/"
+                    className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-colors"
+                  >
+                    Back to Dashboard
+                  </NavLink>
                 </div>
               } />
             </Routes>

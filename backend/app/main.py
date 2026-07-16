@@ -1,19 +1,32 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
+import logging
 import os
 
 load_dotenv()  # Load .env file at startup
+
+logger = logging.getLogger(__name__)
 
 from app.routers import datasets, training, optimization, remote_datasets
 from app.routers import inference  # NEW: real inference router
 from app.routers import job_logs_ws  # NEW: live job console log streaming
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown lifecycle manager (replaces deprecated on_event)."""
+    import asyncio
+    from app.services.job_logs import job_log_broker
+    job_log_broker.bind_loop(asyncio.get_running_loop())
+    yield
+
 app = FastAPI(
     title="EdgeCraft AI Backend",
     description="Local TinyML Studio API",
-    version="0.3.0"
+    version="0.3.0",
+    lifespan=lifespan,
 )
 
 # CORS Configuration
@@ -38,16 +51,6 @@ app.include_router(training.router,         prefix="/api/training",          tag
 app.include_router(optimization.router,     prefix="/api/optimization",      tags=["Optimization"])
 app.include_router(inference.router,        prefix="/api/inference",         tags=["Inference"])  # NEW
 app.include_router(job_logs_ws.router,      tags=["Live Logs"])  # NEW: /ws/logs/{job_id}
-
-@app.on_event("startup")
-async def _bind_job_log_broker_loop():
-    """job_log_broker.log() can be called from a worker thread (training and
-    optimization jobs run via BackgroundTasks, not on the event loop), so it
-    needs a reference to the actual running loop to schedule websocket sends
-    via asyncio.run_coroutine_threadsafe."""
-    import asyncio
-    from app.services.job_logs import job_log_broker
-    job_log_broker.bind_loop(asyncio.get_running_loop())
 
 @app.get("/api/health")
 async def health_check():
@@ -100,9 +103,10 @@ def get_models_tree(include_archived: bool = False):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
+    logger.exception(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "type": "error"}
+        content={"detail": "Internal server error", "type": "error"}
     )
 
 if __name__ == "__main__":

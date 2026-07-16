@@ -3,6 +3,7 @@ import {
   Database, BrainCircuit, Cpu, ChevronRight, ChevronDown,
   CheckCircle2, XCircle, Loader, Archive, RefreshCw,
 } from 'lucide-react';
+import { TreeSkeleton } from './Skeleton';
 import { useAPI } from '../hooks/useAPI';
 
 interface OptimizationNode {
@@ -118,7 +119,7 @@ export function ModelTree({
   };
 
   if (loading && !tree) {
-    return <p className="text-sm text-gray-500 text-center py-6">Loading model tree...</p>;
+    return <TreeSkeleton />;
   }
   if (!tree) {
     return <p className="text-sm text-gray-500 text-center py-6">Could not load models.</p>;

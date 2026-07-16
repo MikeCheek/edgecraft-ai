@@ -1,5 +1,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { Database, FolderHeart, Activity, CheckCircle2, XCircle, BrainCircuit, Box, HardDrive, ChevronDown, FileType, LayoutTemplate, GripVertical, Settings } from 'lucide-react';
+import { GridSkeleton } from './Skeleton';
 import { DatasetStatistics } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { useAPI } from '../hooks/useAPI';
@@ -265,7 +266,7 @@ export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) 
       </div>
 
       {!storageOverview ? (
-        <p className="text-sm text-gray-500 text-center py-4">Loading storage report...</p>
+        <GridSkeleton count={4} />
       ) : (
         <div className="space-y-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

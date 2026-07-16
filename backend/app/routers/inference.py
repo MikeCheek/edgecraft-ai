@@ -19,6 +19,7 @@ DELETE /api/inference/history
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -148,14 +149,18 @@ async def run_model_inference(
     # 3. Resolve labels and task
     labels, task = _resolve_labels_and_task(training_id)
 
-    # 4. Run inference (CPU-bound but fast; run synchronously inside async route)
+    # 4. Run inference offloaded to a thread to avoid blocking the event loop
     try:
-        result = run_inference(
-            model_path=model_path,
-            raw_input=raw_bytes,
-            task=task,
-            labels=labels,
-            top_k=min(top_k, 10),
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: run_inference(
+                model_path=model_path,
+                raw_input=raw_bytes,
+                task=task,
+                labels=labels,
+                top_k=min(top_k, 10),
+            ),
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

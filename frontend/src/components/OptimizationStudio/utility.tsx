@@ -4,6 +4,7 @@
 
 import React from "react";
 import { Zap } from "lucide-react";
+import { API_BASE } from "../../hooks/useAPI";
 
 export interface TrainedModel {
   id: string;
@@ -56,8 +57,6 @@ export type InferenceInput =
 // ---------------------------------------------------------------------------
 // Real inference function — calls the backend
 // ---------------------------------------------------------------------------
-
-const API_BASE = "http://localhost:8000/api";
 
 /**
  * Run real server-side inference via the EdgeCraft backend.

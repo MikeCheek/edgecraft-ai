@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal, ChevronDown, Trash2, Circle } from 'lucide-react';
+import { API_BASE } from '../hooks/useAPI';
 
 interface LogEntry {
   ts: number;
@@ -19,8 +20,7 @@ interface TerminalLogPanelProps {
 const WS_BASE = (() => {
   // Derive the websocket origin from the same host the REST API uses,
   // without the '/api' suffix (the ws route is mounted at /ws/logs/... directly).
-  const apiBase = 'http://localhost:8000/api';
-  return apiBase.replace(/^http/, 'ws').replace(/\/api$/, '');
+  return API_BASE.replace(/^http/, 'ws').replace(/\/api$/, '');
 })();
 
 function levelColor(level: LogEntry['level']): string {

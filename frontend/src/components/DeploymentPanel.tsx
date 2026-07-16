@@ -1,11 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor, Code2, Copy, Check, GitBranch, ChevronDown } from 'lucide-react';
-import { useAPI } from '../hooks/useAPI';
+import { useAPI, API_BASE } from '../hooks/useAPI';
+import { useToast } from '../context/ToastContext';
 import { TargetBoard } from '../types';
 import { ModelTree } from './ModelTree';
-
-const API_BASE = 'http://localhost:8000/api';
 
 interface DeploymentPanelProps {
   board: TargetBoard;
@@ -38,6 +37,7 @@ interface BoardEvaluation {
 
 export function DeploymentPanel({ board }: DeploymentPanelProps) {
   const { apiClient } = useAPI();
+  const { toast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // NOTE: this used to read `state.currentOptimization?.id` from
@@ -127,7 +127,10 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
       })
         .then((r) => r.json())
         .then((j) => setPreview(j.status === 'success' ? j.sketch : null))
-        .catch(() => setPreview(null))
+        .catch(() => {
+          setPreview(null);
+          toast('error', 'Failed to load sketch preview');
+        })
         .finally(() => setPreviewLoading(false));
     }, 400); // debounce pin edits
 

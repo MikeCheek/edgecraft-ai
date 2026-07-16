@@ -53,3 +53,16 @@ body {
 .animate-slideIn {
   animation: slideIn 0.3s ease-in-out;
 }
+
+@keyframes slideInRight {
+  from {
+    @apply opacity-0 translate-x-4;
+  }
+  to {
+    @apply opacity-100 translate-x-0;
+  }
+}
+
+.animate-slideInRight {
+  animation: slideInRight 0.3s ease-in-out;
+}

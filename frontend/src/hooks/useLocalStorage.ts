@@ -12,7 +12,15 @@ export function useLocalStorage<T> (key: string, initialValue: T) {
 
   const setValue = (value: T) => {
     setStoredValue(value)
-    localStorage.setItem(key, JSON.stringify(value))
+    try {
+      localStorage.setItem(key, JSON.stringify(value))
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+        console.warn(`localStorage quota exceeded for key "${key}"`)
+      } else {
+        throw e
+      }
+    }
   }
 
   return [storedValue, setValue] as const

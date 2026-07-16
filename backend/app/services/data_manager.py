@@ -93,21 +93,30 @@ class DataManager:
     def _save_metadata(self):
         """Persist only JSON metadata (datasets, samples, labels).
 
-        Previously _save_to_disk() also looped over self.sample_data and
-        rewrote every .bin file already on disk - O(n) disk writes on every
-        single upload.  Binary files are now written once on ingest and never
-        touched again unless the sample is deleted.
+        Uses atomic write (write to temp file then rename) to prevent
+        corruption if the process crashes mid-write.
         """
-        with open(self.db_file, "w") as f:
-            json.dump(
-                {
-                    "datasets": self.datasets,
-                    "samples": self.samples,
-                    "dataset_labels": self.dataset_labels,
-                },
-                f,
-                indent=2,
-            )
+        import tempfile
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(self.db_file) or ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(
+                    {
+                        "datasets": self.datasets,
+                        "samples": self.samples,
+                        "dataset_labels": self.dataset_labels,
+                    },
+                    f,
+                    indent=2,
+                )
+            os.replace(tmp_path, self.db_file)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp_path)
+            raise
 
     def _save_to_disk(self):
         """Alias kept for callers that still use the old name."""

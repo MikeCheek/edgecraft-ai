@@ -1,6 +1,7 @@
 import re
 import io
 import os
+import logging
 from PIL import Image
 import uuid
 import tempfile
@@ -17,6 +18,8 @@ from fastapi.responses import Response, FileResponse, StreamingResponse
 from starlette.background import BackgroundTasks
 from app.services.shared_state import data_manager
 import time
+
+logger = logging.getLogger(__name__)
 
 # Optimized thread pool: scales with CPU cores
 _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 4), thread_name_prefix="disk_io")
@@ -149,6 +152,15 @@ async def upload_dataset_sample(
 
 # --- Chunked Resumable ZIP upload Engine ---
 
+@router.delete("/upload_zip/{upload_id}")
+async def abort_zip_upload(upload_id: str):
+    """Abort an in-progress chunked ZIP upload, cleaning up chunks on disk."""
+    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    if os.path.isdir(upload_dir):
+        shutil.rmtree(upload_dir, ignore_errors=True)
+    UPLOAD_TRACKER.pop(upload_id, None)
+    return {"status": "success", "message": "Upload aborted"}
+
 @router.post("/upload_zip/init")
 async def init_zip_upload(
     dataset_id: str = Body(...),
@@ -206,7 +218,7 @@ async def _upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Reque
     disk_time = t_disk_end - t_disk_start
     total_time = t_disk_end - t_start
 
-    print(f"[Chunk {chunk_index:03d}] Total: {total_time:.3f}s | Network Recv: {net_time:.3f}s | Disk Write: {disk_time:.3f}s")
+    logger.info(f"[Chunk {chunk_index:03d}] Total: {total_time:.3f}s | Network Recv: {net_time:.3f}s | Disk Write: {disk_time:.3f}s")
 
     return {"status": "success", "chunk_index": chunk_index, "received": UPLOAD_TRACKER[upload_id]}
 
@@ -363,7 +375,7 @@ def clean_dataset_directory(dataset_dir):
 
             # 1. Remove hidden/system files immediately
             if file.startswith('.') or file.lower() == 'thumbs.db':
-                print(f"Removing hidden file: {file_path}")
+                logger.info(f"Removing hidden file: {file_path}")
                 os.remove(file_path)
                 removed_count += 1
                 continue
@@ -371,7 +383,7 @@ def clean_dataset_directory(dataset_dir):
             # 2. Check if the extension is strictly valid
             ext = os.path.splitext(file)[1].lower()
             if ext not in valid_extensions:
-                print(f"Removing unsupported format: {file_path}")
+                logger.info(f"Removing unsupported format: {file_path}")
                 os.remove(file_path)
                 removed_count += 1
                 continue
@@ -381,11 +393,11 @@ def clean_dataset_directory(dataset_dir):
                 with Image.open(file_path) as img:
                     img.verify() # Reads the header, doesn't load whole image into memory
             except Exception as e:
-                print(f"Removing corrupted image: {file_path} - {e}")
+                logger.info(f"Removing corrupted image: {file_path} - {e}")
                 os.remove(file_path)
                 removed_count += 1
 
-    print(f"\nCleanup finished! Removed {removed_count} invalid files.")
+    logger.info(f"Cleanup finished! Removed {removed_count} invalid files.")
 
 @router.post("/upload_zip/finalize")
 async def finalize_zip_upload(
