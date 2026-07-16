@@ -216,3 +216,22 @@ export interface TreeItem {
   ignore: boolean
   files?: string[]
 }
+
+export interface PastTrainingSession {
+  id: string
+  dataset_id: string
+  base_model: string
+  task: TinyMLTask
+  status: 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
+  current_epoch: number
+  total_epochs: number
+  batch_size: number
+  learning_rate: number
+  dropout_rate?: number
+  l2_reg?: number
+  early_stopping?: boolean
+  early_stopping_patience?: number
+  created_at: number
+  error?: string
+  metrics: TrainingMetrics[]
+}

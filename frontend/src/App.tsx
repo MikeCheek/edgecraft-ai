@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom';
-import { DataCollector, ModelTrainer, OptimizationStudio, DeploymentPanel, LLMAdvisor, DashboardOverview, DatasetManager, ModelTree } from './components';
 import { useAppContext } from './context/AppContext';
 import { useHealthCheck } from './hooks';
 import { TinyMLTask, TargetBoard } from './types';
@@ -22,10 +21,22 @@ import {
   HardDrive,
   Server,
   Cloud,
-  AlertTriangle
+  AlertTriangle,
+  Menu,
+  X,
 } from 'lucide-react';
 import { useAPI } from './hooks/useAPI';
 import { useLocalStorage } from './hooks/useLocalStorage';
+import { GridSkeleton } from './components/Skeleton';
+import { ErrorBoundary } from './components/ErrorBoundary';
+
+// Route-level code splitting
+const DashboardOverview = lazy(() => import('./components/DashboardOverview').then(m => ({ default: m.DashboardOverview })));
+const DatasetManager = lazy(() => import('./components/DatasetManager').then(m => ({ default: m.DatasetManager })));
+const ModelTrainer = lazy(() => import('./components/ModelTrainer').then(m => ({ default: m.ModelTrainer })));
+const OptimizationStudio = lazy(() => import('./components/OptimizationStudio').then(m => ({ default: m.OptimizationStudio })));
+const ModelTree = lazy(() => import('./components/ModelTree').then(m => ({ default: m.ModelTree })));
+const DeploymentPanel = lazy(() => import('./components/DeploymentPanel').then(m => ({ default: m.DeploymentPanel })));
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -45,11 +56,9 @@ export default function App() {
   const [selectedTask, setSelectedTask] = useLocalStorage<TinyMLTask>('ec_task', 'IMAGE_CLASSIFICATION');
   const [selectedBoard, setSelectedBoard] = useLocalStorage<TargetBoard>('ec_board', 'ESP32_S3_N16R8');
 
-  // Local UI State for the custom Global Config dropdown
   const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
-
-  // Storage state for the header indicator
   const [storageOverview, setStorageOverview] = useState<any | null>(null);
 
   const openRouterModels = [
@@ -59,7 +68,6 @@ export default function App() {
     { id: 'qwen/qwen-2.5-7b-instruct:free', label: 'Qwen 2.5 7B (Free)', specs: 'Alibaba - Strong coding/logic' },
   ];
 
-  // Close dropdown if user clicks outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -70,6 +78,11 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Close sidebar on route change (mobile)
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [state]);
+
   const fetchStatsAndModels = async () => {
     const rawStats = await request(() => apiClient.getDatasetStats());
     if (rawStats) {
@@ -79,25 +92,12 @@ export default function App() {
     if (rawModels && rawModels.models) {
       dispatch({ type: 'SET_MODELS', payload: rawModels.models });
     }
-
-    // Fetch storage for the header
     const rawStorage = await request(() => apiClient.getStorageOverview());
     if (rawStorage && rawStorage.overview) {
       setStorageOverview(rawStorage.overview);
     }
   };
 
-  /**
-   * Reads which LLM providers the backend .env actually makes available
-   * (OPENROUTER_API_KEY / OLLAMA_ENABLED+OLLAMA_MODEL+OLLAMA_HOST) and:
-   *  - stores it in context so any component can render provider-aware UI
-   *  - auto-corrects the persisted provider choice if it points at a
-   *    provider that's no longer available (e.g. user previously picked
-   *    Ollama, then the backend was restarted without OLLAMA_ENABLED)
-   *  - auto-selects the only available provider when just one is present,
-   *    so the user isn't asked to choose between one real option and one
-   *    that will just error out
-   */
   const fetchLLMConfig = async () => {
     const rawConfig = await request(() => apiClient.getLLMConfig());
     if (!rawConfig) return;
@@ -110,9 +110,6 @@ export default function App() {
     } else if (openrouter_available && !ollama_available && state.llmProvider !== 'openrouter') {
       dispatch({ type: 'SET_LLM_PROVIDER', payload: 'openrouter' });
     }
-    // When both (or neither) are available, the user's persisted choice
-    // (default 'openrouter') is left as-is - see the Global Config panel's
-    // "AI Studio Assistant" section for the manual picker.
   };
 
   useEffect(() => {
@@ -152,15 +149,44 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-slate-950 text-gray-100 overflow-hidden">
+      {/* Skip to content link */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[100] focus:px-4 focus:py-2 focus:bg-purple-600 focus:text-white focus:rounded-lg"
+      >
+        Skip to main content
+      </a>
+
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar Navigation */}
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
-        <div className="h-16 flex items-center px-6 border-b border-slate-800">
-          <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-600 rounded-lg flex items-center justify-center mr-3 shadow-lg">
-            <span className="text-white font-bold text-sm">EC</span>
+      <aside className={`
+        fixed inset-y-0 left-0 z-50 w-64 bg-slate-900 border-r border-slate-800 flex flex-col transform transition-transform duration-200 ease-in-out
+        lg:relative lg:translate-x-0
+        ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        <div className="h-16 flex items-center justify-between px-6 border-b border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-pink-600 rounded-lg flex items-center justify-center shadow-lg">
+              <span className="text-white font-bold text-sm">EC</span>
+            </div>
+            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">EdgeCraft AI</h1>
           </div>
-          <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-pink-400">EdgeCraft AI</h1>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="lg:hidden p-1 text-gray-400 hover:text-white"
+            aria-label="Close sidebar"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
-        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto" role="navigation" aria-label="Main navigation">
+        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto" aria-label="Main navigation">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.path}
@@ -180,12 +206,20 @@ export default function App() {
       </aside>
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header containing custom Global Config */}
-        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-8 z-50">
+        {/* Header */}
+        <header className="h-16 bg-slate-900/50 backdrop-blur-md border-b border-slate-800 flex items-center justify-between px-4 sm:px-8 z-40">
+          <div className="flex items-center gap-3">
+            {/* Mobile menu button */}
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="lg:hidden p-2 text-gray-400 hover:text-white hover:bg-slate-800 rounded-lg"
+              aria-label="Open sidebar"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
 
-          <div className="flex items-center gap-4">
             {/* Health Status Indicator */}
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full">
+            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full">
               <span className="text-xs text-gray-400 font-medium flex items-center gap-1">
                 <Activity className="w-3 h-3 text-gray-500" /> Backend API
               </span>
@@ -202,14 +236,14 @@ export default function App() {
 
             {/* Quick Storage Indicator */}
             {storageOverview && (
-              <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full" title="Storage Used">
+              <div className="hidden md:flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 border border-slate-700 rounded-full" title="Storage Used">
                 <HardDrive className="w-3 h-3 text-emerald-400" />
                 <span className="text-xs text-gray-300 font-mono">{storageOverview.total_storage_human}</span>
               </div>
             )}
           </div>
 
-          {/* Redesigned Premium Global Configuration Menu */}
+          {/* Global Configuration Menu */}
           <div className="relative" ref={dropdownRef}>
             <button
               onClick={() => setIsConfigOpen(!isConfigOpen)}
@@ -222,7 +256,7 @@ export default function App() {
                 }`}
             >
               <Settings2 className={`w-4 h-4 ${isConfigOpen ? 'text-purple-400 animate-spin-slow' : 'text-gray-400'}`} />
-              <div className="flex items-center gap-2 divide-x divide-slate-700 text-xs">
+              <div className="hidden sm:flex items-center gap-2 divide-x divide-slate-700 text-xs">
                 <span className="text-gray-400 font-medium">Global Config:</span>
                 <span className="pl-2 font-semibold text-purple-400">{currentTaskLabel}</span>
                 <span className="pl-2 font-semibold text-cyan-400">{currentBoardLabel}</span>
@@ -230,11 +264,8 @@ export default function App() {
               <ChevronDown className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${isConfigOpen ? 'rotate-180' : ''}`} />
             </button>
 
-            {/* Floating Config Dropdown Panel */}
             {isConfigOpen && (
               <div className="absolute right-0 mt-2 w-[480px] bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 flex flex-col gap-5 animate-slideIn z-50 backdrop-blur-xl bg-slate-900/95">
-
-                {/* Section 1: ML Pipeline Task Selection */}
                 <div>
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <BarChart3 className="w-4 h-4 text-purple-400" />
@@ -265,10 +296,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Divider Line */}
                 <div className="h-px bg-slate-800" />
 
-                {/* Section 2: Target Hardware Device Selection */}
                 <div>
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Zap className="w-4 h-4 text-cyan-400" />
@@ -299,21 +328,14 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Divider Line */}
                 <div className="h-px bg-slate-800" />
 
-                {/* Section 3: AI Assistant Config */}
                 <div>
                   <div className="flex items-center gap-2 mb-3 px-1">
                     <Lightbulb className="w-4 h-4 text-yellow-400" />
                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">AI Studio Assistant</h4>
                   </div>
 
-                  {/* Provider toggle - only shown when the backend .env actually
-                      makes both OpenRouter (OPENROUTER_API_KEY) and local Ollama
-                      (OLLAMA_ENABLED=true) available. Otherwise the single
-                      available provider is auto-selected (see fetchLLMConfig)
-                      and shown here as a read-only badge. */}
                   {state.llmConfig && state.llmConfig.openrouter_available && state.llmConfig.ollama_available ? (
                     <div className="grid grid-cols-2 gap-1.5 mb-2">
                       <button
@@ -374,102 +396,100 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Dropdown Micro Footer info */}
                 <div className="bg-slate-950/60 p-2 rounded-xl border border-slate-800 flex items-center gap-2 text-[10px] text-slate-500">
                   <CpuIcon size={12} className="text-slate-600" />
                   <span>Modifying variables will dynamically recalibrate processing pipelines.</span>
                 </div>
-
               </div>
             )}
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+        <main id="main-content" className="flex-1 overflow-y-auto p-4 sm:p-8 custom-scrollbar">
+          <h1 className="sr-only">EdgeCraft AI Studio</h1>
           <div className="max-w-6xl mx-auto animate-slideIn">
-            <Routes>
-              <Route path="/" element={
-                <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />
-              } />
+            <Suspense fallback={<GridSkeleton count={4} />}>
+              <ErrorBoundary>
+                <Routes>
+                  <Route path="/" element={
+                    <DashboardOverview stats={state.datasetStats} isHealthy={isHealthy} />
+                  } />
 
-              <Route path="/collect" element={
-                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
-                  <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
-                </div>
-              } />
-
-              <Route path="/train" element={
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
-                  <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+                  <Route path="/collect" element={
                     <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
-                      <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
+                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Database className="w-6 h-6 text-purple-400" /> Dataset Manager</h2>
+                      <DatasetManager task={selectedTask} onDatasetChanged={fetchStatsAndModels} />
                     </div>
-                  </div>
+                  } />
 
-                  {state.currentTraining?.status === 'completed' && (
-                    <div className="space-y-6 animate-slideIn">
-                      <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
-                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500"></div>
-                        <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-                          <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
-                        </h3>
-                        <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
-                        <LLMAdvisor
-                          trainingId={state.currentTraining?.id}
-                          metrics={state.currentTraining?.metrics}
-                          status={state.currentTraining?.status}
-                        />
+                  <Route path="/train" element={
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-500">
+                      <div className={`transition-all duration-500 ${state.currentTraining?.status === 'completed' ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
+                        <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                          <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><BrainCircuit className="w-6 h-6 text-purple-400" /> Neural Network Training</h2>
+                          <ModelTrainer task={selectedTask} onTrainingComplete={fetchStatsAndModels} />
+                        </div>
                       </div>
+
+                      {state.currentTraining?.status === 'completed' && (
+                        <div className="space-y-6 animate-slideIn">
+                          <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-purple-500/30 p-6 shadow-xl h-full relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500"></div>
+                            <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+                              <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
+                            </h3>
+                            <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
+                            <div className="sr-only">AI Advisor</div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
-              } />
+                  } />
 
-              <Route path="/optimize" element={
-                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
-                  <OptimizationStudio models={state.trainedModels} />
-                </div>
-              } />
+                  <Route path="/optimize" element={
+                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Cpu className="w-6 h-6 text-cyan-400" /> TinyML Quantization Studio</h2>
+                      <OptimizationStudio models={state.trainedModels} />
+                    </div>
+                  } />
 
-              <Route path="/models" element={
-                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><GitBranch className="w-6 h-6 text-emerald-400" /> Models Explorer</h2>
-                  <p className="text-sm text-gray-400 mb-6 -mt-3">
-                    Every dataset you've trained on, the models trained from it, and every optimized variant generated
-                    from each model. Click a model to open it in Optimization, or a completed optimization to open it in Deployment.
-                  </p>
-                  <ModelTree
-                    onSelectModel={(m) => navigate(`/optimize?model=${m.training_id}`)}
-                    onSelectOptimization={(opt) => navigate(`/deploy?optimization=${opt.id}`)}
-                  />
-                </div>
-              } />
+                  <Route path="/models" element={
+                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><GitBranch className="w-6 h-6 text-emerald-400" /> Models Explorer</h2>
+                      <p className="text-sm text-gray-400 mb-6 -mt-3">
+                        Every dataset you've trained on, the models trained from it, and every optimized variant generated
+                        from each model. Click a model to open it in Optimization, or a completed optimization to open it in Deployment.
+                      </p>
+                      <ModelTree
+                        onSelectModel={(m) => navigate(`/optimize?model=${m.training_id}`)}
+                        onSelectOptimization={(opt) => navigate(`/deploy?optimization=${opt.id}`)}
+                      />
+                    </div>
+                  } />
 
-              <Route path="/deploy" element={
-                <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
-                  <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
-                  <DeploymentPanel board={selectedBoard} />
-                </div>
-              } />
+                  <Route path="/deploy" element={
+                    <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl border border-slate-700 p-8 shadow-xl">
+                      <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3 border-b border-slate-700 pb-4"><Code2 className="w-6 h-6 text-pink-400" /> Deployment</h2>
+                      <DeploymentPanel board={selectedBoard} />
+                    </div>
+                  } />
 
-              {/* 404 Catch-All */}
-              <Route path="*" element={
-                <div className="flex flex-col items-center justify-center py-20 text-center">
-                  <AlertTriangle className="w-16 h-16 text-yellow-400 mb-6" />
-                  <h2 className="text-3xl font-bold text-white mb-2">Page Not Found</h2>
-                  <p className="text-gray-400 mb-6">The page you're looking for doesn't exist.</p>
-                  <NavLink
-                    to="/"
-                    className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-colors"
-                  >
-                    Back to Dashboard
-                  </NavLink>
-                </div>
-              } />
-            </Routes>
+                  <Route path="*" element={
+                    <div className="flex flex-col items-center justify-center py-20 text-center">
+                      <AlertTriangle className="w-16 h-16 text-yellow-400 mb-6" />
+                      <h2 className="text-3xl font-bold text-white mb-2">Page Not Found</h2>
+                      <p className="text-gray-400 mb-6">The page you're looking for doesn't exist.</p>
+                      <NavLink
+                        to="/"
+                        className="px-6 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-colors"
+                      >
+                        Back to Dashboard
+                      </NavLink>
+                    </div>
+                  } />
+                </Routes>
+              </ErrorBoundary>
+            </Suspense>
           </div>
         </main>
       </div>

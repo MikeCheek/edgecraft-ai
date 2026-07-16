@@ -9,6 +9,7 @@ import {
   AlertTriangle, Settings, Activity, Shuffle
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
+import { useToast } from '../../context/ToastContext';
 import { useAppContext } from '../../context/AppContext';
 import { TinyMLTask, TrainingStatus } from '../../types';
 import { MetricChart, ChartModal } from './Chart';
@@ -36,6 +37,7 @@ interface ModelTrainerProps {
 export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const { state, dispatch } = useAppContext();
   const { request, apiClient, error } = useAPI();
+  const { toast } = useToast();
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const defaults = getTaskDefaults(task);
@@ -211,13 +213,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
   // --- Start / stop ---
   const handleStart = async () => {
-    if (!datasetId) { alert('Please select a dataset first.'); return; }
+    if (!datasetId) { toast('warning', 'Please select a dataset first.'); return; }
     if (!splitReady) {
-      alert(
-        "This dataset doesn't have a complete train/val split yet.\n\n" +
-        'Training always uses the precomputed split — assign all samples to train/val/test first ' +
-        '(use "Auto Split" above, or assign them manually).',
-      );
+      toast('warning', "This dataset doesn't have a complete train/val split yet. Assign all samples to train/val/test first.");
       return;
     }
     if (checkDuplicate()) { setDuplicateWarning(true); return; }

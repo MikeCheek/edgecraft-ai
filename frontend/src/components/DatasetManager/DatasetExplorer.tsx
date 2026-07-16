@@ -1,6 +1,7 @@
 import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2, Regex, Info } from "lucide-react";
 import React, { useCallback, useEffect, useState } from "react";
 import { useAPI } from "../../hooks/useAPI";
+import { useToast } from "../../context/ToastContext";
 import { DatasetInfo, DatasetSample } from "../../types";
 import ClassManager from "./ClassManager";
 import SampleCard from "./SampleCard";
@@ -23,6 +24,7 @@ const getExt = (filename?: string) => {
 
 function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps) {
   const { request, apiClient } = useAPI();
+  const { toast } = useToast();
   const [samples, setSamples] = useState<DatasetSample[]>([]);
   const [allLabels, setAllLabels] = useState<string[]>([]);
 
@@ -80,7 +82,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   };
 
   const handleAutoSplit = async () => {
-    if (trainPct + valPct + testPct !== 100) { alert("Percentages must sum to exactly 100"); return; }
+    if (trainPct + valPct + testPct !== 100) { toast('warning', 'Percentages must sum to exactly 100'); return; }
     setIsSplitting(true);
     await request(() => apiClient.autoSplitDataset(dataset.id, trainPct, valPct, testPct));
     await fetchAll(); setIsSplitting(false); onChanged();
@@ -135,12 +137,12 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
       // Add `relabelDatasetBulkRegex` to apiClient methods
       const res = await request(() => apiClient.relabelDatasetBulkRegex(dataset.id, bulkRegex)) as any;
       if (res && res.status === 'success') {
-        alert(`Successfully updated labels for ${res.relabelled_count} samples.`);
+        toast('success', `Updated labels for ${res.relabelled_count} samples.`);
         await fetchAll();
         onChanged();
       }
-    } catch (e) {
-      alert("Failed to apply regex relabeling.");
+    } catch {
+      toast('error', 'Failed to apply regex relabeling.');
     } finally {
       setIsBulkRelabeling(false);
       setShowRegexModal(false);
@@ -151,7 +153,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     if (!viewingSample) return;
     const res = await apiClient.updateSampleImage(viewingSample.id, blob);
     if (res.status !== 'success') {
-      alert(res.message || 'Crop failed');
+      toast('error', res.message || 'Crop failed');
       return;
     }
     await fetchAll();

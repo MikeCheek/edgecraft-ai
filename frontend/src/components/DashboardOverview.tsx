@@ -5,20 +5,12 @@ import { DatasetStatistics } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { useAPI } from '../hooks/useAPI';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { formatBytes } from '../utils/format';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 
 interface DashboardOverviewProps {
   stats: DatasetStatistics;
   isHealthy: boolean;
-}
-
-function formatBytes(n: number): string {
-  if (!n) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let size = n;
-  let i = 0;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(1)} ${units[i]}`;
 }
 
 // Available widgets IDs

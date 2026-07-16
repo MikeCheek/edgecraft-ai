@@ -5,6 +5,7 @@ interface SkeletonProps {
 export function Skeleton({ className = '' }: SkeletonProps) {
   return (
     <div
+      aria-hidden="true"
       className={`animate-pulse rounded-lg bg-slate-700/50 ${className}`}
     />
   )
@@ -12,7 +13,7 @@ export function Skeleton({ className = '' }: SkeletonProps) {
 
 export function CardSkeleton({ count = 1 }: { count?: number }) {
   return (
-    <div className="space-y-3">
+    <div role="status" aria-label="Loading" className="space-y-3">
       {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
@@ -35,7 +36,7 @@ export function CardSkeleton({ count = 1 }: { count?: number }) {
 
 export function GridSkeleton({ count = 4 }: { count?: number }) {
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div role="status" aria-label="Loading" className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {Array.from({ length: count }).map((_, i) => (
         <div
           key={i}
@@ -51,7 +52,7 @@ export function GridSkeleton({ count = 4 }: { count?: number }) {
 
 export function TreeSkeleton() {
   return (
-    <div className="space-y-2 py-6">
+    <div role="status" aria-label="Loading" className="space-y-2 py-6">
       {Array.from({ length: 3 }).map((_, i) => (
         <div key={i} className="flex items-center gap-2 px-2">
           <Skeleton className="h-4 w-4 rounded" />

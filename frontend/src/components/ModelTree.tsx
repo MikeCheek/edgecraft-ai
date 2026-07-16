@@ -4,6 +4,7 @@ import {
   CheckCircle2, XCircle, Loader, Archive, RefreshCw,
 } from 'lucide-react';
 import { TreeSkeleton } from './Skeleton';
+import { formatBytes } from '../utils/format';
 import { useAPI } from '../hooks/useAPI';
 
 interface OptimizationNode {
@@ -56,14 +57,6 @@ interface ModelTreeProps {
   /** Restrict the tree to a single dataset (used by the OptimizationStudio picker). */
   datasetIdFilter?: string | null;
   compact?: boolean;
-}
-
-function formatBytes(n: number): string {
-  if (!n) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let size = n, i = 0;
-  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-  return `${size.toFixed(1)} ${units[i]}`;
 }
 
 function statusIcon(status: string) {

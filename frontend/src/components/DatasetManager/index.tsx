@@ -291,7 +291,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                   </div>
                 )}
 
-                {expandedClasses === dataset.id && (
+                {expandedUpload === dataset.id && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                     <RemoteDatasetBrowser datasetId={dataset.id} onImportComplete={() => { fetchDatasets(); onDatasetChanged?.(); }} task={task} />
                   </div>

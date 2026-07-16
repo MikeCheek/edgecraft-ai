@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Cpu, AlertTriangle, CheckCircle2, RefreshCw, Download } from 'lucide-react';
 import { useAPI } from '../hooks/useAPI';
+import { useToast } from '../context/ToastContext';
 import { BoardRecommendation } from '../types';
 
 interface BoardAdvisorProps {
@@ -13,10 +14,11 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const { request, error, apiClient } = useAPI();
+  const { toast } = useToast();
 
   const handleEvaluate = async () => {
     if (!optimizationId || !board) {
-      alert("Please complete an optimization session and select a board first.");
+      toast('warning', 'Complete an optimization session and select a board first.');
       return;
     }
 
@@ -35,10 +37,8 @@ export function BoardAdvisor({ optimizationId, board }: BoardAdvisorProps) {
     setIsExporting(true);
     try {
       await apiClient.exportProject(optimizationId, board);
-    } catch (e) {
-      // apiClient.exportProject throws on non-2xx; surface via alert since
-      // this isn't routed through the useAPI() error state.
-      alert('Export failed. Make sure the optimization has completed successfully.');
+    } catch {
+      toast('error', 'Export failed. Make sure the optimization has completed successfully.');
     } finally {
       setIsExporting(false);
     }
