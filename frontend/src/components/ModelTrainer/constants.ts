@@ -35,7 +35,7 @@ export function getTaskDefaults (task: TinyMLTask): {
     case 'AUDIO_CLASSIFICATION':
       return { input_shape: INPUT_SIZES.AUDIO_CLASSIFICATION, base_model: 'MFCC_CNN' }
     case 'OBJECT_DETECTION':
-      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'MobileNetV3Small' }
+      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'SSD_MobileNetV2' }
     case 'IMAGE_CLASSIFICATION':
     default:
       // MobileNetV3Small at 96x96 is a far more realistic edge default than
@@ -55,6 +55,12 @@ export const IMAGE_MODELS = [
   'EfficientNet',
   'ResNet50V2',
   'Custom3LayerCNN'
+]
+export const OD_MODELS = [
+  'SSD_MobileNetV2',
+  'EfficientDet_Lite',
+  'NanoDet',
+  'YOLO_Nano',
 ]
 export const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet', 'AudioLSTM', 'AudioGRU']
 export const AUDIO_TASKS: TinyMLTask[] = [

@@ -12,9 +12,12 @@ import {
   Regex,
   Tag,
   Settings2,
-  Loader
+  Loader,
+  BoxSelect,
+  CheckCircle
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
+import { TinyMLTask } from '../../types';
 
 export interface TreeItem {
   path: string;
@@ -28,6 +31,9 @@ export interface TreeItem {
 interface ZipTreeMapperProps {
   uploadId: string;
   tree: TreeItem[];
+  task?: TinyMLTask;
+  annotationFormat?: string | null;
+  annotationClasses?: string[];
   onConfirm: (mapping: TreeItem[], labelStrategy: string, regexPattern: string) => void; // UPDATED
   onCancel: () => void;
 }
@@ -91,7 +97,7 @@ const HighlightText = ({ text, pattern, active }: { text: string; pattern: strin
   }
 };
 
-export function ZipTreeMapper({ uploadId, tree, onConfirm, onCancel }: ZipTreeMapperProps) {
+export function ZipTreeMapper({ uploadId, tree, task, annotationFormat, annotationClasses, onConfirm, onCancel }: ZipTreeMapperProps) {
   const { apiClient } = useAPI();
   // Initialize mapping with auto-detected splits and cleared invalid labels
   const [mapping, setMapping] = useState<TreeItem[]>(() => {
@@ -302,18 +308,20 @@ export function ZipTreeMapper({ uploadId, tree, onConfirm, onCancel }: ZipTreeMa
               )}
             </div>
 
-            <div className="w-40">
-              {item && (
-                <input
-                  type="text"
-                  value={item.label}
-                  placeholder="Auto-assigned"
-                  onChange={(e) => updateItem(node.itemIndex!, { label: e.target.value })}
-                  disabled={item.ignore}
-                  className="w-full bg-slate-900 border border-slate-700 text-white text-xs px-3 py-1.5 rounded focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-semibold text-purple-300 outline-none transition-all placeholder:text-slate-600 placeholder:font-normal"
-                />
-              )}
-            </div>
+            {!(task === 'OBJECT_DETECTION' && annotationFormat) && (
+              <div className="w-40">
+                {item && (
+                  <input
+                    type="text"
+                    value={item.label}
+                    placeholder="Auto-assigned"
+                    onChange={(e) => updateItem(node.itemIndex!, { label: e.target.value })}
+                    disabled={item.ignore}
+                    className="w-full bg-slate-900 border border-slate-700 text-white text-xs px-3 py-1.5 rounded focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-semibold text-purple-300 outline-none transition-all placeholder:text-slate-600 placeholder:font-normal"
+                  />
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -384,11 +392,37 @@ export function ZipTreeMapper({ uploadId, tree, onConfirm, onCancel }: ZipTreeMa
               <FolderTree className="text-indigo-400" /> Map Dataset Folders
             </h2>
             <p className="text-sm text-gray-400 mt-1">
-              Select which folders to import, assign them to a split, and explicitly name their class label.
+              {task === 'OBJECT_DETECTION' && annotationFormat
+                ? 'Class labels come from annotations. Select which folders to import and assign them to a split.'
+                : 'Select which folders to import, assign them to a split, and explicitly name their class label.'}
             </p>
           </div>
           <button onClick={onCancel} className="text-gray-400 hover:text-white p-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"><X /></button>
         </div>
+
+        {/* Annotation Detection Banner (for OD tasks with detected annotations) */}
+        {task === 'OBJECT_DETECTION' && annotationFormat && (
+          <div className="px-6 py-3 bg-emerald-900/20 border-b border-emerald-500/30 flex items-center gap-3 shrink-0">
+            <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-emerald-300">
+                {annotationFormat.toUpperCase()} annotations detected
+              </p>
+              <p className="text-xs text-emerald-400/70">
+                Bounding boxes will be auto-matched to images by filename. You can draw or refine annotations later in the Explore view.
+              </p>
+            </div>
+            {annotationClasses && annotationClasses.length > 0 && (
+              <div className="flex flex-wrap gap-1 max-w-xs">
+                {annotationClasses.map(cls => (
+                  <span key={cls} className="px-2 py-0.5 text-[10px] bg-emerald-800/50 border border-emerald-500/30 text-emerald-300 rounded-full font-medium">
+                    {cls}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Dynamic Toolbar Strategy Section */}
         <div className="px-6 py-3 border-b border-slate-800 flex flex-col md:flex-row gap-4 items-start md:items-center bg-slate-900 shrink-0">
@@ -492,7 +526,9 @@ export function ZipTreeMapper({ uploadId, tree, onConfirm, onCancel }: ZipTreeMa
                 <div className="w-12 text-center">Import</div>
                 <div className="w-20 text-right pr-2">Files</div>
                 <div className="w-32">Split Tag</div>
-                <div className="w-40">Class Label Tag</div>
+                {!(task === 'OBJECT_DETECTION' && annotationFormat) && (
+                  <div className="w-40">Class Label Tag</div>
+                )}
               </div>
             </div>
 

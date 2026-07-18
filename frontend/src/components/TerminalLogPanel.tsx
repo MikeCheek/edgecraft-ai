@@ -75,9 +75,12 @@ export function TerminalLogPanel({ jobId, title = 'Live Console', defaultOpen = 
 
   return (
     <div className="rounded-xl border border-slate-700 bg-black/40 overflow-hidden">
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-900/60 hover:bg-slate-900 transition-colors"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v); } }}
+        className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-900/60 hover:bg-slate-900 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <Terminal size={14} className="text-emerald-400" />
@@ -103,7 +106,7 @@ export function TerminalLogPanel({ jobId, title = 'Live Console', defaultOpen = 
           )}
           <ChevronDown size={14} className={`text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`} />
         </div>
-      </button>
+      </div>
 
       {open && (
         <div

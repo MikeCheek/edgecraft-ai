@@ -37,6 +37,7 @@ const ModelTrainer = lazy(() => import('./components/ModelTrainer').then(m => ({
 const OptimizationStudio = lazy(() => import('./components/OptimizationStudio').then(m => ({ default: m.OptimizationStudio })));
 const ModelTree = lazy(() => import('./components/ModelTree').then(m => ({ default: m.ModelTree })));
 const DeploymentPanel = lazy(() => import('./components/DeploymentPanel').then(m => ({ default: m.DeploymentPanel })));
+const LLMAdvisor = lazy(() => import('./components/LLMAdvisor').then(m => ({ default: m.LLMAdvisor })));
 
 const NAV_ITEMS = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -439,7 +440,7 @@ export default function App() {
                               <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions & Review
                             </h3>
                             <p className="text-sm text-gray-400 mb-6 pb-4 border-b border-slate-700">Based on your specific training parameters and final validation metrics.</p>
-                            <div className="sr-only">AI Advisor</div>
+                            <LLMAdvisor trainingId={state.currentTraining?.id} status={state.currentTraining?.status} />
                           </div>
                         </div>
                       )}

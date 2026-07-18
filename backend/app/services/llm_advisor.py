@@ -49,7 +49,7 @@ def get_provider_config() -> dict:
 
 
 class LLMAdvisor:
-    async def generate_suggestions(self, context, provider="openrouter", model_name="google/gemini-2.0-flash-lite-preview-02-05:free"):
+    async def generate_suggestions(self, context, provider="openrouter", model_name="google/gemini-2.0-flash-lite-preview-02-05:free", past_sessions=None):
         # 1. Safely Extract Training Context
         # NOTE: `context` here is the raw training session dict returned by
         # Trainer.get_training_status() - a FLAT dict (task, dataset_id,
@@ -98,16 +98,21 @@ class LLMAdvisor:
             "for extreme edge microcontrollers (e.g., ESP32, Raspberry Pi Pico, Arduino Nano).\n\n"
             "Analyze the provided dataset constraints, hyperparameters, and epoch metrics history. "
             "Identify issues like overfitting, vanishing gradients, under-capacity, or memory bloat.\n\n"
+            "FIRST, compute a single overall Training Quality Score from 0 to 100 based on: "
+            "final validation accuracy/loss, overfitting gap (train vs val loss), convergence behavior, "
+            "and edge-deployment readiness. 90-100 = excellent, 70-89 = good, 50-69 = needs work, below 50 = poor.\n\n"
             "You MUST respond STRICTLY in valid JSON format as a list of objects. Do not include markdown formatting like ```json. "
             "Each object must precisely match this schema:\n"
             "[\n"
             "  {\n"
+            "    \"quality_score\": 75,\n"
             "    \"suggestion\": \"Short, actionable title\",\n"
             "    \"reasoning\": \"Deep, metric-driven explanation of why this will help.\",\n"
             "    \"parameters_to_adjust\": {\"learning_rate\": 0.0005, \"batch_size\": 16},\n"
             "    \"estimated_improvement\": \"Expected result on accuracy or RAM/Flash.\"\n"
             "  }\n"
-            "]"
+            "]\n"
+            "The quality_score MUST be the same integer in every object in the list — it is the single overall score for this training run."
         )
 
         # 5. Inject the Real-Time Variables into the User Prompt
@@ -133,8 +138,12 @@ class LLMAdvisor:
 
         [METRICS HISTORY (Last {len(metrics_summary)} Epochs)]
         {json.dumps(metrics_summary, indent=2)}
-
-        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.
+        {f'''
+        [PAST TRAINING TRIALS ON THIS DATASET]
+        The user has run {len(past_sessions)} previous training(s) on the same dataset. Analyze these to identify what worked, what didn't, and avoid repeating failed approaches.
+        {json.dumps(past_sessions, indent=2)}
+        ''' if past_sessions else ''}
+        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{f' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
         """
 
         # 6. Dispatch to your LLM API Wrapper (e.g., OpenRouter, OpenAI, or Ollama)

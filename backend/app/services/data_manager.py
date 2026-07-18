@@ -240,11 +240,12 @@ class DataManager:
         filename: str,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        annotations: Optional[list] = None,
     ) -> str:
         if dataset_id not in self.datasets:
             raise ValueError("Dataset not found")
         sample_id = str(uuid.uuid4())
-        self.samples[sample_id] = {
+        sample_dict = {
             "id": sample_id,
             "dataset_id": dataset_id,
             "label": label,
@@ -256,6 +257,9 @@ class DataManager:
             "width": width,
             "height": height,
         }
+        if annotations:
+            sample_dict["annotations"] = annotations
+        self.samples[sample_id] = sample_dict
         # Write binary first, then update metadata - avoids orphaned records
         self._write_sample_file(sample_id, data)
         self._index_add(sample_id, dataset_id, label)
@@ -297,7 +301,7 @@ class DataManager:
             content = item["content"]
             label = item["label"]
 
-            self.samples[sample_id] = {
+            sample_dict = {
                 "id": sample_id,
                 "dataset_id": dataset_id,
                 "label": label,
@@ -309,6 +313,10 @@ class DataManager:
                 "width": item.get("width"),
                 "height": item.get("height"),
             }
+            annotations = item.get("annotations")
+            if annotations:
+                sample_dict["annotations"] = annotations
+            self.samples[sample_id] = sample_dict
             # Write the binary immediately - one file, one write, done.
             self._write_sample_file(sample_id, content)
             self._index_add(sample_id, dataset_id, label)
@@ -683,3 +691,80 @@ class DataManager:
         self.samples[sample_id]["updated_at"] = time.time()
         self._save_metadata()
         return True
+
+    # ------------------------------------------------------------------
+    # Annotations
+    # ------------------------------------------------------------------
+
+    def get_sample_annotations(self, sample_id: str) -> Optional[list]:
+        """Get bounding box annotations for a single sample."""
+        sample = self.samples.get(sample_id)
+        if not sample:
+            return None
+        return sample.get("annotations")
+
+    def update_sample_annotations(self, sample_id: str, annotations: list) -> bool:
+        """Replace bounding box annotations for a single sample."""
+        if sample_id not in self.samples:
+            return False
+        self.samples[sample_id]["annotations"] = annotations
+        self.samples[sample_id]["updated_at"] = time.time()
+        self._save_metadata()
+        return True
+
+    def get_dataset_annotation_summary(self, dataset_id: str) -> dict:
+        """Summarize annotation coverage for a dataset.
+
+        Returns:
+            {
+                "has_annotations": bool,
+                "annotated_count": int,
+                "total_count": int,
+                "format": str | None,
+                "classes": [{"name": str, "count": int}],
+                "total_bboxes": int,
+            }
+        """
+        sample_ids = list(self.samples_by_dataset.get(dataset_id, ()))
+        annotated = 0
+        total_bboxes = 0
+        class_counts: Dict[str, int] = {}
+        fmt = None
+
+        for sid in sample_ids:
+            s = self.samples[sid]
+            anns = s.get("annotations")
+            if anns:
+                annotated += 1
+                total_bboxes += len(anns)
+                for a in anns:
+                    cn = a.get("class_name", "unknown")
+                    class_counts[cn] = class_counts.get(cn, 0) + 1
+
+        dataset = self.datasets.get(dataset_id, {})
+        annotation_format = dataset.get("metadata", {}).get("annotation_format")
+
+        return {
+            "has_annotations": annotated > 0,
+            "annotated_count": annotated,
+            "total_count": len(sample_ids),
+            "format": annotation_format,
+            "classes": sorted(
+                [{"name": k, "count": v} for k, v in class_counts.items()],
+                key=lambda x: x["count"],
+                reverse=True,
+            ),
+            "total_bboxes": total_bboxes,
+        }
+
+    def update_dataset_annotation_metadata(
+        self, dataset_id: str, annotation_format: str, classes: list
+    ) -> None:
+        """Store detected annotation format and class list on the dataset."""
+        if dataset_id not in self.datasets:
+            return
+        ds = self.datasets[dataset_id]
+        ds.setdefault("metadata", {})
+        ds["metadata"]["annotation_format"] = annotation_format
+        ds["metadata"]["annotation_classes"] = classes
+        self._save_metadata()

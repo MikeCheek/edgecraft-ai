@@ -18,6 +18,10 @@ export interface KaggleDataset {
   last_updated: string
   download_count: number
   description: string
+  vote_count: number
+  usability_rating: number
+  license: string
+  tags: string[]
 }
 
 export interface HuggingFaceDataset {
@@ -25,8 +29,11 @@ export interface HuggingFaceDataset {
   author: string
   title: string
   downloads: number
+  likes: number
   last_modified: string
+  created_at: string
   tags: string[]
+  pipeline_tag: string
   description: string
 }
 
@@ -44,6 +51,7 @@ export interface DownloadProgress {
 export interface DownloadCallbacks {
   onProgress?: (p: DownloadProgress) => void
   onProcessing?: (msg: string) => void
+  onDatasetCreated?: (info: { dataset_id: string; dataset_name: string }) => void
 }
 
 /**
@@ -91,6 +99,14 @@ function streamDownload (
         case 'start':
           downloadId = data.download_id ?? null
           startTime = Date.now()
+          break
+
+        case 'dataset_created':
+          // Emit event when a dataset is auto-created
+          callbacks.onDatasetCreated?.({
+            dataset_id: data.dataset_id,
+            dataset_name: data.dataset_name,
+          })
           break
 
         case 'progress': {
@@ -157,16 +173,14 @@ export const remoteDatasetApi = {
    */
   downloadFromUrl (
     url: string,
-    datasetId: string,
+    datasetId: string | null,
     task: string,
     callbacks: DownloadCallbacks = {},
     signal?: AbortSignal
   ): Promise<number> {
-    return streamDownload(
-      { source: 'url', dataset_id: datasetId, task, url },
-      callbacks,
-      signal
-    )
+    const params: Record<string, string> = { source: 'url', task, url }
+    if (datasetId) params.dataset_id = datasetId
+    return streamDownload(params, callbacks, signal)
   },
 
   async searchKaggle (
@@ -182,21 +196,18 @@ export const remoteDatasetApi = {
    */
   downloadKaggle (
     datasetRef: string,
-    datasetId: string,
+    datasetId: string | null,
     task: string,
     callbacks: DownloadCallbacks = {},
     signal?: AbortSignal
   ): Promise<number> {
-    return streamDownload(
-      {
-        source: 'kaggle',
-        dataset_id: datasetId,
-        task,
-        dataset_ref: datasetRef
-      },
-      callbacks,
-      signal
-    )
+    const params: Record<string, string> = {
+      source: 'kaggle',
+      task,
+      dataset_ref: datasetRef,
+    }
+    if (datasetId) params.dataset_id = datasetId
+    return streamDownload(params, callbacks, signal)
   },
 
   async searchHuggingFace (
@@ -214,15 +225,17 @@ export const remoteDatasetApi = {
    */
   downloadHuggingFace (
     repoId: string,
-    datasetId: string,
+    datasetId: string | null,
     task: string,
     callbacks: DownloadCallbacks = {},
     signal?: AbortSignal
   ): Promise<number> {
-    return streamDownload(
-      { source: 'huggingface', dataset_id: datasetId, task, repo_id: repoId },
-      callbacks,
-      signal
-    )
+    const params: Record<string, string> = {
+      source: 'huggingface',
+      task,
+      repo_id: repoId,
+    }
+    if (datasetId) params.dataset_id = datasetId
+    return streamDownload(params, callbacks, signal)
   }
 }

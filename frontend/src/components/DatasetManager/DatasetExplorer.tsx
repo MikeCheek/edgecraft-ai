@@ -1,8 +1,8 @@
-import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2, Regex, Info } from "lucide-react";
-import React, { useCallback, useEffect, useState } from "react";
+import { Database, Tags, X, RefreshCw, FolderPlus, ImageIcon, AlertTriangle, ArrowLeft, FileText, Trash2, Regex, Info, BoxSelect, Upload } from "lucide-react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useAPI } from "../../hooks/useAPI";
 import { useToast } from "../../context/ToastContext";
-import { DatasetInfo, DatasetSample } from "../../types";
+import { DatasetInfo, DatasetSample, AnnotationSummary } from "../../types";
 import ClassManager from "./ClassManager";
 import SampleCard from "./SampleCard";
 import DatasetInfoPanel from "./DatasetInfoPanel";
@@ -27,6 +27,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const { toast } = useToast();
   const [samples, setSamples] = useState<DatasetSample[]>([]);
   const [allLabels, setAllLabels] = useState<string[]>([]);
+  const [annotationSummary, setAnnotationSummary] = useState<AnnotationSummary | null>(null);
 
   const [viewingSample, setViewingSample] = useState<DatasetSample | null>(null);
 
@@ -55,16 +56,24 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   const [bulkRegex, setBulkRegex] = useState('^([^_]+)');
   const [isBulkRelabeling, setIsBulkRelabeling] = useState(false);
 
+  // Annotation upload state
+  const annotationFileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingAnnotations, setIsUploadingAnnotations] = useState(false);
+
   const fetchAll = useCallback(async () => {
     setIsLoading(true);
-    const [rawSamples, rawLabels] = await Promise.all([
+    const [rawSamples, rawLabels, rawAnnSummary] = await Promise.all([
       request(() => apiClient.listSamples(dataset.id)),
       request(() => apiClient.getDatasetLabels(dataset.id)),
+      dataset.task === 'OBJECT_DETECTION'
+        ? request(() => apiClient.getAnnotationSummary(dataset.id))
+        : Promise.resolve(null),
     ]);
     if (rawSamples?.samples) setSamples(rawSamples.samples);
     if (rawLabels?.labels) setAllLabels(rawLabels.labels);
+    if (rawAnnSummary && typeof rawAnnSummary === 'object' && 'has_annotations' in rawAnnSummary) setAnnotationSummary(rawAnnSummary as AnnotationSummary);
     setIsLoading(false);
-  }, [dataset.id, request, apiClient]);
+  }, [dataset.id, dataset.task, request, apiClient]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -160,6 +169,32 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     onChanged();
   };
 
+  const handleAnnotationUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploadingAnnotations(true);
+    try {
+      const res = await apiClient.uploadAnnotations(dataset.id, file);
+      if (res.status === 'success') {
+        toast('success', `Matched annotations to ${res.annotations_matched} samples (${(res.annotation_format || 'unknown').toUpperCase()})`);
+        await fetchAll();
+        onChanged();
+      } else {
+        toast('error', res.message || 'Annotation upload failed');
+      }
+    } catch (err: any) {
+      toast('error', err.message || 'Annotation upload failed');
+    } finally {
+      setIsUploadingAnnotations(false);
+      if (annotationFileInputRef.current) annotationFileInputRef.current.value = '';
+    }
+  };
+
+  const handleSaveAnnotations = async () => {
+    await fetchAll();
+    onChanged();
+  };
+
   // --- Derived Data ---
 
   const visible = samples.filter(s => {
@@ -168,6 +203,8 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
     const passFileType = filterFileType === 'ALL' || getExt(s.filename) === filterFileType;
     return passLabel && passSplit && passFileType;
   });
+
+  const isOD = dataset.task === 'OBJECT_DETECTION';
 
   const countByLabel = allLabels.reduce<Record<string, number>>((acc, l) => {
     acc[l] = samples.filter(s => s.label === l).length; return acc;
@@ -185,11 +222,10 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
   }, {});
   const fileTypes = Object.keys(countByFileType).sort();
 
-  // Class Imbalance Check
   const counts = allLabels.map(l => countByLabel[l] ?? 0);
-  const minCount = Math.min(...counts);
-  const maxCount = Math.max(...counts);
-  const hasImbalance = allLabels.length > 1 && maxCount > 0 && (minCount / maxCount) < 0.6;
+  const minCount = counts.length > 0 ? Math.min(...counts) : 0;
+  const maxCount = counts.length > 0 ? Math.max(...counts) : 0;
+  const hasImbalance = !isOD && allLabels.length > 1 && maxCount > 0 && (minCount / maxCount) < 0.6;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
@@ -224,10 +260,13 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
 
         {viewingSample && (
           <ImageEditorModal
-            imageUrl={`${apiBase}/datasets/image/${viewingSample.id}${viewingSample.updated_at ? `?v=${viewingSample.updated_at}` : ''}`}
+            imageUrl={`/api/datasets/image/${viewingSample.id}${viewingSample.updated_at ? `?v=${viewingSample.updated_at}` : ''}`}
+            sampleId={viewingSample.id}
             sampleLabel={viewingSample.label}
+            annotations={viewingSample.annotations}
             onClose={() => setViewingSample(null)}
             onSaveCrop={handleSaveCrop}
+            onAnnotationsSaved={handleSaveAnnotations}
           />
         )}
 
@@ -237,7 +276,32 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
             <Database className="w-5 h-5 text-purple-400" />
             <div>
               <h2 className="text-lg font-bold text-white">{dataset.name}</h2>
-              <p className="text-xs text-gray-400">{samples.length} samples, {allLabels.length} classes</p>
+              <div className="flex items-center gap-3 text-xs text-gray-400">
+                {isOD ? (
+                  <>
+                    <span>{samples.length} images</span>
+                    {annotationSummary ? (
+                      <span className="flex items-center gap-1 text-emerald-400">
+                        <BoxSelect className="w-3 h-3" />
+                        {annotationSummary.annotated_count}/{annotationSummary.total_count} annotated
+                        ({annotationSummary.total_bboxes} boxes, {annotationSummary.format?.toUpperCase()})
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-amber-400">
+                        <BoxSelect className="w-3 h-3" />
+                        No annotations yet
+                      </span>
+                    )}
+                    {annotationSummary && annotationSummary.classes.length > 0 && (
+                      <span className="text-purple-400">
+                        {annotationSummary.classes.length} object classes
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span>{samples.length} samples, {allLabels.length} classes</span>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -245,14 +309,29 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
               className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showInfoPanel ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
               <Info className="w-4 h-4" /> Dataset Info
             </button>
-            <button onClick={() => setShowRegexModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600 transition">
-              <Regex className="w-4 h-4" /> Regex Relabel
-            </button>
-            <button onClick={() => setShowClassManager(v => !v)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showClassManager ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
-              <Tags className="w-4 h-4" /> Manage Classes
-            </button>
+            {!isOD && (
+              <button onClick={() => setShowRegexModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600 transition">
+                <Regex className="w-4 h-4" /> Regex Relabel
+              </button>
+            )}
+            {isOD && (
+              <>
+                <button onClick={() => annotationFileInputRef.current?.click()}
+                  disabled={isUploadingAnnotations}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600 transition disabled:opacity-50">
+                  {isUploadingAnnotations ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />} Upload Annotations
+                </button>
+                <input type="file" ref={annotationFileInputRef} onChange={handleAnnotationUpload}
+                  accept=".zip,.txt,.xml,.json,.csv" className="hidden" />
+              </>
+            )}
+            {!isOD && (
+              <button onClick={() => setShowClassManager(v => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border transition ${showClassManager ? 'bg-purple-700 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-gray-300 hover:bg-slate-600'}`}>
+                <Tags className="w-4 h-4" /> Manage Classes
+              </button>
+            )}
             <button onClick={onClose} className="p-2 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition">
               <X className="w-5 h-5" />
             </button>
@@ -361,24 +440,48 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
               </div>
             </div>
 
-            {/* Classes Section */}
-            <div>
-              <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
-                <Tags className="w-4 h-4" /> Browse by Class
-              </h3>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                <button onClick={() => handleGroupClick('class', 'ALL')} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-purple-500 text-left transition group">
-                  <div className="text-lg font-bold text-white group-hover:text-purple-400">All Samples</div>
-                  <div className="text-xs text-gray-500 mt-1">{samples.length} items</div>
-                </button>
-                {allLabels.map(l => (
-                  <button key={l} onClick={() => handleGroupClick('class', l)} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-purple-500 text-left transition group">
-                    <div className="text-lg font-bold text-white group-hover:text-purple-400 truncate" title={l}>{l}</div>
-                    <div className="text-xs text-gray-500 mt-1">{countByLabel[l] ?? 0} items</div>
-                  </button>
-                ))}
+            {/* Classes / Annotation Classes Section */}
+            {isOD ? (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
+                  <BoxSelect className="w-4 h-4" /> Browse by Annotation Class
+                </h3>
+                {annotationSummary && annotationSummary.classes.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                    {annotationSummary.classes.map(c => (
+                      <div key={c.name} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-emerald-500 transition">
+                        <div className="text-lg font-bold text-emerald-400 truncate" title={c.name}>{c.name}</div>
+                        <div className="text-xs text-gray-500 mt-1">{c.count} bounding boxes</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-6 bg-slate-800/50 rounded-xl border border-slate-700 text-center">
+                    <BoxSelect className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+                    <p className="text-sm text-gray-400">No annotations uploaded yet</p>
+                    <p className="text-xs text-gray-500 mt-1">Upload annotation files (YOLO, COCO, VOC, CSV) using the button above</p>
+                  </div>
+                )}
               </div>
-            </div>
+            ) : (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-400 mb-3 flex items-center gap-2">
+                  <Tags className="w-4 h-4" /> Browse by Class
+                </h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  <button onClick={() => handleGroupClick('class', 'ALL')} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-purple-500 text-left transition group">
+                    <div className="text-lg font-bold text-white group-hover:text-purple-400">All Samples</div>
+                    <div className="text-xs text-gray-500 mt-1">{samples.length} items</div>
+                  </button>
+                  {allLabels.map(l => (
+                    <button key={l} onClick={() => handleGroupClick('class', l)} className="p-4 bg-slate-800 rounded-xl border border-slate-700 hover:border-purple-500 text-left transition group">
+                      <div className="text-lg font-bold text-white group-hover:text-purple-400 truncate" title={l}>{l}</div>
+                      <div className="text-xs text-gray-500 mt-1">{countByLabel[l] ?? 0} items</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
           </div>
         ) : (

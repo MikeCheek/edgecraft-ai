@@ -1,7 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import io
 
 from app.services.shared_state import trainer
@@ -68,6 +68,7 @@ class LLMSuggestRequest(BaseModel):
     training_id: str
     provider: str = "openrouter"
     model_name: str = "openrouter/free"
+    past_sessions: Optional[List[dict]] = None
 
 class LLMOptimizeRequest(BaseModel):
     optimization_id: str
@@ -298,6 +299,7 @@ async def get_llm_suggestions(request: LLMSuggestRequest):
             context=session_context,
             provider=request.provider,
             model_name=request.model_name,
+            past_sessions=request.past_sessions,
         )
         return {"status": "success", "suggestions": suggestions}
     except Exception as e:

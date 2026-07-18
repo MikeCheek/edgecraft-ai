@@ -1,35 +1,45 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { X, Crop as CropIcon, Check, RefreshCw, Maximize2 } from 'lucide-react';
+import { X, Crop as CropIcon, Check, RefreshCw, Maximize2, BoxSelect, Pencil, Trash2 } from 'lucide-react';
+import { BoundingBox } from '../../types';
+import AnnotationOverlay from './AnnotationOverlay';
+import { useAPI } from '../../hooks/useAPI';
 
 interface CropBox { x: number; y: number; width: number; height: number; }
 
 interface ImageEditorModalProps {
-  imageUrl: string; // the API URL (with cache-bust query), fetched as a blob internally
+  imageUrl: string;
+  sampleId?: string;
   sampleLabel?: string;
+  annotations?: BoundingBox[];
   onClose: () => void;
   onSaveCrop: (blob: Blob) => Promise<void>;
+  onAnnotationsSaved?: () => void;
 }
 
 const HANDLE_SIZE = 12;
+const CLASS_COLORS = ['#22c55e','#3b82f6','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#6366f1'];
 
-function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageEditorModalProps) {
-  const [mode, setMode] = useState<'view' | 'crop'>('view');
-  const [blobUrl, setBlobUrl] = useState<string | null>(null); // NEW
-  const [loadError, setLoadError] = useState(false); // NEW
+function ImageEditorModal({ imageUrl, sampleId, sampleLabel, annotations, onClose, onSaveCrop, onAnnotationsSaved }: ImageEditorModalProps) {
+  const { apiClient } = useAPI();
+  const [mode, setMode] = useState<'view' | 'crop' | 'annotate'>('view');
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [naturalSize, setNaturalSize] = useState({ w: 0, h: 0 });
   const [displaySize, setDisplaySize] = useState({ w: 0, h: 0 });
   const [box, setBox] = useState<CropBox>({ x: 0, y: 0, width: 0, height: 0 });
   const [drag, setDrag] = useState<{ mode: 'move' | 'resize'; handle?: string; startX: number; startY: number; origBox: CropBox } | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // Annotate mode state
+  const [editAnnotations, setEditAnnotations] = useState<BoundingBox[]>(annotations || []);
+  const [activeClass, setActiveClass] = useState('');
+  const [drawingBox, setDrawingBox] = useState<CropBox | null>(null);
+  const [drawDrag, setDrawDrag] = useState<{ startX: number; startY: number } | null>(null);
+  const [savingAnnotations, setSavingAnnotations] = useState(false);
+
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // NEW: fetch the image as a blob and load from an object URL instead of
-  // the raw API URL. A blob: URL is always same-origin for canvas purposes,
-  // so canvas.toBlob() in handleApplyCrop won't throw "Tainted canvases may
-  // not be exported" - which <img src={crossOriginUrl}> would trigger even
-  // though the browser happily *displays* a cross-origin image fine.
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
@@ -55,6 +65,10 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
     };
   }, [imageUrl]);
 
+  useEffect(() => {
+    setEditAnnotations(annotations || []);
+  }, [annotations]);
+
   const handleImgLoad = () => {
     const img = imgRef.current;
     if (!img) return;
@@ -73,6 +87,7 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
     return { x, y, width, height };
   }, [displaySize]);
 
+  // --- Crop mode drag handlers ---
   const onMouseDownMove = (e: React.MouseEvent) => {
     e.stopPropagation();
     setDrag({ mode: 'move', startX: e.clientX, startY: e.clientY, origBox: box });
@@ -109,6 +124,76 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
       window.removeEventListener('mouseup', onUp);
     };
   }, [drag, clamp]);
+
+  // --- Annotate mode draw handlers ---
+  const onAnnotateMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const startX = e.clientX - rect.left;
+    const startY = e.clientY - rect.top;
+    setDrawingBox({ x: startX, y: startY, width: 0, height: 0 });
+    setDrawDrag({ startX, startY });
+  };
+
+  useEffect(() => {
+    if (!drawDrag || !drawingBox) return;
+    const onMove = (e: MouseEvent) => {
+      const container = containerRef.current?.querySelector('.annotate-target') as HTMLElement;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const curX = Math.max(0, Math.min(e.clientX - rect.left, displaySize.w));
+      const curY = Math.max(0, Math.min(e.clientY - rect.top, displaySize.h));
+      const x = Math.min(drawDrag.startX, curX);
+      const y = Math.min(drawDrag.startY, curY);
+      const width = Math.abs(curX - drawDrag.startX);
+      const height = Math.abs(curY - drawDrag.startY);
+      setDrawingBox({ x, y, width, height });
+    };
+    const onUp = () => {
+      if (drawingBox && drawingBox.width > 5 && drawingBox.height > 5) {
+        const scaleX = naturalSize.w / displaySize.w;
+        const scaleY = naturalSize.h / displaySize.h;
+        const newBbox: BoundingBox = {
+          class_name: activeClass || `class_${editAnnotations.length + 1}`,
+          cx: ((drawingBox.x + drawingBox.width / 2) * scaleX) / naturalSize.w,
+          cy: ((drawingBox.y + drawingBox.height / 2) * scaleY) / naturalSize.h,
+          w: (drawingBox.width * scaleX) / naturalSize.w,
+          h: (drawingBox.height * scaleY) / naturalSize.h,
+        };
+        setEditAnnotations(prev => [...prev, newBbox]);
+      }
+      setDrawingBox(null);
+      setDrawDrag(null);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [drawDrag, drawingBox, displaySize, naturalSize, activeClass, editAnnotations.length]);
+
+  const handleSaveAnnotations = async () => {
+    if (!sampleId) return;
+    setSavingAnnotations(true);
+    try {
+      await apiClient.updateSampleAnnotations(sampleId, editAnnotations);
+      onAnnotationsSaved?.();
+      setMode('view');
+    } catch {
+      // error handled by API client
+    } finally {
+      setSavingAnnotations(false);
+    }
+  };
+
+  const handleDeleteAnnotation = (index: number) => {
+    setEditAnnotations(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // Discover unique class names from existing annotations
+  const knownClasses = [...new Set(editAnnotations.map(a => a.class_name))];
+  if (activeClass && !knownClasses.includes(activeClass)) knownClasses.push(activeClass);
 
   const handleApplyCrop = async () => {
     const img = imgRef.current;
@@ -155,14 +240,48 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4">
       <div className="w-full max-w-4xl max-h-[90vh] flex flex-col bg-slate-900 rounded-2xl border border-slate-700 shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-700 bg-slate-800/50">
-          <span className="text-sm font-semibold text-white truncate">{sampleLabel}</span>
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="text-sm font-semibold text-white truncate">{sampleLabel}</span>
+            {mode === 'annotate' && (
+              <span className="flex items-center gap-1 px-2 py-0.5 bg-indigo-600/80 text-white text-[10px] font-bold rounded-full shrink-0">
+                <Pencil className="w-3 h-3" /> Annotate ({editAnnotations.length} boxes)
+              </span>
+            )}
+            {mode !== 'annotate' && annotations && annotations.length > 0 && (
+              <span className="flex items-center gap-1 px-2 py-0.5 bg-emerald-600/80 text-white text-[10px] font-bold rounded-full shrink-0">
+                <BoxSelect className="w-3 h-3" /> {annotations.length} bbox
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2">
-            {mode === 'view' ? (
-              <button onClick={() => setMode('crop')} disabled={!blobUrl}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white transition">
-                <CropIcon className="w-3.5 h-3.5" /> Crop
-              </button>
-            ) : (
+            {mode === 'view' && (
+              <>
+                {sampleId && (
+                  <button onClick={() => { setMode('annotate'); setEditAnnotations(annotations || []); }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition">
+                    <Pencil className="w-3.5 h-3.5" /> Annotate
+                  </button>
+                )}
+                <button onClick={() => setMode('crop')} disabled={!blobUrl}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white transition">
+                  <CropIcon className="w-3.5 h-3.5" /> Crop
+                </button>
+              </>
+            )}
+            {mode === 'annotate' && (
+              <>
+                <button onClick={() => setMode('view')}
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-700 hover:bg-slate-600 text-gray-300 transition">
+                  Cancel
+                </button>
+                <button onClick={handleSaveAnnotations} disabled={savingAnnotations}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white transition">
+                  {savingAnnotations ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  Save Annotations
+                </button>
+              </>
+            )}
+            {mode === 'crop' && (
               <>
                 <button onClick={() => setMode('view')}
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-700 hover:bg-slate-600 text-gray-300 transition">
@@ -180,6 +299,30 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
             </button>
           </div>
         </div>
+
+        {/* Annotate mode toolbar */}
+        {mode === 'annotate' && (
+          <div className="px-5 py-2 border-b border-slate-700 bg-slate-800/30 flex items-center gap-3 flex-wrap">
+            <span className="text-[11px] text-gray-400 font-medium">Class:</span>
+            {knownClasses.map(cls => {
+              const colorIdx = knownClasses.indexOf(cls) % CLASS_COLORS.length;
+              return (
+                <button key={cls} onClick={() => setActiveClass(cls)}
+                  className={`text-[11px] px-2 py-1 rounded border transition font-medium ${activeClass === cls
+                    ? 'bg-white/10 border-white/30 text-white'
+                    : 'bg-slate-900 border-slate-700 text-gray-400 hover:text-white'}`}
+                  style={activeClass === cls ? { borderColor: CLASS_COLORS[colorIdx] } : {}}>
+                  <span className="inline-block w-2 h-2 rounded-full mr-1.5" style={{ backgroundColor: CLASS_COLORS[colorIdx] }} />
+                  {cls}
+                </button>
+              );
+            })}
+            <input type="text" value={activeClass} onChange={e => setActiveClass(e.target.value)}
+              placeholder="New class..."
+              className="text-[11px] px-2 py-1 bg-slate-900 border border-slate-700 rounded text-white placeholder-gray-500 focus:border-indigo-500 outline-none w-28" />
+            <span className="text-[10px] text-gray-500 ml-auto">Click & drag on the image to draw a bounding box</span>
+          </div>
+        )}
 
         <div className="flex-1 flex items-center justify-center p-6 overflow-auto bg-black/40">
           {loadError ? (
@@ -199,6 +342,56 @@ function ImageEditorModal({ imageUrl, sampleLabel, onClose, onSaveCrop }: ImageE
                 className="max-h-[70vh] max-w-full block"
                 draggable={false}
               />
+              {mode === 'view' && annotations && annotations.length > 0 && naturalSize.w > 0 && (
+                <AnnotationOverlay
+                  annotations={annotations}
+                  imageWidth={naturalSize.w}
+                  imageHeight={naturalSize.h}
+                />
+              )}
+              {mode === 'annotate' && naturalSize.w > 0 && (
+                <>
+                  {/* Existing annotations */}
+                  {editAnnotations.length > 0 && (
+                    <AnnotationOverlay
+                      annotations={editAnnotations}
+                      imageWidth={naturalSize.w}
+                      imageHeight={naturalSize.h}
+                    />
+                  )}
+                  {/* Delete buttons for each annotation */}
+                  {editAnnotations.map((ann, idx) => {
+                    const imgEl = imgRef.current;
+                    if (!imgEl) return null;
+                    const rect = imgEl.getBoundingClientRect();
+                    const imgLeft = imgEl.offsetLeft;
+                    const imgTop = imgEl.offsetTop;
+                    const scaleX = rect.width / naturalSize.w;
+                    const scaleY = rect.height / naturalSize.h;
+                    const cx = ann.cx * naturalSize.w * scaleX + imgLeft;
+                    const cy = ann.cy * naturalSize.h * scaleY + imgTop;
+                    return (
+                      <button key={idx}
+                        onClick={(e) => { e.stopPropagation(); handleDeleteAnnotation(idx); }}
+                        className="absolute z-20 p-0.5 bg-red-600 hover:bg-red-500 rounded text-white shadow-md"
+                        style={{ left: cx - 8, top: cy - 8 }}>
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    );
+                  })}
+                  {/* Draw target overlay */}
+                  <div
+                    className="annotate-target absolute inset-0 z-10"
+                    style={{ cursor: 'crosshair' }}
+                    onMouseDown={onAnnotateMouseDown}
+                  />
+                  {/* In-progress drawing box */}
+                  {drawingBox && drawingBox.width > 0 && drawingBox.height > 0 && (
+                    <div className="absolute border-2 border-dashed border-cyan-400 bg-cyan-400/10 pointer-events-none z-20"
+                      style={{ left: drawingBox.x, top: drawingBox.y, width: drawingBox.width, height: drawingBox.height }} />
+                  )}
+                </>
+              )}
               {mode === 'crop' && naturalSize.w > 0 && (
                 <>
                   <div className="absolute inset-0 pointer-events-none">

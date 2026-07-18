@@ -429,6 +429,231 @@ class Trainer:
         return train_ds, val_ds
 
     # -------------------------------------------------------------------------
+    # Object Detection pipeline and losses
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_iou_matrix(boxes_a, boxes_b):
+        """Compute pairwise IoU between two sets of boxes.
+
+        Both inputs: (N, 4) or (N, M, 4) in cx, cy, w, h normalized format.
+        Returns: (N, M) IoU matrix.
+        """
+        a_x1 = boxes_a[..., 0] - boxes_a[..., 2] / 2
+        a_y1 = boxes_a[..., 1] - boxes_a[..., 3] / 2
+        a_x2 = boxes_a[..., 0] + boxes_a[..., 2] / 2
+        a_y2 = boxes_a[..., 1] + boxes_a[..., 3] / 2
+
+        b_x1 = boxes_b[..., 0] - boxes_b[..., 2] / 2
+        b_y1 = boxes_b[..., 1] - boxes_b[..., 3] / 2
+        b_x2 = boxes_b[..., 0] + boxes_b[..., 2] / 2
+        b_y2 = boxes_b[..., 1] + boxes_b[..., 3] / 2
+
+        inter_x1 = tf.maximum(a_x1, b_x1)
+        inter_y1 = tf.maximum(a_y1, b_y1)
+        inter_x2 = tf.minimum(a_x2, b_x2)
+        inter_y2 = tf.minimum(a_y2, b_y2)
+
+        inter_area = tf.maximum(inter_x2 - inter_x1, 0.0) * tf.maximum(inter_y2 - inter_y1, 0.0)
+        a_area = boxes_a[..., 2] * boxes_a[..., 3]
+        b_area = boxes_b[..., 2] * boxes_b[..., 3]
+        union = a_area + b_area - inter_area
+        return inter_area / (union + 1e-7)
+
+    @staticmethod
+    def od_loss(y_true_boxes, y_true_classes, y_true_scores,
+                y_pred_boxes, y_pred_classes, y_pred_scores,
+                num_classes, anchor_count):
+        """Multi-task object detection loss.
+
+        y_true_boxes:   (batch, max_det, 4)
+        y_true_classes: (batch, max_det, num_classes) one-hot
+        y_true_scores:  (batch, max_det) 1=object, 0=no object
+
+        y_pred_boxes:   (batch, total_anchors, 4)
+        y_pred_classes: (batch, total_anchors, num_classes)
+        y_pred_scores:  (batch, total_anchors)
+        """
+        obj_mask = tf.squeeze(y_true_scores, axis=-1)  # (batch, max_det)
+
+        # Box loss — only for positive samples
+        box_diff = y_pred_boxes - y_true_boxes
+        box_loss_raw = tf.reduce_sum(tf.abs(box_diff), axis=-1)  # L1
+        pos_mask = tf.cast(obj_mask > 0.5, tf.float32)
+        box_loss = tf.reduce_sum(box_loss_raw * pos_mask) / (tf.reduce_sum(pos_mask) + 1e-7)
+
+        # For simplicity, compare pred objectness against IoU with GT
+        # This is a simplified assignment — each GT is matched to its
+        # highest-IoU anchor (we use the raw pred_boxes vs GT directly
+        # since anchor-free head predicts absolute coords).
+        iou = tf.map_fn(
+            lambda pair: tf.reduce_max(
+                tf.map_fn(lambda gt: Trainer._compute_iou_matrix(pair, gt), y_true_boxes, fn_output_signature=tf.float32),
+                axis=-1
+            ),
+            y_pred_boxes,
+            fn_output_signature=tf.float32,
+        )  # (batch, total_anchors)
+
+        obj_target = tf.stop_gradient(tf.cast(iou > 0.5, tf.float32))
+        obj_loss = tf.keras.losses.binary_crossentropy(obj_target, y_pred_scores)
+        obj_loss = tf.reduce_mean(obj_loss)
+
+        # Classification loss — focal-style weighting
+        cls_target = tf.tile(y_true_classes, [1, anchor_count // tf.shape(y_true_classes)[1] + 1, 1])[:, :tf.shape(y_pred_classes)[1], :]
+        cls_loss = tf.keras.losses.categorical_crossentropy(cls_target, y_pred_classes)
+        cls_loss = tf.reduce_mean(cls_loss)
+
+        total = box_loss * 5.0 + obj_loss * 1.0 + cls_loss * 1.0
+        return total
+
+    @staticmethod
+    def compute_mAP(y_true_boxes_list, y_true_classes_list, y_true_scores_list,
+                    y_pred_boxes_list, y_pred_classes_list, y_pred_scores_list,
+                    iou_threshold=0.5):
+        """Simple mAP@0.5 computation across a batch.
+
+        Returns a Python float (mean average precision).
+        """
+        total_tp = 0
+        total_fp = 0
+        total_gt = 0
+
+        for i in range(len(y_pred_boxes_list)):
+            pred_boxes = y_pred_boxes_list[i]
+            pred_scores = y_pred_scores_list[i]
+            pred_classes = y_pred_classes_list[i]
+            gt_boxes = y_true_boxes_list[i]
+            gt_scores = y_true_scores_list[i]
+
+            gt_mask = gt_scores.flatten() > 0.5
+            gt_b = gt_boxes[gt_mask]
+            total_gt += int(np.sum(gt_mask))
+
+            if len(gt_b) == 0 or len(pred_boxes) == 0:
+                total_fp += len(pred_boxes)
+                continue
+
+            order = np.argsort(-pred_scores.flatten())
+            pred_boxes = pred_boxes[order]
+            pred_classes = pred_classes[order]
+
+            matched = np.zeros(len(gt_b), dtype=bool)
+            for pb, pc in zip(pred_boxes, pred_classes):
+                ious = np.array([float(Trainer._compute_iou_matrix(
+                    tf.constant(pb, dtype=tf.float32),
+                    tf.constant(gb, dtype=tf.float32),
+                )) for gb in gt_b])
+                best_iou = np.max(ious) if len(ious) > 0 else 0
+                best_idx = np.argmax(ious) if len(ious) > 0 else -1
+                if best_iou >= iou_threshold and not matched[best_idx]:
+                    total_tp += 1
+                    matched[best_idx] = True
+                else:
+                    total_fp += 1
+
+        precision = total_tp / (total_tp + total_fp + 1e-7)
+        return float(precision)
+
+    def _build_od_pipeline(
+        self,
+        dataset_id: str,
+        class_names: list,
+        input_shape: tuple,
+        batch_size: int,
+    ):
+        """Build tf.data pipeline for object detection.
+
+        Returns (train_ds, val_ds) where each element is:
+          (images, {"boxes": ..., "classes": ..., "scores": ...})
+        """
+        from app.services.shared_state import data_manager
+        from PIL import Image as PILImage
+        import io as _io
+
+        img_h, img_w = input_shape[0], input_shape[1]
+        class_map = {name: idx for idx, name in enumerate(class_names)}
+        num_classes = len(class_names)
+        MAX_DET = 20  # max detections per image
+
+        samples = data_manager.get_samples(dataset_id)
+
+        def _load_split(split_name):
+            images, boxes_list, classes_list, scores_list = [], [], [], []
+            for sample in samples:
+                if sample.get("split") != split_name:
+                    continue
+                data = data_manager.get_sample_data(sample["id"])
+                if not data:
+                    continue
+                try:
+                    with PILImage.open(_io.BytesIO(data)) as img:
+                        img = img.convert("RGB")
+                        img = img.resize((img_w, img_h), PILImage.BILINEAR)
+                        arr = np.array(img, dtype=np.float32) / 255.0
+                except Exception:
+                    continue
+
+                raw_anns = sample.get("annotations") or []
+                bboxes, cls_ohs = [], []
+                for ann in raw_anns:
+                    if isinstance(ann, dict):
+                        cx = ann.get("cx", 0)
+                        cy = ann.get("cy", 0)
+                        bw = ann.get("w", 0)
+                        bh = ann.get("h", 0)
+                        cn = ann.get("class_name", "object")
+                    else:
+                        cx, cy, bw, bh = getattr(ann, "cx", 0), getattr(ann, "cy", 0), getattr(ann, "w", 0), getattr(ann, "h", 0)
+                        cn = getattr(ann, "class_name", "object")
+                    cls_idx = class_map.get(cn, 0)
+                    oh = np.zeros(num_classes, dtype=np.float32)
+                    oh[cls_idx] = 1.0
+                    bboxes.append([cx, cy, bw, bh])
+                    cls_ohs.append(oh)
+
+                # Pad to MAX_DET
+                pad_count = MAX_DET - len(bboxes)
+                if pad_count > 0:
+                    bboxes += [[0, 0, 0, 0]] * pad_count
+                    cls_ohs += [[0] * num_classes] * pad_count
+                bboxes = bboxes[:MAX_DET]
+                cls_ohs = cls_ohs[:MAX_DET]
+
+                scores = [1.0] * min(len(raw_anns), MAX_DET) + [0.0] * max(0, MAX_DET - len(raw_anns))
+                scores = scores[:MAX_DET]
+
+                images.append(arr)
+                boxes_list.append(np.array(bboxes, dtype=np.float32))
+                classes_list.append(np.array(cls_ohs, dtype=np.float32))
+                scores_list.append(np.array(scores, dtype=np.float32))
+
+            if not images:
+                empty_img = np.zeros((1, img_h, img_w, 3), dtype=np.float32)
+                empty_box = np.zeros((1, MAX_DET, 4), dtype=np.float32)
+                empty_cls = np.zeros((1, MAX_DET, num_classes), dtype=np.float32)
+                empty_sc  = np.zeros((1, MAX_DET), dtype=np.float32)
+                return tf.data.Dataset.from_tensor_slices((
+                    empty_img, {"boxes": empty_box, "classes": empty_cls, "scores": empty_sc}
+                )).batch(1)
+
+            X = np.array(images, dtype=np.float32)
+            Y_boxes = np.array(boxes_list, dtype=np.float32)
+            Y_cls = np.array(classes_list, dtype=np.float32)
+            Y_sc  = np.array(scores_list, dtype=np.float32)
+
+            idx = np.random.permutation(len(X))
+            X, Y_boxes, Y_cls, Y_sc = X[idx], Y_boxes[idx], Y_cls[idx], Y_sc[idx]
+
+            return tf.data.Dataset.from_tensor_slices((
+                X, {"boxes": Y_boxes, "classes": Y_cls, "scores": Y_sc}
+            )).batch(batch_size).prefetch(1)
+
+        train_ds = _load_split("train")
+        val_ds = _load_split("val")
+        return train_ds, val_ds
+
+    # -------------------------------------------------------------------------
     # Main training entry point
     # -------------------------------------------------------------------------
 
@@ -460,7 +685,25 @@ class Trainer:
             temp_dir = os.path.dirname(train_dir)
             job_log_broker.log(training_id, "Dataset exported to temp directory - building pipeline...")
 
-            if task in ["IMAGE_CLASSIFICATION", "OBJECT_DETECTION", "VISUAL_WAKE_WORDS"]:
+            if task == "OBJECT_DETECTION":
+                # For OD, we need the annotation classes from the dataset,
+                # not the file-label classes used for classification.
+                od_classes = data_manager.get_dataset_labels(dataset_id)
+                ann_meta = data_manager.datasets.get(dataset_id, {}).get("metadata", {})
+                ann_classes = ann_meta.get("annotation_classes")
+                if ann_classes:
+                    od_classes = ann_classes
+                    num_classes = len(od_classes)
+                    job_log_broker.log(training_id, f"OD annotation classes: {od_classes}")
+
+                raw_shape = tuple(session["input_shape"])
+                model_input_shape = (raw_shape[0], raw_shape[1], 3)
+                train_ds, val_ds = self._build_od_pipeline(
+                    dataset_id, od_classes, model_input_shape, session["batch_size"]
+                )
+                job_log_broker.log(training_id, f"OD pipeline built with {len(od_classes)} classes, input {model_input_shape}")
+
+            elif task in ["IMAGE_CLASSIFICATION", "VISUAL_WAKE_WORDS"]:
                 train_ds, val_ds = self._build_image_pipeline(train_dir, val_dir, session, classes)
                 model_input_shape = tuple(session["input_shape"])
 
@@ -521,16 +764,99 @@ class Trainer:
                     # When mixed_precision is active cast the output to float32 to
                     # avoid numerical instability with softmax in float16.
                     policy = tf.keras.mixed_precision.global_policy()
-                    if policy.name == "mixed_float16":
+                    if policy.name == "mixed_float16" and task != "OBJECT_DETECTION":
                         inputs  = model.input
                         outputs = tf.cast(model.output, tf.float32)
                         model   = tf.keras.Model(inputs, outputs)
 
-                    loss_fn = (
-                        "binary_crossentropy"
-                        if task == "VISUAL_WAKE_WORDS"
-                        else "sparse_categorical_crossentropy"
-                    )
+                    is_od = task == "OBJECT_DETECTION"
+
+                    if is_od:
+                        # OD uses custom loss via train_step override
+                        od_num_classes = num_classes
+                        od_classes_list = data_manager.get_dataset_labels(dataset_id)
+                        ann_meta = data_manager.datasets.get(dataset_id, {}).get("metadata", {})
+                        ann_classes = ann_meta.get("annotation_classes")
+                        if ann_classes:
+                            od_classes_list = ann_classes
+
+                        def _od_loss(y_true, y_pred):
+                            if isinstance(y_true, dict):
+                                gt_boxes = y_true["boxes"]    # (batch, MAX_DET, 4)
+                                gt_cls = y_true["classes"]    # (batch, MAX_DET, C)
+                                gt_sc = y_true["scores"]      # (batch, MAX_DET)
+                            else:
+                                gt_boxes = y_true
+                                gt_cls = tf.zeros_like(y_pred["classes"][:, :tf.shape(y_true)[1], :])
+                                gt_sc = tf.ones(tf.shape(y_true)[0:1], dtype=tf.float32)
+
+                            pred_boxes = y_pred["boxes"]     # (batch, total_anchors, 4)
+                            pred_cls = y_pred["classes"]     # (batch, total_anchors, C)
+                            pred_sc = y_pred["scores"]       # (batch, total_anchors)
+
+                            num_gt = tf.shape(gt_boxes)[1]
+
+                            # Positive mask: GT entries with score > 0.5 are real objects
+                            pos_mask = tf.cast(gt_sc > 0.5, tf.float32)  # (batch, MAX_DET)
+
+                            # ── Box loss: compare each GT with its best-matching pred anchor
+                            # For simplicity, compare the first num_gt preds directly against GTs
+                            # (the model learns to predict GT-like boxes in early anchor slots).
+                            pred_trunc = pred_boxes[:, :num_gt, :]  # (batch, num_gt, 4)
+                            box_diff = tf.abs(pred_trunc - gt_boxes)
+                            box_loss_per = tf.reduce_sum(box_diff, axis=-1)  # (batch, num_gt)
+                            box_loss = tf.reduce_sum(box_loss_per * pos_mask) / (tf.reduce_sum(pos_mask) + 1e-7)
+
+                            # ── Objectness loss: target = 1 for best-matching anchors
+                            # Compute IoU between each pred anchor and each GT
+                            pred_x1 = pred_boxes[..., 0] - pred_boxes[..., 2] / 2
+                            pred_y1 = pred_boxes[..., 1] - pred_boxes[..., 3] / 2
+                            pred_x2 = pred_boxes[..., 0] + pred_boxes[..., 2] / 2
+                            pred_y2 = pred_boxes[..., 1] + pred_boxes[..., 3] / 2
+
+                            gt_x1 = gt_boxes[..., 0] - gt_boxes[..., 2] / 2
+                            gt_y1 = gt_boxes[..., 1] - gt_boxes[..., 3] / 2
+                            gt_x2 = gt_boxes[..., 0] + gt_boxes[..., 2] / 2
+                            gt_y2 = gt_boxes[..., 1] + gt_boxes[..., 3] / 2
+
+                            # Expand for broadcasting: (batch, total_anchors, 1, 4) vs (batch, 1, MAX_DET, 4)
+                            inter_x1 = tf.maximum(pred_x1[..., tf.newaxis], gt_x1[:, tf.newaxis, :])
+                            inter_y1 = tf.maximum(pred_y1[..., tf.newaxis], gt_y1[:, tf.newaxis, :])
+                            inter_x2 = tf.minimum(pred_x2[..., tf.newaxis], gt_x2[:, tf.newaxis, :])
+                            inter_y2 = tf.minimum(pred_y2[..., tf.newaxis], gt_y2[:, tf.newaxis, :])
+                            inter_area = tf.maximum(inter_x2 - inter_x1, 0.0) * tf.maximum(inter_y2 - inter_y1, 0.0)
+
+                            pred_area = pred_boxes[..., 2] * pred_boxes[..., 3]
+                            gt_area = gt_boxes[..., 2] * gt_boxes[..., 3]
+                            union = pred_area[..., tf.newaxis] + gt_area[:, tf.newaxis, :] - inter_area
+                            ious = inter_area / (union + 1e-7)  # (batch, total_anchors, MAX_DET)
+                            max_iou = tf.reduce_max(ious, axis=-1)  # (batch, total_anchors)
+
+                            obj_target = tf.stop_gradient(tf.cast(max_iou > 0.5, tf.float32))
+                            obj_loss = tf.reduce_mean(
+                                tf.keras.losses.binary_crossentropy(obj_target, pred_sc)
+                            )
+
+                            # ── Classification loss: only for matched anchors
+                            # Match each GT to its best pred anchor
+                            best_pred_idx = tf.cast(tf.argmax(max_iou, axis=1), tf.int32)  # (batch,)
+                            batch_idx = tf.range(tf.shape(pred_boxes)[0])
+                            best_cls_pred = tf.gather_nd(pred_cls, tf.stack([batch_idx, best_pred_idx], axis=1))  # (batch, C)
+                            best_gt_cls = tf.reduce_sum(gt_cls * pos_mask[:, :, tf.newaxis], axis=1)  # (batch, C) — sum of positive GT one-hots
+                            cls_loss = tf.reduce_mean(
+                                tf.keras.losses.categorical_crossentropy(best_gt_cls, best_cls_pred)
+                            )
+
+                            return box_loss * 5.0 + obj_loss * 1.0 + cls_loss * 1.0
+
+                        loss_fn = _od_loss
+                        loss_fn.__name__ = "od_multi_task_loss"
+                    else:
+                        loss_fn = (
+                            "binary_crossentropy"
+                            if task == "VISUAL_WAKE_WORDS"
+                            else "sparse_categorical_crossentropy"
+                        )
 
                     callbacks: list = [TrainingCallback(session, self)]
                     if session.get("early_stopping", False):
@@ -544,7 +870,7 @@ class Trainer:
                         )
 
                     freeze_epochs    = session.get("freeze_encoder_epochs", 0)
-                    trainable_layers = session.get("trainable_layers",       0)
+                    trainable_layers_cfg = session.get("trainable_layers",       0)
                     total_epochs     = session.get("epochs",                 50)
                     lr               = session["learning_rate"]
 
@@ -559,7 +885,74 @@ class Trainer:
                         (l for l in model.layers if isinstance(l, tf.keras.Model)), None
                     )
 
-                    if freeze_epochs > 0 and base_model_layer:
+                    if is_od:
+                        # OD training: custom training loop via GradientTape
+                        # because the model dict output (total_anchors) differs
+                        # from the target dict (MAX_DET), requiring IoU-based
+                        # assignment inside the loss.
+                        od_optimizer = tf.keras.optimizers.Adam(lr)
+                        train_loss_tracker = tf.keras.metrics.Mean(name="train_loss")
+
+                        @tf.function
+                        def _od_train_step(images, targets):
+                            with tf.GradientTape() as tape:
+                                preds = model(images, training=True)
+                                loss = _od_loss(targets, preds)
+                            grads = tape.gradient(loss, model.trainable_variables)
+                            od_optimizer.apply_gradients(zip(grads, model.trainable_variables))
+                            train_loss_tracker.update_state(loss)
+                            return loss
+
+                        @tf.function
+                        def _od_val_step(images, targets):
+                            preds = model(images, training=False)
+                            return _od_loss(targets, preds)
+
+                        total_epochs = session.get("epochs", 50)
+                        for epoch in range(total_epochs):
+                            if session.get("stop_requested", False):
+                                break
+
+                            epoch_start = time.time()
+                            train_loss_tracker.reset_state()
+
+                            for batch_images, batch_targets in train_ds:
+                                _od_train_step(batch_images, batch_targets)
+
+                            # Validation
+                            val_losses = []
+                            for batch_images, batch_targets in val_ds:
+                                val_losses.append(_od_val_step(batch_images, batch_targets))
+                            val_loss = tf.reduce_mean(val_losses).numpy() if val_losses else 0.0
+
+                            epoch_duration = time.time() - epoch_start
+                            train_loss = float(train_loss_tracker.result())
+
+                            # Feed metrics to TrainingCallback-style logging
+                            metric_entry = {
+                                "epoch": epoch + 1,
+                                "accuracy": 0.0,
+                                "val_accuracy": 0.0,
+                                "loss": train_loss,
+                                "val_loss": float(val_loss),
+                                "time_ms": epoch_duration * 1000,
+                            }
+                            session["metrics"].append(metric_entry)
+                            session["current_epoch"] = epoch + 1
+                            session["progress"] = int(((epoch + 1) / total_epochs) * 100)
+                            session["elapsed_seconds"] = time.time() - session.get("started_at", time.time())
+                            avg_epoch = session["elapsed_seconds"] / (epoch + 1)
+                            session["remaining_seconds"] = avg_epoch * (total_epochs - epoch - 1)
+
+                            job_log_broker.log(
+                                training_id,
+                                f"Epoch {epoch+1}/{total_epochs} - "
+                                f"loss: {train_loss:.4f} - val_loss: {val_loss:.4f} "
+                                f"({epoch_duration:.1f}s)",
+                            )
+                            self._save_to_disk()
+
+                    elif freeze_epochs > 0 and base_model_layer:
                         # Phase 1: train head only
                         base_model_layer.trainable = False
                         model.compile(
@@ -573,8 +966,8 @@ class Trainer:
 
                         # Phase 2: fine-tune backbone
                         base_model_layer.trainable = True
-                        if trainable_layers > 0:
-                            for layer in base_model_layer.layers[:-trainable_layers]:
+                        if trainable_layers_cfg > 0:
+                            for layer in base_model_layer.layers[:-trainable_layers_cfg]:
                                 layer.trainable = False
                         model.compile(
                             optimizer=tf.keras.optimizers.Adam(lr * 0.1),

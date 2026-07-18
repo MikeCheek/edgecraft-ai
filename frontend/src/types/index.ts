@@ -22,6 +22,27 @@ export type QuantizationMethod =
 
 export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
 
+// ── Object Detection Annotations ──────────────────────────────────────
+export interface BoundingBox {
+  class_name: string
+  cx: number  // normalized center x (0-1)
+  cy: number  // normalized center y (0-1)
+  w: number   // normalized width (0-1)
+  h: number   // normalized height (0-1)
+  confidence?: number
+}
+
+export type AnnotationFormat = 'yolo' | 'voc' | 'coco' | 'csv'
+
+export interface AnnotationSummary {
+  has_annotations: boolean
+  annotated_count: number
+  total_count: number
+  format: AnnotationFormat | null
+  classes: { name: string; count: number }[]
+  total_bboxes: number
+}
+
 // Which LLM backend to use for AI-assisted suggestions. Mirrors the
 // `provider` field accepted by /api/optimization/llm-suggest and
 // /api/training/recommend.
@@ -58,14 +79,16 @@ export interface DatasetInfo {
   task: TinyMLTask
   sample_count: number
   created_at: number
-  // NEW: user-editable free text description, plus a small metadata bag
-  // (currently just a cached `image_stats`) surfaced to the LLM advisor.
   description?: string
   metadata?: {
     image_stats?: DatasetImageStats
     image_stats_computed_at?: number
+    annotation_format?: AnnotationFormat
+    annotation_classes?: string[]
     [key: string]: any
   }
+  annotation_format?: AnnotationFormat | null
+  annotation_classes?: string[]
 }
 
 export interface DatasetSample {
@@ -80,6 +103,7 @@ export interface DatasetSample {
   width?: number | null
   height?: number | null
   updated_at?: number
+  annotations?: BoundingBox[]
 }
 
 export interface TrainingConfig {
@@ -183,6 +207,7 @@ export interface BoardRecommendation {
 }
 
 export interface LLMSuggestion {
+  quality_score: number
   suggestion: string
   reasoning: string
   parameters_to_adjust: Record<string, any>

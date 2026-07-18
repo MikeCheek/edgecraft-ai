@@ -1,6 +1,7 @@
-import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2, Maximize2 } from 'lucide-react';
+import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2, Maximize2, BoxSelect } from 'lucide-react';
 import React, { useState } from 'react'
 import { DatasetSample } from '../../types';
+import AnnotationOverlay from './AnnotationOverlay';
 
 interface SampleCardProps {
   sample: DatasetSample;
@@ -52,15 +53,24 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
             <span className="text-xs text-gray-500">No preview</span>
           </div>
         ) : (
-          <img
-            src={`${apiBase}/datasets/image/${sample.id}${sample.updated_at ? `?v=${sample.updated_at}` : ''}`}
-            alt={sample.label}
-            loading="lazy"
-            decoding="async"
-            className="w-full h-full object-cover cursor-pointer"
-            onClick={() => onView(sample)}
-            onError={() => setImgError(true)}
-          />
+          <div className="relative w-full h-full">
+            <img
+              src={`/api/datasets/image/${sample.id}${sample.updated_at ? `?v=${sample.updated_at}` : ''}`}
+              alt={sample.label}
+              loading="lazy"
+              decoding="async"
+              className="w-full h-full object-cover cursor-pointer"
+              onClick={() => onView(sample)}
+              onError={() => setImgError(true)}
+            />
+            {sample.annotations && sample.annotations.length > 0 && (
+              <AnnotationOverlay
+                annotations={sample.annotations}
+                imageWidth={sample.width || 640}
+                imageHeight={sample.height || 480}
+              />
+            )}
+          </div>
         )}
         {!isAudio && !imgError && (
           <button
@@ -70,6 +80,12 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
           >
             <Maximize2 className="w-3 h-3 text-white" />
           </button>
+        )}
+        {sample.annotations && sample.annotations.length > 0 && (
+          <span className="absolute bottom-1 left-1 flex items-center gap-0.5 px-1 py-0.5 bg-emerald-600/90 text-white text-[9px] font-bold rounded-md" title={`${sample.annotations.length} bounding box(es)`}>
+            <BoxSelect className="w-2.5 h-2.5" />
+            {sample.annotations.length}
+          </span>
         )}
         <button
           onClick={handleDelete}

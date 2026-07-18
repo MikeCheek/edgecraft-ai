@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
   Eye, Tags, Download, Upload, AlertTriangle, Shuffle
@@ -10,7 +10,6 @@ import { TinyMLTask, DatasetInfo } from '../../types';
 import ClassManager from './ClassManager';
 import DataImporter from './DataImporter';
 import DatasetExplorer from './DatasetExplorer';
-import { RemoteDatasetBrowser } from './RemoteDatasetBrowser';
 
 interface DatasetManagerProps {
   task: TinyMLTask;
@@ -44,6 +43,9 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const [splitSummaries, setSplitSummaries] = useState<Record<string, SplitSummary>>({});
   const [splittingId, setSplittingId] = useState<string | null>(null);
 
+  // Auto-import mode: when true, shows DataImporter without requiring a dataset
+  const [autoImportMode, setAutoImportMode] = useState(false);
+
   const fetchDatasets = useCallback(async () => {
     setIsLoading(true);
     const raw = await request(() => apiClient.listDatasets(task));
@@ -75,6 +77,16 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     setExpandedUpload(null);
     setExpandedClasses(null);
   }, [task, fetchDatasets]);
+
+  // Refetch dataset list when auto-import mode is closed (import completed)
+  const prevAutoImportRef = useRef(autoImportMode);
+  useEffect(() => {
+    if (prevAutoImportRef.current && !autoImportMode) {
+      fetchDatasets();
+      onDatasetChanged?.();
+    }
+    prevAutoImportRef.current = autoImportMode;
+  }, [autoImportMode]);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -145,6 +157,16 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     onDatasetChanged?.();
   };
 
+  // Handle auto-import (remote download without pre-existing dataset)
+  const handleAutoImportSuccess = async (newDatasetId?: string) => {
+    setAutoImportMode(false);
+    await fetchDatasets();
+    if (newDatasetId) {
+      setExpandedUpload(newDatasetId);
+    }
+    onDatasetChanged?.();
+  };
+
   return (
     <div className="space-y-6">
       {exploringDataset && (
@@ -165,6 +187,43 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
         </button>
       </div>
 
+      {/* Quick Import Button */}
+      {!autoImportMode && datasets.length > 0 && (
+        <div className="flex items-center gap-2">
+          <div className="h-px flex-1 bg-slate-700" />
+          <button
+            onClick={() => setAutoImportMode(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
+          >
+            <Download className="w-3.5 h-3.5" /> Import without creating dataset first
+          </button>
+          <div className="h-px flex-1 bg-slate-700" />
+        </div>
+      )}
+
+      {/* Auto-Import Panel */}
+      {autoImportMode && (
+        <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-white">Import Dataset (Auto-Create)</h3>
+            <button
+              onClick={() => setAutoImportMode(false)}
+              className="text-gray-400 hover:text-white"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-[11px] text-gray-400 mb-3">
+            Download from Kaggle, HuggingFace, or URL without creating a dataset first.
+            The dataset will be auto-created with the source name and metadata.
+          </p>
+          <DataImporter
+            task={task}
+            onImportSuccess={handleAutoImportSuccess}
+          />
+        </div>
+      )}
+
       {error && <div className="p-3 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300 text-sm">{error}</div>}
 
       {/* Dataset List */}
@@ -173,7 +232,15 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
       ) : datasets.length === 0 ? (
         <div className="text-center py-12 opacity-50">
           <Database className="w-12 h-12 text-gray-500 mx-auto mb-3" />
-          <p className="text-gray-400">No datasets yet. Create one above.</p>
+          <p className="text-gray-400">No datasets yet. Create one above or import directly.</p>
+          {!autoImportMode && (
+            <button
+              onClick={() => setAutoImportMode(true)}
+              className="mt-3 flex items-center gap-1.5 px-3 py-1.5 mx-auto text-xs font-medium text-indigo-400 hover:text-indigo-300 bg-indigo-900/30 hover:bg-indigo-900/50 rounded-lg transition"
+            >
+              <Download className="w-3.5 h-3.5" /> Import from Kaggle/HuggingFace/URL
+            </button>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -240,7 +307,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                         {isFullyAssigned && (
                           <span className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-emerald-400 bg-emerald-900/20 border border-emerald-500/30 rounded-lg mr-1"
                             title={`train: ${summary!.train} • val: ${summary!.val} • test: ${summary!.test}`}>
-                            ✓ Split
+                            Split
                           </span>
                         )}
 
@@ -293,15 +360,8 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
 
                 {expandedUpload === dataset.id && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
-                    <RemoteDatasetBrowser datasetId={dataset.id} onImportComplete={() => { fetchDatasets(); onDatasetChanged?.(); }} task={task} />
-                  </div>
-                )}
-
-                {/* Collapsible Upload & Import */}
-                {expandedUpload === dataset.id && (
-                  <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                     <DataImporter datasetId={dataset.id} task={task}
-                      onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
+                      onImportSuccess={(newId) => { fetchDatasets(); onDatasetChanged?.(); }} />
                   </div>
                 )}
               </div>

@@ -85,6 +85,10 @@ class ModelFactory:
         "MobileNetV2":      {"tier": "medium", "approx_params_m": 2.3,  "note": "Fine for ESP32-S3 with PSRAM; heavier than V3Small for similar accuracy"},
         "EfficientNet":     {"tier": "large",  "approx_params_m": 4.0,  "note": "Not recommended for MCU deployment without aggressive pruning/quantization"},
         "ResNet50V2":       {"tier": "very_large", "approx_params_m": 23.5, "note": "Not suitable for MCU deployment - use for desktop/server baselines only"},
+        "SSD_MobileNetV2":  {"tier": "medium", "approx_params_m": 3.5,  "note": "Best default for edge OD; good accuracy/size tradeoff on ESP32-S3"},
+        "EfficientDet_Lite":{"tier": "medium", "approx_params_m": 3.8,  "note": "Highest accuracy edge OD model; heavier than SSD but better mAP"},
+        "YOLO_Nano":        {"tier": "tiny",   "approx_params_m": 0.8,  "note": "Ultra-lightweight OD; best for MCU-class boards with tight flash/RAM"},
+        "NanoDet":          {"tier": "small",  "approx_params_m": 1.2,  "note": "Anchor-free OD; good balance of speed and accuracy for ESP32-S3"},
     }
 
     # --- Image Models ---
@@ -341,6 +345,158 @@ class ModelFactory:
             ])
         return model
 
+    # --- Object Detection Models ---
+
+    @staticmethod
+    def create_object_detection_model(
+        input_shape: Tuple[int, int, int] = (96, 96, 3),
+        num_classes: int = 1,
+        base_model_name: str = "SSD_MobileNetV2",
+        num_anchors_per_cell: int = 3,
+        dropout_rate: float = 0.3,
+        l2_reg: float = 0.0,
+    ) -> keras.Model:
+        """Create object detection model with multi-scale feature heads.
+
+        Output format: dict with
+          "boxes":   (batch, max_detections, 4)  — normalized cx, cy, w, h
+          "classes": (batch, max_detections, num_classes)  — class logits
+          "scores":  (batch, max_detections)  — objectness score
+
+        max_detections = grid_h * grid_w * num_anchors_per_cell.
+        """
+        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
+        img_h, img_w = input_shape[0], input_shape[1]
+        channels = input_shape[2] if len(input_shape) >= 3 else 3
+        backbone_input_shape = (img_h, img_w, 3)
+        B = num_anchors_per_cell
+
+        def _conv_block(x, filters, kernel_size=3, strides=1, name=""):
+            x = layers.Conv2D(filters, kernel_size, strides=strides, padding="same",
+                              kernel_regularizer=reg, name=f"{name}_conv")(x)
+            x = layers.BatchNormalization(name=f"{name}_bn")(x)
+            x = layers.ReLU(name=f"{name}_relu")(x)
+            return x
+
+        def _detection_head(feature_map, grid_size, filters=128, name="head"):
+            x = _conv_block(feature_map, filters, name=f"{name}_pre1")
+            x = _conv_block(x, filters, name=f"{name}_pre2")
+            # box offsets: cx, cy, w, h per anchor (all sigmoid-activated)
+            box_out = layers.Conv2D(B * 4, 1, padding="same",
+                                    activation="sigmoid",
+                                    kernel_regularizer=reg,
+                                    name=f"{name}_boxes")(x)
+            # class scores (logits, softmax applied in loss)
+            cls_out = layers.Conv2D(B * num_classes, 1, padding="same",
+                                    kernel_regularizer=reg,
+                                    name=f"{name}_classes")(x)
+            # objectness score
+            obj_out = layers.Conv2D(B * 1, 1, padding="same",
+                                    activation="sigmoid",
+                                    kernel_regularizer=reg,
+                                    name=f"{name}_obj")(x)
+            grid_h = grid_size[0]
+            grid_w = grid_size[1]
+            box_out = layers.Reshape((grid_h * grid_w * B, 4), name=f"{name}_box_reshape")(box_out)
+            cls_out = layers.Reshape((grid_h * grid_w * B, num_classes), name=f"{name}_cls_reshape")(cls_out)
+            obj_out = layers.Reshape((grid_h * grid_w * B,), name=f"{name}_obj_reshape")(obj_out)
+            return box_out, cls_out, obj_out
+
+        inp = keras.Input(shape=input_shape, name="input")
+
+        if channels != 3:
+            x = ChannelTile3(name="channel_adapter")(inp)
+        else:
+            x = inp
+
+        # ── Backbone ──────────────────────────────────────────────────
+        if base_model_name in ("SSD_MobileNetV2", "YOLO_Nano"):
+            base = keras.applications.MobileNetV2(
+                input_shape=backbone_input_shape, include_top=False, weights="imagenet"
+            )
+            base.trainable = True
+
+            # Build a multi-output feature extractor connected to x
+            layer_names = [l.name for l in base.layers]
+            c8_name  = "block_5_add" if "block_5_add" in layer_names else base.layers[min(20, len(base.layers)-1)].name
+            c16_name = "block_11_add" if "block_11_add" in layer_names else base.layers[min(60, len(base.layers)-1)].name
+            feature_extractor = keras.Model(
+                inputs=base.input,
+                outputs=[
+                    base.get_layer(c8_name).output,
+                    base.get_layer(c16_name).output,
+                    base.output,
+                ],
+            )
+            c8, c16, c32 = feature_extractor(x)
+
+            # Light neck convolutions
+            p8  = _conv_block(c8,  64, name="neck_p8")
+            p16 = _conv_block(c16, 64, name="neck_p16")
+            p32 = _conv_block(c32, 64, name="neck_p32")
+
+        elif base_model_name == "EfficientDet_Lite":
+            base = keras.applications.EfficientNetB0(
+                input_shape=backbone_input_shape, include_top=False, weights="imagenet"
+            )
+            base.trainable = True
+
+            # Build a multi-output feature extractor connected to x
+            n = len(base.layers)
+            c8_idx  = min(30, n - 1)
+            c16_idx = min(90, n - 1)
+            feature_extractor = keras.Model(
+                inputs=base.input,
+                outputs=[
+                    base.layers[c8_idx].output,
+                    base.layers[c16_idx].output,
+                    base.output,
+                ],
+            )
+            c8, c16, c32 = feature_extractor(x)
+
+            p8  = _conv_block(c8,  64, name="neck_p8")
+            p16 = _conv_block(c16, 64, name="neck_p16")
+            p32 = _conv_block(c32, 64, name="neck_p32")
+
+        else:  # NanoDet — lightweight from-scratch backbone
+            x = _conv_block(x, 16, strides=2, name="nd_s1")
+            x = _conv_block(x, 16, name="nd_b1")
+            x = _conv_block(x, 32, strides=2, name="nd_s2")
+            x = _conv_block(x, 32, name="nd_b2")
+            c8 = x
+            x = _conv_block(x, 64, strides=2, name="nd_s3")
+            x = _conv_block(x, 64, name="nd_b3")
+            c16 = x
+            x = _conv_block(x, 128, strides=2, name="nd_s4")
+            x = _conv_block(x, 128, name="nd_b4")
+            c32 = x
+
+            p8  = _conv_block(c8,  64, name="neck_p8")
+            p16 = _conv_block(c16, 64, name="neck_p16")
+            p32 = _conv_block(c32, 64, name="neck_p32")
+
+        # ── Detection Heads (multi-scale) ─────────────────────────────
+        # Compute grid sizes from actual feature map shapes, not assumed strides
+        grid8  = (int(p8.shape[1]),  int(p8.shape[2]))
+        grid16 = (int(p16.shape[1]), int(p16.shape[2]))
+        grid32 = (int(p32.shape[1]), int(p32.shape[2]))
+
+        b8,  s8,  o8  = _detection_head(p8,  grid8,  name="d8")
+        b16, s16, o16 = _detection_head(p16, grid16, name="d16")
+        b32, s32, o32 = _detection_head(p32, grid32, name="d32")
+
+        boxes   = layers.Concatenate(axis=1, name="all_boxes")([b8,  b16,  b32])
+        classes = layers.Concatenate(axis=1, name="all_classes")([s8,  s16,  s32])
+        scores  = layers.Concatenate(axis=1, name="all_scores")([o8,  o16,  o32])
+
+        model = keras.Model(
+            inp,
+            {"boxes": boxes, "classes": classes, "scores": scores},
+            name=f"OD_{base_model_name}",
+        )
+        return model
+
     # --- Router ---
 
     @staticmethod
@@ -364,10 +520,9 @@ class ModelFactory:
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
                 trainable_layers=trainable_layers, augmentation=augmentation,
             ),
-            "OBJECT_DETECTION": lambda: ModelFactory.create_image_classification_model(
+            "OBJECT_DETECTION": lambda: ModelFactory.create_object_detection_model(
                 input_shape=input_shape, num_classes=num_classes,
                 base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation,
             ),
             "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(
                 input_shape=input_shape, dropout_rate=dropout_rate, l2_reg=l2_reg,

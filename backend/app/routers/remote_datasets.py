@@ -125,7 +125,7 @@ class CancelRequest(BaseModel):
 async def cancel_download(req: CancelRequest):
     """Cancel an active download."""
     if req.download_id in _active_downloads:
-        _active_downloads[req.download_id]["cancelled"] = True
+        _active_downloads[req.download_id]["canceled"] = True
         return {"status": "success", "message": "Cancellation requested"}
     return {"status": "error", "message": "Download not found or already completed"}
 
@@ -134,20 +134,44 @@ async def cancel_download(req: CancelRequest):
 @router.get("/download_stream")
 async def download_stream(
     source: str = Query(...),  # "url", "kaggle", "huggingface"
-    dataset_id: str = Query(...),
-    task: str = Query(...),
+    dataset_id: Optional[str] = Query(None),
+    task: str = Query("IMAGE_CLASSIFICATION"),
     url: Optional[str] = Query(None),
     dataset_ref: Optional[str] = Query(None),
     repo_id: Optional[str] = Query(None),
 ):
-    """SSE endpoint that streams download progress to the frontend."""
+    """SSE endpoint that streams download progress to the frontend.
+
+    If dataset_id is not provided, auto-creates a dataset using the source name
+    and metadata. Returns dataset_id in the 'dataset_created' event.
+    """
     download_id = str(uuid.uuid4())
     _active_downloads[download_id] = {"canceled": False}
+
+    # Use a mutable container so the nested generator can reassign without
+    # triggering Python's "UnboundLocalError" for the outer parameter.
+    _state = {"dataset_id": dataset_id}
 
     async def event_generator():
         download_path = None
         download_dir = None
         try:
+            # Auto-create dataset if dataset_id not provided
+            if not _state["dataset_id"]:
+                dataset_name, description = await _get_source_metadata(source, url, dataset_ref, repo_id)
+                dataset_obj = await _run_in_executor(
+                    data_manager.create_dataset, dataset_name, task, description
+                )
+                _state["dataset_id"] = dataset_obj["id"]
+                yield _sse_event({"type": "dataset_created", "dataset_id": _state["dataset_id"], "dataset_name": dataset_name})
+            else:
+                # Verify dataset exists
+                if not data_manager.get_dataset(_state["dataset_id"]):
+                    yield _sse_event({"type": "error", "message": f"Dataset not found: {_state['dataset_id']}"})
+                    return
+
+            did = _state["dataset_id"]
+
             yield _sse_event({"type": "start", "download_id": download_id})
 
             # ------------------------------------------------------------------
@@ -158,11 +182,11 @@ async def download_stream(
                     yield _sse_event({"type": "error", "message": "URL is required"})
                     return
                 result: dict = {}
-                async for downloaded, total in _download_from_url_stream(url, dataset_id, task, download_id, result):
+                async for downloaded, total in _download_from_url_stream(url, did, task, download_id, result):
                     yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
                 download_path = result.get("path")
                 yield _sse_event({"type": "processing", "message": "Extracting archive..."})
-                yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id")})
+                yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id"), "annotation_format": result.get("annotation_format"), "annotation_classes": result.get("annotation_classes", [])})
                 yield _sse_event({"type": "complete", "count": 0})
 
             # ------------------------------------------------------------------
@@ -176,7 +200,7 @@ async def download_stream(
                 queue: asyncio.Queue = asyncio.Queue()
                 fut = loop.run_in_executor(
                     _EXECUTOR, _kaggle_download_thread,
-                    dataset_ref, dataset_id, task, download_id, loop, queue
+                    dataset_ref, did, task, download_id, loop, queue
                 )
                 count = 0
                 while True:
@@ -185,8 +209,10 @@ async def download_stream(
                         break
                     if isinstance(item, tuple):
                         if item[0] == "ready_to_map":
-                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2]})
-                        if item[0] == "complete":
+                            ann_format = item[3] if len(item) > 3 else None
+                            ann_classes = item[4] if len(item) > 4 else []
+                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2], "annotation_format": ann_format, "annotation_classes": ann_classes})
+                        elif item[0] == "complete":
                             _, count, download_dir = item
                             yield _sse_event({"type": "processing", "message": "Extracting archive..."})
                         elif item[0] == "error":
@@ -208,7 +234,7 @@ async def download_stream(
                 queue: asyncio.Queue = asyncio.Queue()
                 fut = loop.run_in_executor(
                     _EXECUTOR, _huggingface_download_thread,
-                    repo_id, dataset_id, task, download_id, loop, queue
+                    repo_id, did, task, download_id, loop, queue
                 )
                 count = 0
                 while True:
@@ -217,8 +243,10 @@ async def download_stream(
                         break
                     if isinstance(item, tuple):
                         if item[0] == "ready_to_map":
-                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2]})
-                        if item[0] == "complete":
+                            ann_format = item[3] if len(item) > 3 else None
+                            ann_classes = item[4] if len(item) > 4 else []
+                            yield _sse_event({"type": "ready_to_map", "tree": item[1], "download_id": item[2], "annotation_format": ann_format, "annotation_classes": ann_classes})
+                        elif item[0] == "complete":
                             _, count, download_dir = item
                             yield _sse_event({"type": "processing", "message": "Extracting archive..."})
                         elif item[0] == "error":
@@ -241,7 +269,9 @@ async def download_stream(
             logger.exception(f"Download stream error ({source})")
             yield _sse_event({"type": "error", "message": str(e)})
         finally:
-            _active_downloads.pop(download_id, None)
+            info = _active_downloads.get(download_id, {})
+            if not info.get("zip_path"):
+                _active_downloads.pop(download_id, None)
             if download_path and os.path.exists(download_path):
                 os.remove(download_path)
             if download_dir and os.path.exists(download_dir):
@@ -260,6 +290,109 @@ async def download_stream(
 # --- Internal Download Implementations ---
 
 _SENTINEL = object()  # signals that a download thread is finished
+
+async def _get_source_metadata(
+    source: str, url: Optional[str], dataset_ref: Optional[str], repo_id: Optional[str]
+) -> tuple[str, str]:
+    """Fetch dataset name and description from the source for auto-creation."""
+    if source == "kaggle" and dataset_ref:
+        try:
+            def _fetch_kaggle_meta():
+                username = os.environ.get("KAGGLE_USERNAME")
+                key = os.environ.get("KAGGLE_KEY")
+                if not username or not key:
+                    return None, None
+                os.environ["KAGGLE_USERNAME"] = username
+                os.environ["KAGGLE_KEY"] = key
+                try:
+                    from kaggle.api.kaggle_api_extended import KaggleApi
+                except ImportError:
+                    return None, None
+                api = KaggleApi()
+                api.authenticate()
+                import tempfile, json as _json
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    json_path = api.dataset_metadata(dataset=dataset_ref, path=tmpdir)
+                    meta = {}
+                    if json_path and os.path.exists(str(json_path)):
+                        with open(str(json_path), 'r', encoding='utf-8') as f:
+                            raw = f.read()
+                        try:
+                            meta = _json.loads(_json.loads(raw))
+                        except (_json.JSONDecodeError, TypeError):
+                            try:
+                                meta = _json.loads(raw)
+                            except Exception:
+                                meta = {}
+                title = meta.get('title') or dataset_ref.split('/')[-1]
+                desc_parts = [f"Source: Kaggle ({dataset_ref})"]
+                subtitle = meta.get('subtitle')
+                if subtitle:
+                    desc_parts.append(str(subtitle))
+                licenses = meta.get('licenses')
+                if licenses and isinstance(licenses, list) and len(licenses) > 0:
+                    license_name = licenses[0].get('name') if isinstance(licenses[0], dict) else str(licenses[0])
+                    if license_name:
+                        desc_parts.append(f"License: {license_name}")
+                elif meta.get('licenseName'):
+                    desc_parts.append(f"License: {meta['licenseName']}")
+                total_downloads = meta.get('totalDownloads')
+                if total_downloads:
+                    desc_parts.append(f"Downloads: {total_downloads}")
+                total_votes = meta.get('totalVotes')
+                if total_votes:
+                    desc_parts.append(f"Votes: {total_votes}")
+                return title, " | ".join(desc_parts)
+            name, desc = await _run_in_executor(_fetch_kaggle_meta)
+            if name:
+                return name, desc or f"Downloaded from Kaggle: {dataset_ref}"
+        except Exception as e:
+            logger.warning(f"Failed to fetch Kaggle metadata: {e}")
+        # Fallback: use ref as name
+        short_name = dataset_ref.split('/')[-1] if '/' in dataset_ref else dataset_ref
+        return short_name, f"Downloaded from Kaggle: {dataset_ref}"
+
+    elif source == "huggingface" and repo_id:
+        try:
+            def _fetch_hf_meta():
+                token = os.environ.get("HUGGINGFACE_TOKEN")
+                try:
+                    from huggingface_hub import HfApi
+                except ImportError:
+                    return None, None
+                api = HfApi(token=token if token else None)
+                info = api.dataset_info(repo_id)
+                title = info.id.split('/')[-1] if '/' in info.id else info.id
+                desc_parts = [f"Source: HuggingFace ({info.id})"]
+                if info.description:
+                    desc_parts.append(info.description[:500])
+                if info.tags:
+                    desc_parts.append(f"Tags: {', '.join(info.tags[:5])}")
+                return title, " | ".join(desc_parts)
+            name, desc = await _run_in_executor(_fetch_hf_meta)
+            if name:
+                return name, desc or f"Downloaded from HuggingFace: {repo_id}"
+        except Exception as e:
+            logger.warning(f"Failed to fetch HuggingFace metadata: {e}")
+        # Fallback: use repo_id as name
+        short_name = repo_id.split('/')[-1] if '/' in repo_id else repo_id
+        return short_name, f"Downloaded from HuggingFace: {repo_id}"
+
+    elif source == "url" and url:
+        # Extract filename from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path_parts = [p for p in parsed.path.split('/') if p]
+        if path_parts:
+            name = path_parts[-1]
+            # Remove .zip extension if present
+            if name.lower().endswith('.zip'):
+                name = name[:-4]
+            # Clean up underscores and hyphens
+            name = name.replace('_', ' ').replace('-', ' ')
+            return name, f"Downloaded from URL: {url}"
+
+    return "Unnamed Dataset", ""
 
 # ---------------------------------------------------------------------------
 # URL: async generator — yields (downloaded, total) per chunk
@@ -296,12 +429,13 @@ async def _download_from_url_stream(
     if not zipfile.is_zipfile(download_path):
         raise ValueError("Downloaded file is not a valid ZIP archive.")
 
-    tree = await _run_in_executor(scan_zip_tree, download_path)
+    scan_result = await _run_in_executor(scan_zip_tree, download_path)
     _active_downloads[download_id]["zip_path"] = download_path
-    result["tree"] = tree
+    result["tree"] = scan_result.get("tree", []) if isinstance(scan_result, dict) else scan_result
+    result["annotation_format"] = scan_result.get("annotation_format") if isinstance(scan_result, dict) else None
+    result["annotation_classes"] = scan_result.get("annotation_classes", []) if isinstance(scan_result, dict) else []
     result["download_id"] = download_id
     result["path"] = download_path
-    # result["count"] = count
 
 # ---------------------------------------------------------------------------
 # Kaggle: sync thread worker with asyncio queue bridge
@@ -338,9 +472,22 @@ def _kaggle_download_thread(
         api = KaggleApi()
         api.authenticate()
 
+        total = 0
         try:
-            meta = api.dataset_metadata(dataset_ref)
-            total = getattr(meta, "totalBytes", 0) or 0
+            import tempfile, json as _json
+            with tempfile.TemporaryDirectory() as tmpdir:
+                json_path = api.dataset_metadata(dataset=dataset_ref, path=tmpdir)
+                if json_path and os.path.exists(str(json_path)):
+                    with open(str(json_path), 'r', encoding='utf-8') as f:
+                        raw = f.read()
+                    try:
+                        meta = _json.loads(_json.loads(raw))
+                    except (_json.JSONDecodeError, TypeError):
+                        try:
+                            meta = _json.loads(raw)
+                        except Exception:
+                            meta = {}
+                    total = meta.get("totalBytes", 0) or meta.get("totalDownloads", 0) or 0
         except Exception:
             total = 0
 
@@ -378,8 +525,11 @@ def _kaggle_download_thread(
         zip_path = os.path.join(download_dir, zips[0])
 
         _active_downloads[download_id]["zip_path"] = zip_path
-        tree = scan_zip_tree(zip_path)
-        _push(("ready_to_map", tree, download_id))
+        scan_result = scan_zip_tree(zip_path)
+        tree = scan_result.get("tree", []) if isinstance(scan_result, dict) else scan_result
+        ann_format = scan_result.get("annotation_format") if isinstance(scan_result, dict) else None
+        ann_classes = scan_result.get("annotation_classes", []) if isinstance(scan_result, dict) else []
+        _push(("ready_to_map", tree, download_id, ann_format, ann_classes))
     except Exception as exc:
         _push(("error", str(exc)))
     finally:
@@ -454,8 +604,11 @@ def _huggingface_download_thread(
         shutil.rmtree(download_dir, ignore_errors=True)
 
         _active_downloads[download_id]["zip_path"] = zip_path
-        tree = scan_zip_tree(zip_path)
-        _push(("ready_to_map", tree, download_id))
+        scan_result = scan_zip_tree(zip_path)
+        tree = scan_result.get("tree", []) if isinstance(scan_result, dict) else scan_result
+        ann_format = scan_result.get("annotation_format") if isinstance(scan_result, dict) else None
+        ann_classes = scan_result.get("annotation_classes", []) if isinstance(scan_result, dict) else []
+        _push(("ready_to_map", tree, download_id, ann_format, ann_classes))
     except Exception as exc:
         _push(("error", str(exc)))
     finally:
@@ -494,10 +647,25 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
                 try:
                     ref = str(ds.ref) if hasattr(ds, 'ref') else str(ds)
                     title = getattr(ds, 'title', ref)
-                    size = getattr(ds, 'totalBytes', 0) or 0
-                    last_updated = str(getattr(ds, 'lastUpdated', ''))
-                    download_count = getattr(ds, 'downloadCount', 0) or 0
-                    description = getattr(ds, 'subtitle', '') or ''
+                    size = getattr(ds, 'total_bytes', 0) or 0
+                    last_updated = getattr(ds, 'last_updated', '')
+                    if hasattr(last_updated, 'isoformat'):
+                        last_updated = last_updated.isoformat()
+                    else:
+                        last_updated = str(last_updated)
+                    download_count = getattr(ds, 'download_count', 0) or 0
+                    description = getattr(ds, 'subtitle', '') or getattr(ds, 'description', '') or ''
+                    vote_count = getattr(ds, 'vote_count', 0) or 0
+                    usability_rating = getattr(ds, 'usability_rating', 0) or 0
+                    license_name = getattr(ds, 'license_name', '') or ''
+                    tags_raw = getattr(ds, 'tags', []) or []
+                    tags = []
+                    if hasattr(tags_raw, '__iter__') and not isinstance(tags_raw, str):
+                        for t in tags_raw[:5]:
+                            if isinstance(t, dict):
+                                tags.append(t.get('name', t.get('ref', str(t))))
+                            else:
+                                tags.append(getattr(t, 'name', str(t)))
                     datasets.append({
                         "ref": ref,
                         "title": title,
@@ -505,6 +673,10 @@ async def search_kaggle_datasets(query: str = Query(..., min_length=1), page: in
                         "last_updated": last_updated,
                         "download_count": download_count,
                         "description": description,
+                        "vote_count": vote_count,
+                        "usability_rating": round(float(usability_rating), 2) if usability_rating else 0,
+                        "license": license_name,
+                        "tags": tags,
                     })
                 except Exception as attr_err:
                     logger.warning(f"Skipping Kaggle result due to attribute error: {attr_err}")
@@ -552,15 +724,21 @@ async def search_huggingface_datasets(query: str = Query(..., min_length=1), lim
                         author = ds_id.split('/')[0]
                     title = ds_id.split('/')[-1] if '/' in ds_id else ds_id
                     downloads = getattr(ds, 'downloads', 0) or 0
+                    likes = getattr(ds, 'likes', 0) or 0
                     last_modified = str(getattr(ds, 'last_modified', '')) if getattr(ds, 'last_modified', None) else ''
                     tags = getattr(ds, 'tags', []) or []
+                    pipeline_tag = getattr(ds, 'pipeline_tag', '') or ''
+                    created_at = str(getattr(ds, 'created_at', '')) if getattr(ds, 'created_at', None) else ''
                     datasets.append({
                         "id": ds_id,
                         "author": author or '',
                         "title": title,
                         "downloads": downloads,
+                        "likes": likes,
                         "last_modified": last_modified,
-                        "tags": tags[:5],
+                        "created_at": created_at,
+                        "tags": tags[:8] if isinstance(tags, (list, tuple)) else [],
+                        "pipeline_tag": pipeline_tag,
                         "description": "",
                     })
                 except Exception as attr_err:
@@ -588,7 +766,7 @@ async def get_download_progress(download_id: str):
         "status": "active",
         "downloaded": info.get("downloaded", 0),
         "total": info.get("total", 0),
-        "cancelled": info.get("cancelled", False),
+        "canceled": info.get("canceled", False),
     }
 
 class ProcessRemoteRequest(BaseModel):
@@ -604,7 +782,7 @@ async def process_remote_zip(req: ProcessRemoteRequest):
         raise HTTPException(status_code=404, detail="Download session missing or expired")
 
     try:
-        count = await _run_in_executor(
+        result = await _run_in_executor(
             extract_zip_with_mapping,
             info["zip_path"], req.dataset_id, req.task, req.mapping
         )
@@ -614,6 +792,13 @@ async def process_remote_zip(req: ProcessRemoteRequest):
             shutil.rmtree(base_dir, ignore_errors=True)
         _active_downloads.pop(req.download_id, None)
 
-        return {"status": "success", "count": count}
+        count = result["processed"] if isinstance(result, dict) else result
+        return {
+            "status": "success",
+            "count": count,
+            "annotation_format": result.get("annotation_format") if isinstance(result, dict) else None,
+            "annotations_matched": result.get("annotations_matched", 0) if isinstance(result, dict) else 0,
+            "annotation_classes": result.get("annotation_classes", []) if isinstance(result, dict) else [],
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

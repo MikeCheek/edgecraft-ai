@@ -8,9 +8,9 @@ import {
 } from '../../services/remoteDatasetApi';
 
 interface Props {
-  datasetId: string;
+  datasetId?: string; // Now optional
   task: string;
-  onImportComplete: () => void;
+  onImportComplete: (newDatasetId?: string) => void;
 }
 
 // --- helpers ---
@@ -205,6 +205,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalData | null>(null);
+  const [currentDatasetId, setCurrentDatasetId] = useState<string | undefined>(datasetId);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -223,6 +224,10 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     remoteDatasetApi.getTokenStatus().then(setTokenStatus).catch(() => { });
   }, []);
 
+  useEffect(() => {
+    setCurrentDatasetId(datasetId);
+  }, [datasetId]);
+
   const clearMessages = () => {
     setError(null);
     setSuccessMsg(null);
@@ -239,7 +244,7 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
       setSuccessMsg(`Successfully imported ${count} samples from ${successLabel}.`);
       setProgress(null);
       setProcessing(null);
-      onImportComplete();
+      onImportComplete(currentDatasetId);
     } catch (e: any) {
       if (e.message === 'Download cancelled') {
         setError('Download cancelled.');
@@ -264,9 +269,13 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
     if (!url.trim()) return;
     startDownload(
       (signal) =>
-        remoteDatasetApi.downloadFromUrl(url.trim(), datasetId, task, {
+        remoteDatasetApi.downloadFromUrl(url.trim(), currentDatasetId || null, task, {
           onProgress: setProgress,
           onProcessing: setProcessing,
+          onDatasetCreated: (info) => {
+            setCurrentDatasetId(info.dataset_id);
+            setSuccessMsg(`Created dataset: ${info.dataset_name}`);
+          },
         }, signal),
       'URL',
     );
@@ -291,9 +300,13 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
   const handleKaggleDownload = (ref: string) => {
     startDownload(
       (signal) =>
-        remoteDatasetApi.downloadKaggle(ref, datasetId, task, {
+        remoteDatasetApi.downloadKaggle(ref, currentDatasetId || null, task, {
           onProgress: setProgress,
           onProcessing: setProcessing,
+          onDatasetCreated: (info) => {
+            setCurrentDatasetId(info.dataset_id);
+            setSuccessMsg(`Created dataset: ${info.dataset_name}`);
+          },
         }, signal),
       'Kaggle',
     );
@@ -318,9 +331,13 @@ export function RemoteDatasetBrowser({ datasetId, task, onImportComplete }: Prop
   const handleHfDownload = (repoId: string) => {
     startDownload(
       (signal) =>
-        remoteDatasetApi.downloadHuggingFace(repoId, datasetId, task, {
+        remoteDatasetApi.downloadHuggingFace(repoId, currentDatasetId || null, task, {
           onProgress: setProgress,
           onProcessing: setProcessing,
+          onDatasetCreated: (info) => {
+            setCurrentDatasetId(info.dataset_id);
+            setSuccessMsg(`Created dataset: ${info.dataset_name}`);
+          },
         }, signal),
       'HuggingFace',
     );

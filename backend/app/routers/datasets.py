@@ -2,6 +2,7 @@ import re
 import io
 import os
 import logging
+from typing import List
 from PIL import Image
 import uuid
 import tempfile
@@ -149,6 +150,183 @@ async def upload_dataset_sample(
         return {"status": "success", "sample_id": sample_id}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# --- Local Folder Upload ---
+# Accepts multiple files with folder structure (e.g., "train/cat/img.jpg")
+# Files are grouped by their parent folder to determine labels.
+
+@router.post("/upload_folder")
+async def upload_folder(
+    dataset_id: str = Form(...),
+    task: str = Form(...),
+    files: List[UploadFile] = File(...),
+):
+    """Upload a local folder of images/audio files.
+
+    Files should have paths like: train/cat/img.jpg or just cat/img.jpg
+    The parent folder name is used as the label.
+    Now also detects annotation files (.txt YOLO, .xml VOC, .csv) and
+    pairs them with matching images.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    from app.utils.annotation_parser import (
+        ANNOTATION_EXTENSIONS,
+        detect_annotation_format,
+        parse_yolo_txt,
+        parse_yolo_classes,
+        parse_voc_xml,
+        parse_csv_annotations,
+    )
+
+    total_processed = 0
+    total_errors = 0
+    error_messages = []
+    annotations_matched = 0
+
+    valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav"}
+    all_extensions = valid_extensions | ANNOTATION_EXTENSIONS
+
+    # Phase 1: collect all file info
+    all_file_infos = []
+    for upload_file in files:
+        filename = upload_file.filename or ""
+        basename = os.path.basename(filename)
+        if basename.startswith(".") or basename.lower() == "thumbs.db":
+            continue
+        ext = os.path.splitext(basename)[1].lower()
+        if ext not in all_extensions:
+            continue
+        content = await upload_file.read()
+        all_file_infos.append({
+            "filename": filename,
+            "basename": basename,
+            "ext": ext,
+            "content": content,
+        })
+
+    # Detect annotation format
+    all_filenames = [fi["filename"] for fi in all_file_infos]
+    annotation_format = detect_annotation_format(all_filenames) if task == "OBJECT_DETECTION" else None
+
+    # Parse annotations
+    yolo_class_map = {}
+    annotation_contents = {}  # basename -> content
+    coco_images = {}
+    coco_anns = {}
+
+    if annotation_format:
+        for fi in all_file_infos:
+            if fi["ext"] in ANNOTATION_EXTENSIONS:
+                basename_lower = fi["basename"].lower()
+                if annotation_format == "yolo" and basename_lower in (
+                    "classes.txt", "class.names", "classes.names", "obj.names"
+                ):
+                    yolo_class_map = parse_yolo_classes(fi["content"].decode("utf-8", errors="replace"))
+                elif annotation_format == "coco" and fi["ext"] == ".json":
+                    coco_images, coco_anns = parse_coco_json(fi["content"].decode("utf-8", errors="replace"))
+                else:
+                    annotation_contents[fi["basename"]] = fi["content"].decode("utf-8", errors="replace")
+
+    # Phase 2: process images
+    for fi in all_file_infos:
+        try:
+            ext = fi["ext"]
+            if ext not in valid_extensions:
+                continue
+
+            filename = fi["filename"]
+            basename = fi["basename"]
+            content = fi["content"]
+
+            parts = [p for p in filename.replace("\\", "/").split("/") if p]
+            if len(parts) >= 2:
+                parent = parts[-2].lower()
+                if parent in {"train", "val", "validation", "valid", "test"}:
+                    label = parts[-3] if len(parts) >= 3 else "unknown"
+                else:
+                    label = parts[-2]
+            else:
+                label = "unknown"
+
+            width, height = (None, None)
+            if ext in {".jpg", ".jpeg", ".png", ".bmp"}:
+                width, height = await _run_in_executor(_probe_image_dims, content)
+
+            # Parse annotation for this image
+            sample_annotations = None
+            if annotation_format:
+                if annotation_format == "coco":
+                    sample_annotations = [b.dict() for b in coco_anns.get(
+                        next((img_id for img_id, fname in coco_images.items() if fname == basename), None) or -1, []
+                    )] or None
+                elif annotation_format == "yolo":
+                    base = os.path.splitext(basename)[0]
+                    ann_key = base + ".txt"
+                    ann_content = annotation_contents.get(ann_key)
+                    if ann_content:
+                        boxes = parse_yolo_txt(ann_content, yolo_class_map or None)
+                        sample_annotations = [b.dict() for b in boxes]
+                elif annotation_format == "voc":
+                    base = os.path.splitext(basename)[0]
+                    ann_key = base + ".xml"
+                    ann_content = annotation_contents.get(ann_key)
+                    if ann_content:
+                        boxes = parse_voc_xml(ann_content)
+                        sample_annotations = [b.dict() for b in boxes]
+                elif annotation_format == "csv":
+                    base = os.path.splitext(basename)[0]
+                    ann_key = base + ".csv"
+                    ann_content = annotation_contents.get(ann_key)
+                    if ann_content:
+                        csv_anns = parse_csv_annotations(ann_content)
+                        boxes = csv_anns.get(basename, csv_anns.get(base, []))
+                        sample_annotations = [b.dict() for b in boxes] if boxes else None
+
+            if sample_annotations:
+                annotations_matched += 1
+
+            await _run_in_executor(
+                data_manager.add_sample, dataset_id, label, task, content, basename, width, height,
+                sample_annotations
+            )
+            total_processed += 1
+        except Exception as e:
+            total_errors += 1
+            if len(error_messages) < 5:
+                error_messages.append(f"{fi['filename']}: {str(e)}")
+
+    # Store annotation metadata
+    if annotation_format:
+        annotation_classes = []
+        if annotation_format == "yolo" and yolo_class_map:
+            annotation_classes = [yolo_class_map[i] for i in sorted(yolo_class_map.keys())]
+        elif annotation_format == "coco":
+            cat_set = set()
+            for ann_list in coco_anns.values():
+                for a in ann_list:
+                    cat_set.add(a.class_name)
+            annotation_classes = sorted(cat_set)
+        else:
+            class_set = set()
+            for sid in data_manager.samples_by_dataset.get(dataset_id, ()):
+                for a in data_manager.samples[sid].get("annotations", []):
+                    class_set.add(a.get("class_name", "unknown"))
+            annotation_classes = sorted(class_set)
+        await _run_in_executor(
+            data_manager.update_dataset_annotation_metadata,
+            dataset_id, annotation_format, annotation_classes
+        )
+
+    return {
+        "status": "success",
+        "processed": total_processed,
+        "errors": total_errors,
+        "error_messages": error_messages,
+        "annotation_format": annotation_format,
+        "annotations_matched": annotations_matched,
+    }
 
 # --- Chunked Resumable ZIP upload Engine ---
 
@@ -425,10 +603,16 @@ async def finalize_zip_upload(
                     shutil.copyfileobj(infile, outfile, length=WRITE_BUFFER_SIZE)
 
         # Scan the tree instead of blindly extracting
-        tree = await _run_in_executor(scan_zip_tree, assembled_zip_path)
+        scan_result = await _run_in_executor(scan_zip_tree, assembled_zip_path)
 
         UPLOAD_TRACKER.pop(upload_id, None)
-        return {"status": "success", "upload_id": upload_id, "tree": tree}
+        return {
+            "status": "success",
+            "upload_id": upload_id,
+            "tree": scan_result["tree"],
+            "annotation_format": scan_result.get("annotation_format"),
+            "annotation_classes": scan_result.get("annotation_classes", []),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assembly crash: {str(e)}")
 
@@ -511,6 +695,9 @@ async def process_zip_upload(
             "count": result["processed"],
             "unmatched_regex": result["unmatched_regex"],
             "regex_error": result["regex_error"],
+            "annotation_format": result.get("annotation_format"),
+            "annotations_matched": result.get("annotations_matched", 0),
+            "annotation_classes": result.get("annotation_classes", []),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Extraction crash: {str(e)}")
@@ -708,3 +895,202 @@ async def delete_sample(sample_id: str):
     if await _run_in_executor(data_manager.delete_sample, sample_id):
         return {"status": "success"}
     return {"status": "error", "message": "Sample not found"}
+
+# --- Annotation Endpoints ---
+
+@router.get("/annotations/{sample_id}")
+async def get_sample_annotations(sample_id: str):
+    """Get bounding box annotations for a single sample."""
+    anns = await _run_in_executor(data_manager.get_sample_annotations, sample_id)
+    if anns is None:
+        raise HTTPException(status_code=404, detail="Sample not found")
+    return {"status": "success", "annotations": anns or []}
+
+@router.put("/annotations/{sample_id}")
+async def update_sample_annotations(sample_id: str, annotations: list = Body(...)):
+    """Replace bounding box annotations for a single sample."""
+    success = await _run_in_executor(data_manager.update_sample_annotations, sample_id, annotations)
+    if not success:
+        raise HTTPException(status_code=404, detail="Sample not found")
+    return {"status": "success"}
+
+@router.get("/annotations/summary/{dataset_id}")
+async def get_dataset_annotation_summary(dataset_id: str):
+    """Get annotation coverage summary for a dataset."""
+    try:
+        summary = await _run_in_executor(data_manager.get_dataset_annotation_summary, dataset_id)
+        return {"status": "success", **summary}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@router.post("/annotations/upload/{dataset_id}")
+async def upload_annotations(dataset_id: str, file: UploadFile = File(...)):
+    """Upload annotation files (ZIP containing YOLO/COCO/VOC/CSV annotations)
+    and match them to existing samples in the dataset."""
+    from typing import Dict, List
+    from app.models import BoundingBox
+    from app.utils.annotation_parser import (
+        detect_annotation_format, parse_yolo_txt, parse_yolo_classes,
+        parse_voc_xml, parse_coco_json, parse_csv_annotations,
+        ANNOTATION_EXTENSIONS,
+    )
+    dataset = data_manager.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    content = await file.read()
+    annotations_matched = 0
+    annotation_format = None
+    annotation_classes = []
+
+    def _apply():
+        nonlocal annotations_matched, annotation_format, annotation_classes
+        import tempfile as _tmp
+
+        filename_lower = (file.filename or "").lower()
+        ext = os.path.splitext(filename_lower)[1]
+
+        is_zip = (
+            ext == ".zip"
+            or content[:4] == b"PK\x03\x04"
+        )
+
+        annotation_file_contents: Dict[str, str] = {}
+        yolo_class_map: Dict[int, str] = {}
+
+        if is_zip:
+            with _tmp.TemporaryDirectory() as tmpdir:
+                zip_path = os.path.join(tmpdir, "annotations.zip")
+                with open(zip_path, "wb") as f:
+                    f.write(content)
+
+                with zipfile.ZipFile(zip_path, 'r') as z:
+                    all_names = z.namelist()
+                    ann_names = [
+                        n for n in all_names
+                        if not n.startswith("__MACOSX")
+                        and os.path.splitext(n)[1].lower() in ANNOTATION_EXTENSIONS
+                    ]
+                    if not ann_names:
+                        return
+
+                    annotation_format = detect_annotation_format(all_names)
+
+                    for name in ann_names:
+                        with z.open(name) as f:
+                            annotation_file_contents[name] = f.read().decode("utf-8", errors="replace")
+
+                    if annotation_format == "yolo":
+                        for name, cont in annotation_file_contents.items():
+                            basename = os.path.basename(name).lower()
+                            if basename in ("classes.txt", "class.names", "classes.names", "obj.names"):
+                                yolo_class_map = parse_yolo_classes(cont)
+                                annotation_classes = [yolo_class_map[i] for i in sorted(yolo_class_map.keys())]
+        else:
+            ext_to_format = {
+                ".csv": "csv",
+                ".json": "coco",
+                ".xml": "voc",
+                ".txt": "yolo",
+            }
+            annotation_format = ext_to_format.get(ext)
+            if not annotation_format:
+                return
+            content_str = content.decode("utf-8", errors="replace")
+            annotation_file_contents[filename_lower] = content_str
+
+            if annotation_format == "yolo":
+                basename = os.path.basename(filename_lower)
+                if basename in ("classes.txt", "class.names", "classes.names", "obj.names"):
+                    yolo_class_map = parse_yolo_classes(content_str)
+                    annotation_classes = [yolo_class_map[i] for i in sorted(yolo_class_map.keys())]
+
+        samples = data_manager.get_samples(dataset_id)
+        if not samples:
+            return
+
+        coco_images: Dict[int, str] = {}
+        coco_anns: Dict[int, List] = {}
+        csv_by_file: Dict[str, List] = {}
+
+        if annotation_format == "coco":
+            for cont in annotation_file_contents.values():
+                coco_images, coco_anns = parse_coco_json(cont)
+                break
+        elif annotation_format == "csv":
+            for cont in annotation_file_contents.values():
+                csv_by_file.update(parse_csv_annotations(cont))
+                break
+
+        updated = 0
+        for sample in samples:
+            img_filename = sample.get("filename", "")
+            width = sample.get("width") or 640
+            height = sample.get("height") or 480
+            bboxes: list = []
+
+            if annotation_format == "yolo":
+                base = os.path.splitext(img_filename)[0]
+                ann_content = annotation_file_contents.get(base + ".txt")
+                if ann_content is None:
+                    ann_content = annotation_file_contents.get(os.path.basename(base) + ".txt")
+                if ann_content:
+                    bboxes = parse_yolo_txt(ann_content, yolo_class_map or None)
+
+            elif annotation_format == "voc":
+                base = os.path.splitext(img_filename)[0]
+                ann_content = annotation_file_contents.get(base + ".xml")
+                if ann_content is None:
+                    ann_content = annotation_file_contents.get(os.path.basename(base) + ".xml")
+                if ann_content:
+                    bboxes = parse_voc_xml(ann_content)
+
+            elif annotation_format == "coco":
+                for img_id, fname in coco_images.items():
+                    if fname == img_filename or os.path.basename(fname) == os.path.basename(img_filename):
+                        raw_anns = coco_anns.get(img_id, [])
+                        for a in raw_anns:
+                            bw = a.w
+                            bh = a.h
+                            bcx = a.cx
+                            bcy = a.cy
+                            if bw <= 1.0 and bh <= 1.0 and bcx <= 1.0 and bcy <= 1.0:
+                                bboxes.append(BoundingBox(
+                                    class_name=a.class_name, cx=bcx, cy=bcy, w=bw, h=bh,
+                                ))
+                            else:
+                                bboxes.append(BoundingBox(
+                                    class_name=a.class_name,
+                                    cx=(bcx + bw / 2) / width,
+                                    cy=(bcy + bh / 2) / height,
+                                    w=bw / width,
+                                    h=bh / height,
+                                ))
+                        break
+
+            elif annotation_format == "csv":
+                bboxes = csv_by_file.get(img_filename)
+                if bboxes is None:
+                    bboxes = csv_by_file.get(os.path.basename(img_filename))
+
+            if bboxes:
+                data_manager.update_sample_annotations(sample["id"], [b.dict() for b in bboxes])
+                updated += 1
+
+        annotations_matched = updated
+        if annotation_format:
+            data_manager.update_dataset_annotation_metadata(
+                dataset_id, annotation_format, annotation_classes
+            )
+
+    try:
+        await _run_in_executor(_apply)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Annotation upload failed: {e}")
+
+    return {
+        "status": "success",
+        "annotations_matched": annotations_matched,
+        "annotation_format": annotation_format,
+        "annotation_classes": annotation_classes,
+    }

@@ -2,11 +2,11 @@
 // Full refactored ModelTrainer component with SelectOrCustom dropdown pattern,
 // merged Regularization section, compact Augmentation row, and all custom states.
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import {
   Play, Square, RefreshCw, TrendingUp, Clock, Award, Timer,
   ShieldCheck, History, ZoomIn, ChevronDown, ChevronUp,
-  AlertTriangle, Settings, Activity, Shuffle
+  AlertTriangle, Settings, Activity, Shuffle, BoxSelect, Lightbulb, X
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
 import { useToast } from '../../context/ToastContext';
@@ -14,7 +14,7 @@ import { useAppContext } from '../../context/AppContext';
 import { TinyMLTask, TrainingStatus } from '../../types';
 import { MetricChart, ChartModal } from './Chart';
 import {
-  getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS,
+  getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS, OD_MODELS,
   formatDate, formatTime,
   BATCH_SIZE_OPTIONS, DROPOUT_OPTIONS, INPUT_SIZES, LEARNING_RATE_OPTIONS,
   EPOCHS_OPTIONS,
@@ -25,6 +25,8 @@ import {
 import PastSessionPopup from './PastSessionPopUp';
 import SelectOrCustom from './SelectOrCustom';
 import { TerminalLogPanel } from '../TerminalLogPanel';
+
+const LLMAdvisor = lazy(() => import('../LLMAdvisor').then(m => ({ default: m.LLMAdvisor })));
 
 // ---------------------------------------------------------------------------
 // ModelTrainer
@@ -109,6 +111,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [pastSessions, setPastSessions] = useState<any[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [viewingSession, setViewingSession] = useState<any | null>(null);
+  const [suggestSession, setSuggestSession] = useState<any | null>(null);
 
   // --- Warnings / split ---
   const [duplicateWarning, setDuplicateWarning] = useState(false);
@@ -337,7 +340,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
   // --- Derived values ---
   const isRunning = status?.status === 'running' || status?.status === 'initialized';
-  const availableModels = AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
+  const isODTask = task === 'OBJECT_DETECTION';
+  const availableModels = isODTask ? OD_MODELS : AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
   const latestMetrics = status?.metrics?.length
     ? status.metrics[status.metrics.length - 1]
     : null;
@@ -810,6 +814,12 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 Input:{' '}
                 <span className="text-cyan-300 font-medium">{inputShape.join('×')}</span>
               </span>
+              {isODTask && (
+                <span>
+                  Output:{' '}
+                  <span className="text-emerald-300 font-medium">boxes + class scores</span>
+                </span>
+              )}
             </div>
 
           </div>
@@ -891,7 +901,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
       {/* --- Past Sessions Panel --- */}
       {showHistory && (
-        <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-2 animate-slideIn">
+        <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-2 animate-fadeIn">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-semibold text-gray-300 flex items-center gap-2">
               <History className="w-4 h-4 text-purple-400" />
@@ -962,13 +972,22 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                           </button>
                         )}
                         {!isSessionRunning && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleArchiveToggle(s.id, !!s.archived); }}
-                            title={s.archived ? 'Unarchive' : 'Archive (hide from history)'}
-                            className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-gray-400 hover:text-white transition-colors"
-                          >
-                            {s.archived ? <History className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
-                          </button>
+                          <>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setSuggestSession(s); }}
+                              title="AI Suggestions for this training"
+                              className="p-1.5 rounded-lg bg-purple-600/10 hover:bg-purple-600/30 text-purple-400 hover:text-purple-300 transition-colors"
+                            >
+                              <Lightbulb className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleArchiveToggle(s.id, !!s.archived); }}
+                              title={s.archived ? 'Unarchive' : 'Archive (hide from history)'}
+                              className="p-1.5 rounded-lg bg-slate-700/50 hover:bg-slate-600 text-gray-400 hover:text-white transition-colors"
+                            >
+                              {s.archived ? <History className="w-3.5 h-3.5" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                            </button>
+                          </>
                         )}
                       </div>
                     </div>
@@ -982,7 +1001,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
       {/* --- Live Training Progress --- */}
       {status && (
-        <div className="mt-8 bg-slate-900/80 border border-purple-500/30 rounded-2xl p-6 shadow-2xl relative overflow-hidden animate-slideIn">
+        <div className="mt-8 bg-slate-900/80 border border-purple-500/30 rounded-2xl p-6 shadow-2xl relative overflow-hidden animate-fadeIn">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500 to-pink-500 opacity-80" />
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-lg font-bold text-white flex items-center gap-2">
@@ -1044,26 +1063,33 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
             {/* Latest metric tiles */}
             {latestMetrics && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className={`grid gap-3 ${isODTask ? 'grid-cols-2' : 'grid-cols-2 md:grid-cols-4'}`}>
+                {!isODTask && (
+                  <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                    <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                      <TrendingUp className="w-3 h-3" /> Accuracy
+                    </div>
+                    <span className="text-2xl font-bold text-green-400">
+                      {(latestMetrics.accuracy * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+                {!isODTask && (
+                  <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
+                    <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
+                      <Award className="w-3 h-3" /> Val Accuracy
+                    </div>
+                    <span className="text-2xl font-bold text-cyan-400">
+                      {(latestMetrics.val_accuracy * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
                 <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
                   <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                    <TrendingUp className="w-3 h-3" /> Accuracy
+                    {isODTask ? <BoxSelect className="w-3 h-3" /> : null}
+                    {isODTask ? 'Train Loss' : 'Loss'}
                   </div>
-                  <span className="text-2xl font-bold text-green-400">
-                    {(latestMetrics.accuracy * 100).toFixed(1)}%
-                  </span>
-                </div>
-                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                    <Award className="w-3 h-3" /> Val Accuracy
-                  </div>
-                  <span className="text-2xl font-bold text-cyan-400">
-                    {(latestMetrics.val_accuracy * 100).toFixed(1)}%
-                  </span>
-                </div>
-                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                  <div className="text-xs text-gray-400 mb-1">Loss</div>
-                  <span className="text-2xl font-bold text-yellow-400">
+                  <span className={`text-2xl font-bold ${isODTask ? 'text-purple-400' : 'text-yellow-400'}`}>
                     {latestMetrics.loss.toFixed(4)}
                   </span>
                 </div>
@@ -1079,24 +1105,26 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
             )}
 
             {/* Charts */}
-            {accuracyData.length >= 2 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="relative">
-                  <button
-                    onClick={() => setExpandedLiveChart('accuracy')}
-                    className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
-                    title="Expand chart"
-                  >
-                    <ZoomIn className="w-4 h-4" />
-                  </button>
-                  <MetricChart
-                    data={accuracyData}
-                    label="Accuracy (%)"
-                    color="#22c55e"
-                    valColor="#06b6d4"
-                    formatY={(v: number) => `${v}%`}
-                  />
-                </div>
+            {lossData.length >= 2 && (
+              <div className={`grid gap-4 ${isODTask ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
+                {!isODTask && accuracyData.length >= 2 && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setExpandedLiveChart('accuracy')}
+                      className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
+                      title="Expand chart"
+                    >
+                      <ZoomIn className="w-4 h-4" />
+                    </button>
+                    <MetricChart
+                      data={accuracyData}
+                      label="Accuracy (%)"
+                      color="#22c55e"
+                      valColor="#06b6d4"
+                      formatY={(v: number) => `${v}%`}
+                    />
+                  </div>
+                )}
                 <div className="relative">
                   <button
                     onClick={() => setExpandedLiveChart('loss')}
@@ -1107,7 +1135,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   </button>
                   <MetricChart
                     data={lossData}
-                    label="Loss"
+                    label={isODTask ? 'Multi-Task Loss' : 'Loss'}
                     color="#eab308"
                     valColor="#f97316"
                   />
@@ -1160,6 +1188,35 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
           session={viewingSession}
           onClose={() => setViewingSession(null)}
         />
+      )}
+
+      {/* --- AI Suggest Modal --- */}
+      {suggestSession && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setSuggestSession(null)}>
+          <div
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-slate-900 rounded-2xl border border-purple-500/30 shadow-2xl animate-slideIn"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700 sticky top-0 bg-slate-900 z-10">
+              <div>
+                <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                  <Lightbulb className="w-5 h-5 text-yellow-400" /> AI Suggestions
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {suggestSession.base_model} — {suggestSession.total_epochs} epochs
+                </p>
+              </div>
+              <button onClick={() => setSuggestSession(null)} className="p-2 text-gray-400 hover:text-white hover:bg-slate-700 rounded-lg transition" aria-label="Close">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6">
+              <Suspense fallback={<div className="text-gray-400 text-sm">Loading advisor...</div>}>
+                <LLMAdvisor trainingId={suggestSession.id} status={suggestSession.status} datasetId={suggestSession.dataset_id} pastSessions={pastSessions} />
+              </Suspense>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

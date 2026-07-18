@@ -4,7 +4,7 @@
 
 import { useCallback, useState } from 'react'
 import axios, { AxiosInstance } from 'axios'
-import { ApiResponse } from '../types'
+import { ApiResponse, BoundingBox, AnnotationSummary } from '../types'
 
 export const API_BASE = 'http://localhost:8000/api'
 
@@ -136,6 +136,25 @@ class APIClient {
     return this.uploadClient.post<ApiResponse<any>>('/datasets/upload', fd)
   }
 
+  // --- Local Folder Upload ---
+
+  async uploadFolder(
+    datasetId: string,
+    task: string,
+    files: FileList | File[]
+  ): Promise<{ status: string; processed: number; errors: number; error_messages: string[] }> {
+    const fd = new FormData()
+    fd.append('dataset_id', datasetId)
+    fd.append('task', task)
+
+    for (let i = 0; i < files.length; i++) {
+      fd.append('files', files[i])
+    }
+
+    const res = await this.uploadClient.post('/datasets/upload_folder', fd)
+    return res.data
+  }
+
   // --- Chunked ZIP upload ---
 
   async initZipUpload(params: {
@@ -186,6 +205,8 @@ class APIClient {
     tree?: any[]
     upload_id: string
     message?: string
+    annotation_format?: string | null
+    annotation_classes?: string[]
   }> {
     const res = await this.client.post('/datasets/upload_zip/finalize', params)
     return res.data
@@ -270,6 +291,41 @@ class APIClient {
       `/datasets/relabel/${sampleId}`,
       { label }
     )
+  }
+
+  async getSampleAnnotations(sampleId: string) {
+    return this.client.get<ApiResponse<{ annotations: BoundingBox[] }>>(
+      `/datasets/annotations/${sampleId}`
+    )
+  }
+
+  async updateSampleAnnotations(sampleId: string, annotations: BoundingBox[]) {
+    return this.client.put<ApiResponse<any>>(
+      `/datasets/annotations/${sampleId}`,
+      annotations
+    )
+  }
+
+  async getAnnotationSummary(datasetId: string) {
+    return this.client.get<ApiResponse<AnnotationSummary>>(
+      `/datasets/annotations/summary/${datasetId}`
+    )
+  }
+
+  async uploadAnnotations(datasetId: string, file: File): Promise<{
+    status: string
+    annotations_matched?: number
+    annotation_format?: string | null
+    annotation_classes?: string[]
+    message?: string
+  }> {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await this.uploadClient.post<ApiResponse<any>>(
+      `/datasets/annotations/upload/${datasetId}`,
+      formData
+    )
+    return res.data
   }
 
   async updateSampleImage(
@@ -406,25 +462,26 @@ class APIClient {
   /**
    * Start a remote download (URL, Kaggle, or HuggingFace).
    * Returns an SSE EventSource that streams progress events.
-// Events: { type: 'start', download_id: string }
-//       | { type: 'progress', downloaded: number, total: number }
-//       | { type: 'processing', message: string }
-//       | { type: 'complete', count: number }
-//       | { type: 'error', message: string }   // <-- was 'detail'
-//       | { type: 'canceled' }
+   // Events: { type: 'start', download_id: string }
+   //       | { type: 'dataset_created', dataset_id: string, dataset_name: string }
+   //       | { type: 'progress', downloaded: number, total: number }
+   //       | { type: 'processing', message: string }
+   //       | { type: 'complete', count: number }
+   //       | { type: 'error', message: string }   // <-- was 'detail'
+   //       | { type: 'canceled' }
    */
   createRemoteDownloadSSE(params: {
     source: 'url' | 'kaggle' | 'huggingface'
     url?: string
     dataset_ref?: string
     repo_id?: string
-    dataset_id: string
+    dataset_id?: string
     task: string
   }): EventSource {
     const query = new URLSearchParams()
     query.set('source', params.source)
-    query.set('dataset_id', params.dataset_id)
     query.set('task', params.task)
+    if (params.dataset_id) query.set('dataset_id', params.dataset_id)
     if (params.url) query.set('url', params.url)
     if (params.dataset_ref) query.set('dataset_ref', params.dataset_ref)
     if (params.repo_id) query.set('repo_id', params.repo_id)
@@ -637,17 +694,19 @@ class APIClient {
   async getLLMSuggestions(
     trainingId: string,
     provider: 'ollama' | 'openrouter',
-    modelName: string
+    modelName: string,
+    pastSessions?: any[]
   ) {
     return this.client.post<ApiResponse<any>>(
       '/optimization/llm-suggest',
       {
         training_id: trainingId,
         provider,
-        model_name: modelName
+        model_name: modelName,
+        past_sessions: pastSessions
       },
       {
-        timeout: 120_000 // Override: Allow up to 2 minutes for LLM generation
+        timeout: 120_000
       }
     )
   }

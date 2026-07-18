@@ -31,6 +31,21 @@ QuantizationMethod = Literal[
 
 DatasetSplit = Literal["train", "val", "test", "unassigned"]
 
+class BoundingBox(BaseModel):
+    """Single bounding box in YOLO-normalized format (cx, cy, w, h all 0-1)."""
+    class_name: str
+    cx: float
+    cy: float
+    w: float
+    h: float
+    confidence: Optional[float] = None
+
+class AnnotationData(BaseModel):
+    """All bounding boxes associated with a single sample."""
+    format: str = "yolo"  # detected format: yolo, voc, coco, csv
+    bboxes: List[BoundingBox] = []
+    classes: List[str] = []
+
 class ImageDimensionStats(BaseModel):
     min: float
     max: float
@@ -63,11 +78,10 @@ class DatasetInfo(BaseModel):
     task: TaskType
     sample_count: int
     created_at: float
-    # NEW: user-editable free text (what the dataset is, where it came from,
-    # known quirks) and a small metadata bag (currently just cached
-    # image_stats) - both surfaced to the LLM advisor as extra context.
     description: str = ""
     metadata: Dict[str, Any] = {}
+    annotation_format: Optional[str] = None
+    annotation_classes: List[str] = []
 
 class DatasetSample(BaseModel):
     """Single dataset sample"""
@@ -81,6 +95,7 @@ class DatasetSample(BaseModel):
     size_bytes: Optional[int] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    annotations: Optional[List[BoundingBox]] = None
 
 class TrainingConfig(BaseModel):
     """Training configuration"""
@@ -151,6 +166,7 @@ class BoardRecommendation(BaseModel):
 
 class LLMSuggestion(BaseModel):
     """LLM-powered suggestion for model improvement"""
+    quality_score: int
     suggestion: str
     reasoning: str
     parameters_to_adjust: Dict[str, Any] = {}
