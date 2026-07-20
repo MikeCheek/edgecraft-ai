@@ -1,6 +1,6 @@
 # EdgeCraft AI — Local TinyML Studio
 
-A self-hosted, private alternative to Edge Impulse: collect data, train TinyML models, optimize them for microcontrollers, and export ready-to-flash Arduino/C++ projects, all on your own machine.
+A self-hosted, private alternative to Edge Machine Learning building: collect data, train TinyML models, optimize them for microcontrollers, and export ready-to-flash Arduino/C++ projects, all on your own machine.
 
 > **Status:** functional end-to-end (dataset → train → optimize → evaluate → export), verified with real TensorFlow runs and a `gcc` compile check of generated headers.
 
