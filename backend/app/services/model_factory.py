@@ -27,10 +27,14 @@ from tensorflow.keras import layers, regularizers
 
 @_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
 class ChannelTile3(keras.layers.Layer):
-    """Tiles a 1-channel input to 3 channels for an RGB-only pretrained backbone."""
+    """Tiles a 1-channel input to 3 channels for an RGB-only pretrained backbone.
+
+    Implemented as a concatenation: tf.repeat lowers to TILE/SHAPE ops that
+    TensorFlow Lite Micro doesn't support, which made grayscale models on
+    pretrained backbones impossible to run on a microcontroller."""
 
     def call(self, inputs):
-        return tf.repeat(inputs, 3, axis=-1)
+        return tf.concat([inputs, inputs, inputs], axis=-1)
 
     def compute_output_shape(self, input_shape):
         return tuple(input_shape[:-1]) + (3,)
@@ -238,8 +242,10 @@ class ModelFactory:
             x = layers.Permute((2, 1, 3))(inp)
             x = layers.Reshape((frames, n_mfcc))(x)
             rnn = layers.LSTM if base_model_name == "AudioLSTM" else layers.GRU
-            x = rnn(64, return_sequences=True, kernel_regularizer=reg)(x)
-            x = rnn(64, kernel_regularizer=reg)(x)
+            # unroll=True: a static graph converts to plain TFLite ops
+            # (TensorList-based loops can't be INT8-quantized or run on TFLM).
+            x = rnn(48, return_sequences=True, unroll=True, kernel_regularizer=reg)(x)
+            x = rnn(48, unroll=True, kernel_regularizer=reg)(x)
         elif base_model_name == "MFCC_CNN":
             x = inp
             for filters in (32, 64):
@@ -249,15 +255,20 @@ class ModelFactory:
             x = layers.GlobalAveragePooling2D()(x)
             x = layers.Dense(64, activation="relu", kernel_regularizer=reg)(x)
         else:
-            # DS-CNN (Zhang et al., "Hello Edge"), small variant. BatchNorm is
-            # left out on purpose: with the few hundred clips typical of a
-            # custom keyword dataset its moving statistics lag the weights and
-            # inference-mode accuracy collapses; plain biases train reliably.
-            x = layers.Conv2D(64, (10, 4), strides=(2, 2), padding="same", activation="relu",
+            # DS-CNN (Zhang et al., "Hello Edge"), small variant. BatchNorm
+            # momentum 0.9 (instead of Keras' 0.99) so the moving statistics
+            # keep up on the few hundred clips typical of a custom dataset.
+            x = layers.Conv2D(64, (10, 4), strides=(2, 2), padding="same", use_bias=False,
                               kernel_regularizer=reg)(inp)
+            x = layers.BatchNormalization(momentum=0.9)(x)
+            x = layers.ReLU()(x)
             for _ in range(4):
-                x = layers.DepthwiseConv2D(3, padding="same", activation="relu")(x)
-                x = layers.Conv2D(64, 1, activation="relu", kernel_regularizer=reg)(x)
+                x = layers.DepthwiseConv2D(3, padding="same", use_bias=False)(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
+                x = layers.Conv2D(64, 1, use_bias=False, kernel_regularizer=reg)(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
             x = layers.GlobalAveragePooling2D()(x)
         x = layers.Dropout(dropout_rate)(x)
         out = _final_dense(num_classes, reg)(x)

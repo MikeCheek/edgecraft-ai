@@ -30,7 +30,9 @@ import zipfile
 from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
+from app.services import preprocessing
 from app.utils.c_array_generator import CArrayGenerator
+from app.utils.mfcc_codegen import generate_mfcc_header
 
 # ---------------------------------------------------------------------------
 # Camera module presets
@@ -110,6 +112,28 @@ DEFAULT_DISPLAY_PRESET = "ST7735_TEXT_HUD"
 # Kept for any external code still importing the old name directly.
 DEFAULT_DISPLAY_PINS: Dict[str, Any] = DISPLAY_MODULE_PRESETS[DEFAULT_DISPLAY_PRESET]["pins"]
 
+MIC_MODULE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "NONE": {"label": "No microphone (stream audio over Serial)", "pins": {}},
+    "INMP441_ESP32_S3": {"label": "INMP441 I2S mic on ESP32-S3", "pins": {"sck": 42, "ws": 41, "sd": 2}},
+    "INMP441_ESP32": {"label": "INMP441 I2S mic on ESP32 / ESP32-CAM", "pins": {"sck": 14, "ws": 15, "sd": 13}},
+}
+
+
+def _resolve_mic(board: str, mic_config: Optional[Dict[str, Any]]) -> Tuple[bool, Dict[str, int], str]:
+    """(enabled, pins, preset_id). I2S capture is generated for ESP32 boards only."""
+    mic_config = mic_config or {}
+    preset_id = mic_config.get("module_preset") or ("INMP441_ESP32_S3" if board == "ESP32_S3_N16R8" else
+                                                      "INMP441_ESP32" if board == "ESP32_CAM" else "NONE")
+    preset = MIC_MODULE_PRESETS.get(preset_id, MIC_MODULE_PRESETS["NONE"])
+    enabled = bool(mic_config.get("enabled", preset_id != "NONE")) and board.startswith("ESP32") and preset_id != "NONE"
+    pins = dict(preset["pins"])
+    pins.update({k: v for k, v in mic_config.items() if k in ("sck", "ws", "sd")})
+    pins = _validate_pins(pins)
+    if enabled and any(pins.get(k) is None for k in ("sck", "ws", "sd")):
+        raise ValueError("Microphone needs sck, ws and sd pins.")
+    return enabled, pins, preset_id
+
+
 def list_hardware_presets() -> Dict[str, Any]:
     """Catalog consumed by the frontend to populate the camera/display
     module dropdowns, including default pins so a preview can be shown
@@ -122,6 +146,10 @@ def list_hardware_presets() -> Dict[str, Any]:
         "display_modules": [
             {"id": k, "label": v["label"], "style": v["style"], "pins": v["pins"]}
             for k, v in DISPLAY_MODULE_PRESETS.items()
+        ],
+        "mic_modules": [
+            {"id": k, "label": v["label"], "pins": v["pins"]}
+            for k, v in MIC_MODULE_PRESETS.items()
         ],
     }
 
@@ -141,7 +169,7 @@ def _resolve_camera_pins(
     pins.update(legacy_camera_pins or {})
 
     module_type = camera_config.get("module_type", preset["module_type"])
-    return pins, module_type, preset_id
+    return _validate_pins(pins), module_type, preset_id
 
 def _resolve_display(
     display_config: Optional[Dict[str, Any]],
@@ -159,7 +187,9 @@ def _resolve_display(
     pins.update({k: v for k, v in display_config.items() if k in override_keys})
 
     style = display_config.get("style", preset["style"])
-    return enabled, pins, style, preset_id
+    if style not in ("none", "simple", "pixel_hud"):
+        style = preset["style"]
+    return enabled, _validate_pins(pins), style, preset_id
 
 # ---------------------------------------------------------------------------
 # Context lookup
@@ -180,14 +210,31 @@ def _get_export_context(optimization_id: str) -> Dict[str, Any]:
 
     tflite_bytes = output_path.read_bytes()
     ctx = _get_training_context(session["training_id"])
+    tflm = (session.get("metrics") or {}).get("tflm") or {}
+    ops = tflm.get("ops")
+    output_shape: List[int] = []
+    try:
+        from app.services.mcu_advisor import graph_ops
+        from app.services.evaluator import make_interpreter
+
+        if not ops:
+            ops = sorted({o["op_name"] for o in graph_ops(tflite_bytes)})
+        interp = make_interpreter(tflite_bytes, no_delegate=True)
+        output_shape = [int(d) for d in interp.get_output_details()[0]["shape"]]
+        input_shape = tuple(int(d) for d in interp.get_input_details()[0]["shape"][1:])
+    except Exception:
+        input_shape = tuple(ctx.get("input_shape") or (96, 96, 1))
 
     return {
         "session": session,
         "tflite_bytes": tflite_bytes,
         "task": ctx.get("task") or "IMAGE_CLASSIFICATION",
-        "input_shape": ctx.get("input_shape") or (96, 96, 1),
+        "input_shape": input_shape,
         "labels": ctx.get("labels") or [],
         "method": session.get("frontend_method", session.get("method")),
+        "ops": ops or [],
+        "binary_output": bool(output_shape) and output_shape[-1] == 1 and len(output_shape) == 2,
+        "tflm": tflm,
     }
 
 # ---------------------------------------------------------------------------
@@ -209,10 +256,10 @@ def _estimate_arena_bytes(optimization_id: str, board: str) -> int:
     advisor = MCUAdvisor()
     result = advisor.evaluate_model(optimization_id, board)
     ram_kb = result.get("ram_usage_kb", 64)
-    # Round up to the nearest 4KB and add 20% headroom - safer to allocate
-    # slightly more arena than the heuristic predicts than to crash from
-    # kTfLiteError "AllocateTensors failed" on-device.
-    arena_bytes = int((ram_kb * 1024) * 1.2)
+    # Measured TFLM arenas get 10% headroom (the device build can differ
+    # slightly from the host one); estimates get 20%. Rounded up to 4 KB.
+    headroom = 1.1 if result.get("ram_estimation_method") == "tflite_micro_measured" else 1.2
+    arena_bytes = int((ram_kb * 1024) * headroom)
     arena_bytes = ((arena_bytes // 4096) + 1) * 4096
     return max(arena_bytes, 20 * 1024)
 
@@ -220,24 +267,73 @@ def _estimate_arena_bytes(optimization_id: str, board: str) -> int:
 # Sketch templates
 # ---------------------------------------------------------------------------
 
-_TASK_OUTPUT_IS_BINARY = {"VISUAL_WAKE_WORDS"}
 _AUDIO_TASKS = {"AUDIO_CLASSIFICATION", "KEYWORD_SPOTTING"}
+
+def _c_string(text: str) -> str:
+    """Escape arbitrary text for a C string literal."""
+    out = []
+    for ch in str(text):
+        if ch in ('"', "\\"):
+            out.append("\\" + ch)
+        elif 32 <= ord(ch) < 127:
+            out.append(ch)
+        else:
+            out.extend(f"\\x{b:02x}\"\"" for b in ch.encode("utf-8"))
+    return '"' + "".join(out) + '"'
+
 
 def _labels_array_cpp(labels: List[str]) -> str:
     if not labels:
         labels = ["class_0", "class_1"]
-    # Pre-compute the quoted labels to keep the f-string simple
-    quoted = ", ".join(f'"{l}"' for l in labels)
+    quoted = ", ".join(_c_string(l) for l in labels)
     return "const char* kLabels[] = {" + quoted + "};\nconst int kNumLabels = " + str(len(labels)) + ";"
 
-def _op_resolver_block() -> str:
-    return (
-        "  // Using AllOpsResolver for maximum compatibility with any exported\n"
-        "  // model. Once your model architecture is finalised, you can switch to\n"
-        "  // tflite::MicroMutableOpResolver<N> and register only the ops your\n"
-        "  // model actually needs, which meaningfully reduces flash usage.\n"
-        "  static tflite::AllOpsResolver resolver;"
-    )
+
+# TFLite builtin op name -> MicroMutableOpResolver method. Most follow the
+# CamelCase rule in _resolver_method; these are the exceptions.
+_RESOLVER_EXCEPTIONS = {
+    "UNIDIRECTIONAL_SEQUENCE_LSTM": "AddUnidirectionalSequenceLSTM",
+    "L2_NORMALIZATION": "AddL2Normalization",
+    "L2_POOL_2D": "AddL2Pool2D",
+    "LOGISTIC": "AddLogistic",
+    "SVDF": "AddSvdf",
+}
+
+
+def _resolver_method(op: str) -> str:
+    if op in _RESOLVER_EXCEPTIONS:
+        return _RESOLVER_EXCEPTIONS[op]
+    return "Add" + "".join(part if part[0].isdigit() else part.capitalize() for part in op.split("_"))
+
+
+def _op_resolver_block(ops: Optional[List[str]] = None) -> str:
+    ops = [o for o in (ops or []) if o and o != "DELEGATE"]
+    if not ops:
+        return (
+            "  // Op list unavailable for this model - registering every op.\n"
+            "  static tflite::AllOpsResolver resolver;"
+        )
+    lines = [f"  // Only the {len(ops)} ops this model uses (saves flash vs AllOpsResolver).",
+             f"  static tflite::MicroMutableOpResolver<{len(ops)}> resolver;"]
+    lines += [f"  resolver.{_resolver_method(op)}();" for op in ops]
+    return "\n".join(lines)
+
+
+def _validate_pin(name: str, value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        pin = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Pin '{name}' must be an integer GPIO number, got {value!r}")
+    if not -1 <= pin <= 60:
+        raise ValueError(f"Pin '{name}' = {pin} is outside the valid GPIO range (-1..60)")
+    return pin
+
+
+def _validate_pins(pins: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: _validate_pin(k, v) for k, v in pins.items()}
+
 
 def _resolve_camera_enabled(board: str, camera_config: Optional[Dict[str, Any]]) -> bool:
     """ESP32-CAM (and any board whose camera preset is "integrated") has an
@@ -454,10 +550,11 @@ def _base_ino_header(
     model_name: str, task: str, board: str, input_shape: Tuple[int, ...],
     labels: List[str], arena_bytes: int, display_enabled: bool, display_style: str,
     display_pins: Dict[str, Any], camera_enabled: bool,
+    ops: Optional[List[str]] = None, binary_output: bool = False, audio_enabled: bool = False,
 ) -> str:
     h, w = (input_shape[0], input_shape[1]) if len(input_shape) >= 2 else (96, 96)
     c = input_shape[2] if len(input_shape) >= 3 else 1
-    is_binary = task in _TASK_OUTPUT_IS_BINARY
+    is_od = task == "OBJECT_DETECTION"
 
     display_lib_note = (
         '//   - "Adafruit GFX Library" and "Adafruit ST7735 and ST7789 Library" (for the status display)'
@@ -468,6 +565,11 @@ def _base_ino_header(
         if camera_enabled else ""
     )
     camera_include = '#include "esp_camera.h"\n' if camera_enabled else ""
+    audio_include = '#include "mfcc_frontend.h"\n' if audio_enabled else ""
+    resolver_include = (
+        '#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"'
+        if ops else '#include "tensorflow/lite/micro/all_ops_resolver.h"'
+    )
 
     if not display_enabled:
         display_block = ""
@@ -476,6 +578,81 @@ def _base_ino_header(
     else:
         display_block = _display_simple_includes_and_globals(display_pins, camera_enabled, input_shape)
 
+    if is_od:
+        print_fn = """
+// FOMO-style detector output: a (gridH, gridW, classes+1) grid. Channel 0 is
+// background; a cell whose best channel k>0 scores above the threshold holds
+// the centre of an object of class k-1. Adjacent duplicate cells are skipped.
+const float kDetectionThreshold = 0.5f;
+int lastBestIdx = 0;
+float lastBestVal = 0.0f;
+int lastDetectionCount = 0;
+
+static int bestClassAt(int gw, int k1, int r, int c, float* score) {
+  int best = 0;
+  float bestVal = -1.0f;
+  for (int k = 0; k < k1; k++) {
+    float v = readOutput((r * gw + c) * k1 + k);
+    if (v > bestVal) { bestVal = v; best = k; }
+  }
+  *score = bestVal;
+  return best;
+}
+
+void printPrediction() {
+  const int gh = model_output->dims->data[1];
+  const int gw = model_output->dims->data[2];
+  const int k1 = model_output->dims->data[3];
+  int count = 0;
+  lastBestVal = 0.0f;
+  Serial.println("--- Detections ---");
+  for (int r = 0; r < gh; r++) {
+    for (int c = 0; c < gw; c++) {
+      float p;
+      int k = bestClassAt(gw, k1, r, c, &p);
+      if (k == 0 || p < kDetectionThreshold) continue;
+      float pl, pu;
+      if (c > 0 && bestClassAt(gw, k1, r, c - 1, &pl) == k && pl >= kDetectionThreshold) continue;
+      if (r > 0 && bestClassAt(gw, k1, r - 1, c, &pu) == k && pu >= kDetectionThreshold) continue;
+      count++;
+      Serial.printf("  %s at x=%.2f y=%.2f (%.1f%%)\\n", kLabels[k - 1],
+                    (c + 0.5f) / gw, (r + 0.5f) / gh, p * 100.0f);
+      if (p > lastBestVal) { lastBestVal = p; lastBestIdx = k - 1; }
+    }
+  }
+  lastDetectionCount = count;
+  Serial.printf("%d object(s)\\n", count);
+}
+"""
+    else:
+        print_fn = """
+// Prints EVERY class and its confidence to Serial, then the best result.
+int lastBestIdx = 0;
+float lastBestVal = 0.0f;
+
+void printPrediction() {
+  int best_idx = 0;
+  float best_val = -1e9f;
+  Serial.println("--- Prediction ---");
+  for (int i = 0; i < kNumLabels; i++) {
+    float v = kIsBinaryOutput ? (i == 1 ? readOutput(0) : 1.0f - readOutput(0)) : readOutput(i);
+    Serial.print("  ");
+    Serial.print(kLabels[i]);
+    Serial.print(": ");
+    Serial.print(v * 100.0f, 2);
+    Serial.println("%");
+    if (v > best_val) { best_val = v; best_idx = i; }
+  }
+  Serial.print("Best: ");
+  Serial.print(kLabels[best_idx]);
+  Serial.print("  (");
+  Serial.print(best_val * 100.0f, 2);
+  Serial.println("%)");
+  lastBestIdx = best_idx;
+  lastBestVal = best_val;
+}
+"""
+
     return f"""\
 // {model_name} - generated by EdgeCraft AI
 // Task: {task}
@@ -483,19 +660,21 @@ def _base_ino_header(
 // Input shape: {list(input_shape)}
 //
 // Required Arduino libraries (install via Library Manager):
-//   - "Chirale_TensorFlowLite" (search exactly that name in Library Manager;
-//     provides the <Chirale_TensorFlowLite.h> header used below)
-//   - ESP32 board package (esp32 by Espressif Systems) >= 2.0.x
+//   - "Chirale_TensorFlowLite" (provides <Chirale_TensorFlowLite.h>)
+//   - ESP32 board package (esp32 by Espressif Systems) >= 2.0.x for ESP32 targets
 {camera_lib_note}
 {display_lib_note}
 
 #include <Chirale_TensorFlowLite.h>
-#include "tensorflow/lite/micro/all_ops_resolver.h"
+{resolver_include}
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "model_data.h"
-{camera_include}{display_block}
+#if defined(ESP32)
+#include "esp_heap_caps.h"
+#endif
+{camera_include}{audio_include}{display_block}
 {_labels_array_cpp(labels)}
 
 namespace {{
@@ -504,14 +683,28 @@ tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* model_input = nullptr;
 TfLiteTensor* model_output = nullptr;
 
-constexpr int kTensorArenaSize = {arena_bytes};  // bytes; heuristic estimate + 20% headroom
-alignas(16) uint8_t tensor_arena[kTensorArenaSize];
+// Tensor arena: measured/estimated arena + headroom. If AllocateTensors()
+// fails, increase this and re-flash.
+constexpr int kTensorArenaSize = {arena_bytes};
+uint8_t* tensor_arena = nullptr;
 }}  // namespace
 
 const int kInputHeight = {h};
 const int kInputWidth  = {w};
 const int kInputChannels = {c};
-const bool kIsBinaryOutput = {"true" if is_binary else "false"};
+const bool kIsBinaryOutput = {"true" if binary_output else "false"};
+
+// Large buffers go to PSRAM when the board has it (ESP32-S3 / ESP32-CAM);
+// a static array that big would not fit in internal DRAM.
+void* allocateLarge(size_t bytes) {{
+#if defined(ESP32)
+  void* p = heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) p = heap_caps_aligned_alloc(16, bytes, MALLOC_CAP_8BIT);
+  return p;
+#else
+  return malloc(bytes);
+#endif
+}}
 
 bool initializeModel() {{
   model = tflite::GetModel(g_model);
@@ -521,7 +714,13 @@ bool initializeModel() {{
     return false;
   }}
 
-{_op_resolver_block()}
+  tensor_arena = (uint8_t*)allocateLarge(kTensorArenaSize);
+  if (!tensor_arena) {{
+    MicroPrintf("Could not allocate a %d byte tensor arena", kTensorArenaSize);
+    return false;
+  }}
+
+{_op_resolver_block(ops)}
 
   static tflite::MicroInterpreter static_interpreter(
       model, resolver, tensor_arena, kTensorArenaSize);
@@ -531,77 +730,34 @@ bool initializeModel() {{
     MicroPrintf("AllocateTensors() failed - try increasing kTensorArenaSize");
     return false;
   }}
+  MicroPrintf("Tensor arena used: %d of %d bytes", (int)interpreter->arena_used_bytes(), kTensorArenaSize);
 
   model_input = interpreter->input(0);
   model_output = interpreter->output(0);
   return true;
 }}
 
-// Quantise a float [0,1] input sample into the model's expected dtype,
-// writing directly into the interpreter's input tensor at `index`.
-void setInputSample(int index, float value_0_to_1) {{
+// Write one float input value (same scale as training: pixels in [0,1],
+// MFCCs z-scored), quantizing with rounding + saturation for INT8 models.
+void setInputSample(int index, float value) {{
   if (model_input->type == kTfLiteInt8) {{
-    float scale = model_input->params.scale;
-    int zero_point = model_input->params.zero_point;
-    model_input->data.int8[index] = static_cast<int8_t>(value_0_to_1 / scale + zero_point);
+    int32_t q = (int32_t)lroundf(value / model_input->params.scale) + model_input->params.zero_point;
+    if (q < -128) q = -128;
+    if (q > 127) q = 127;
+    model_input->data.int8[index] = (int8_t)q;
   }} else {{
-    model_input->data.f[index] = value_0_to_1;
+    model_input->data.f[index] = value;
   }}
 }}
 
 float readOutput(int index) {{
   if (model_output->type == kTfLiteInt8) {{
-    float scale = model_output->params.scale;
-    int zero_point = model_output->params.zero_point;
-    return (model_output->data.int8[index] - zero_point) * scale;
+    return (model_output->data.int8[index] - model_output->params.zero_point) * model_output->params.scale;
   }}
   return model_output->data.f[index];
 }}
+{print_fn}"""
 
-// Prints EVERY class and its confidence to Serial (not just the top pick),
-// then the overall best result - so you can see the model's complete
-// output distribution, not just a single guess.
-int lastBestIdx = 0;
-float lastBestVal = 0.0f;
-
-void printPrediction() {{
-  int num_outputs = kIsBinaryOutput ? 2 : kNumLabels;
-  int best_idx = 0;
-  float best_val = -1e9f;
-
-  Serial.println("--- Prediction ---");
-  if (kIsBinaryOutput) {{
-    float p = readOutput(0);
-    float probs[2] = {{ 1.0f - p, p }};
-    for (int i = 0; i < 2 && i < kNumLabels; i++) {{
-      Serial.print("  ");
-      Serial.print(kLabels[i]);
-      Serial.print(": ");
-      Serial.print(probs[i] * 100.0f, 2);
-      Serial.println("%");
-      if (probs[i] > best_val) {{ best_val = probs[i]; best_idx = i; }}
-    }}
-  }} else {{
-    for (int i = 0; i < num_outputs; i++) {{
-      float v = readOutput(i);
-      Serial.print("  ");
-      Serial.print(kLabels[i]);
-      Serial.print(": ");
-      Serial.print(v * 100.0f, 2);
-      Serial.println("%");
-      if (v > best_val) {{ best_val = v; best_idx = i; }}
-    }}
-  }}
-  Serial.print("Best: ");
-  Serial.print(kLabels[best_idx]);
-  Serial.print("  (");
-  Serial.print(best_val * 100.0f, 2);
-  Serial.println("%)");
-
-  lastBestIdx = best_idx;
-  lastBestVal = best_val;
-}}
-"""
 
 def _generic_setup_loop(is_audio: bool, display_enabled: bool) -> str:
     display_init = "  initDisplay();\n" if display_enabled else ""
@@ -609,54 +765,198 @@ def _generic_setup_loop(is_audio: bool, display_enabled: bool) -> str:
         "    showPredictionOnDisplay(kLabels[lastBestIdx], lastBestVal);\n"
         if display_enabled else ""
     )
-    newline = "\n"
 
-    return f"""
+    if is_audio:
+        capture = r"""
 // ---------------------------------------------------------------------------
-// Board-specific input capture
+// Audio over Serial (no microphone configured)
 // ---------------------------------------------------------------------------
-// This board has no camera configured. Replace readSensorFrame() with your
-// actual {"microphone/MFCC" if is_audio else "sensor"} capture code. As a
-// starting point this reads a comma-separated line of floats (already
-// normalised to [0,1] the same way training data was) over Serial, so you
-// can test end-to-end inference before wiring up real hardware capture.
-bool readSensorFrame() {{
+// Send the byte 'A' followed by MFCC_N_SAMPLES little-endian int16 samples
+// of 16 kHz mono audio (the bundled send_wav.py does exactly this). The
+// sketch computes MFCCs on-device with the same front-end used in training.
+float* g_audio = nullptr;
+float g_features[MFCC_N_MFCC * MFCC_OUT_FRAMES];
+
+bool readSensorFrame() {
+  if (Serial.available() < 1 || Serial.read() != 'A') return false;
+  for (int n = 0; n < MFCC_N_SAMPLES; n++) {
+    uint8_t b[2];
+    if (Serial.readBytes(b, 2) != 2) return false;
+    g_audio[n] = (int16_t)(b[0] | (b[1] << 8)) / 32768.0f;
+  }
+  mfcc_compute(g_audio, g_features);
+  for (int i = 0; i < MFCC_N_MFCC * MFCC_OUT_FRAMES; i++) setInputSample(i, g_features[i]);
+  return true;
+}
+"""
+        ready = "Model ready. Run send_wav.py to stream a clip."
+        extra_setup = "  Serial.setTimeout(5000);\n  g_audio = (float*)allocateLarge(MFCC_N_SAMPLES * sizeof(float));\n"
+    else:
+        capture = r"""
+// ---------------------------------------------------------------------------
+// Input over Serial (no camera configured)
+// ---------------------------------------------------------------------------
+// Replace readSensorFrame() with your sensor capture code. As a starting
+// point it reads one line of comma-separated floats (normalised exactly like
+// training data: pixels in [0,1]) so you can test inference end to end.
+bool readSensorFrame() {
   if (!Serial.available()) return false;
-  String line = Serial.readStringUntil('{newline}');
+  String line = Serial.readStringUntil('\n');
   int idx = 0;
   int start = 0;
-  int total = kInputHeight * kInputWidth * kInputChannels;
-  for (int i = 0; i < line.length() && idx < total; i++) {{
-    if (line[i] == ',' || i == line.length() - 1) {{
-      String tok = line.substring(start, (i == line.length() - 1) ? i + 1 : i);
+  const int total = kInputHeight * kInputWidth * kInputChannels;
+  for (int i = 0; i < (int)line.length() && idx < total; i++) {
+    if (line[i] == ',' || i == (int)line.length() - 1) {
+      String tok = line.substring(start, (i == (int)line.length() - 1) ? i + 1 : i);
       setInputSample(idx++, tok.toFloat());
       start = i + 1;
+    }
+  }
+  return idx == total;
+}
+"""
+        ready = "Model ready. Send a comma-separated normalised input line to run inference."
+        extra_setup = ""
+
+    return capture + f"""
+void setup() {{
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("EdgeCraft AI - model init...");
+{display_init}{extra_setup}  if (!initializeModel()) {{
+    Serial.println("ERROR: model init failed");
+    while (1) delay(1000);
+  }}
+  Serial.println("{ready}");
+}}
+
+void loop() {{
+  if (readSensorFrame()) {{
+    unsigned long t0 = micros();
+    if (interpreter->Invoke() != kTfLiteOk) {{
+      Serial.println("ERROR: inference failed");
+      return;
+    }}
+    Serial.printf("Inference: %lu us\\n", micros() - t0);
+    printPrediction();
+{display_call}  }}
+}}
+"""
+
+
+def _i2s_mic_setup_loop(mic_pins: Dict[str, int], display_enabled: bool) -> str:
+    display_init = "  initDisplay();\n" if display_enabled else ""
+    display_call = "  showPredictionOnDisplay(kLabels[lastBestIdx], lastBestVal);\n" if display_enabled else ""
+    return f"""
+// ---------------------------------------------------------------------------
+// I2S microphone (e.g. INMP441 / SPH0645) -> on-device MFCC -> model
+// ---------------------------------------------------------------------------
+#include <driver/i2s.h>
+#define I2S_MIC_SCK {mic_pins['sck']}
+#define I2S_MIC_WS  {mic_pins['ws']}
+#define I2S_MIC_SD  {mic_pins['sd']}
+
+float* g_audio = nullptr;
+float g_features[MFCC_N_MFCC * MFCC_OUT_FRAMES];
+
+bool initMic() {{
+  i2s_config_t cfg = {{}};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
+  cfg.sample_rate = MFCC_SAMPLE_RATE;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 256;
+  i2s_pin_config_t pins = {{}};
+  pins.mck_io_num = I2S_PIN_NO_CHANGE;
+  pins.bck_io_num = I2S_MIC_SCK;
+  pins.ws_io_num = I2S_MIC_WS;
+  pins.data_out_num = I2S_PIN_NO_CHANGE;
+  pins.data_in_num = I2S_MIC_SD;
+  if (i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL) != ESP_OK) return false;
+  return i2s_set_pin(I2S_NUM_0, &pins) == ESP_OK;
+}}
+
+// Records one clip (MFCC_N_SAMPLES at 16 kHz) into g_audio.
+void recordClip() {{
+  int32_t buf[256];
+  int n = 0;
+  while (n < MFCC_N_SAMPLES) {{
+    size_t bytes = 0;
+    i2s_read(I2S_NUM_0, buf, sizeof(buf), &bytes, portMAX_DELAY);
+    for (size_t i = 0; i < bytes / 4 && n < MFCC_N_SAMPLES; i++) {{
+      g_audio[n++] = (buf[i] >> 8) / 8388608.0f;  // 24-bit sample in a 32-bit slot
     }}
   }}
-  return idx == total;
 }}
 
 void setup() {{
   Serial.begin(115200);
   delay(1000);
-  Serial.println("EdgeCraft AI - model init...");
-{display_init}  if (!initializeModel()) {{
+  Serial.println("EdgeCraft AI - microphone + model init...");
+{display_init}  g_audio = (float*)allocateLarge(MFCC_N_SAMPLES * sizeof(float));
+  if (!g_audio || !initMic()) {{
+    Serial.println("ERROR: microphone init failed - check I2S wiring");
+    while (1) delay(1000);
+  }}
+  if (!initializeModel()) {{
     Serial.println("ERROR: model init failed");
     while (1) delay(1000);
   }}
-  Serial.println("Model ready. Send a comma-separated normalised input line to run inference.");
+  Serial.println("Listening...");
 }}
 
 void loop() {{
-  if (readSensorFrame()) {{
-    if (interpreter->Invoke() != kTfLiteOk) {{
-      Serial.println("ERROR: inference failed");
-      return;
-    }}
-    printPrediction();
-{display_call}  }}
-}}
+  recordClip();
+  unsigned long t0 = micros();
+  mfcc_compute(g_audio, g_features);
+  for (int i = 0; i < MFCC_N_MFCC * MFCC_OUT_FRAMES; i++) setInputSample(i, g_features[i]);
+  unsigned long t1 = micros();
+  if (interpreter->Invoke() != kTfLiteOk) {{
+    Serial.println("ERROR: inference failed");
+    return;
+  }}
+  Serial.printf("MFCC: %lu us, inference: %lu us\\n", t1 - t0, micros() - t1);
+  printPrediction();
+{display_call}}}
 """
+
+
+SEND_WAV_SCRIPT = r"""#!/usr/bin/env python3
+# Stream a WAV clip to an EdgeCraft sketch over Serial: python send_wav.py COM3 clip.wav
+# Needs `pip install pyserial numpy`. The clip is converted to 16 kHz mono int16,
+# padded/trimmed to the model's clip length, then sent as 'A' + raw samples.
+import sys, time, wave
+import numpy as np
+import serial
+
+N_SAMPLES = __N_SAMPLES__
+port, path = sys.argv[1], sys.argv[2]
+with wave.open(path) as w:
+    sr, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    raw = w.readframes(w.getnframes())
+data = np.frombuffer(raw, dtype={1: np.uint8, 2: np.int16, 4: np.int32}[width]).astype(np.float32)
+if width == 1:
+    data = (data - 128) / 128
+else:
+    data /= float(2 ** (8 * width - 1))
+data = data.reshape(-1, ch).mean(axis=1)
+if sr != 16000:
+    data = np.interp(np.arange(0, len(data), sr / 16000.0), np.arange(len(data)), data)
+data = np.pad(data[:N_SAMPLES], (0, max(0, N_SAMPLES - len(data))))
+pcm = (np.clip(data, -1, 1) * 32767).astype("<i2").tobytes()
+with serial.Serial(port, 115200, timeout=1) as s:
+    time.sleep(2)  # board resets when the port opens
+    s.write(b"A" + pcm)
+    end = time.time() + 5
+    while time.time() < end:
+        line = s.readline().decode(errors="replace").rstrip()
+        if line:
+            print(line)
+"""
+
 
 def _camera_pins_defines(pins: Dict[str, int]) -> str:
     return (
@@ -1008,17 +1308,25 @@ def generate_arduino_sketch(
     camera_pins: Optional[Dict[str, int]] = None,
     display_config: Optional[Dict[str, Any]] = None,
     camera_config: Optional[Dict[str, Any]] = None,
+    mic_config: Optional[Dict[str, Any]] = None,
+    ops: Optional[List[str]] = None,
+    binary_output: bool = False,
 ) -> str:
-    camera_enabled = _resolve_camera_enabled(board, camera_config)
+    is_audio = task in _AUDIO_TASKS
+    camera_enabled = _resolve_camera_enabled(board, camera_config) and not is_audio
     resolved_camera_pins, camera_module_type, _camera_preset_id = _resolve_camera_pins(camera_config, camera_pins)
     display_enabled, display_pins, display_style, _display_preset_id = _resolve_display(display_config)
+    mic_enabled, mic_pins, _mic_preset = _resolve_mic(board, mic_config) if is_audio else (False, {}, "NONE")
 
     header = _base_ino_header(
         model_name, task, board, input_shape, labels, arena_bytes,
         display_enabled, display_style, display_pins, camera_enabled,
+        ops=ops, binary_output=binary_output, audio_enabled=is_audio,
     )
 
-    if camera_enabled and display_enabled and display_style == "pixel_hud":
+    if is_audio and mic_enabled:
+        body = _i2s_mic_setup_loop(mic_pins, display_enabled)
+    elif camera_enabled and display_enabled and display_style == "pixel_hud":
         body = _camera_setup_loop_pixel_hud(input_shape, resolved_camera_pins, camera_module_type)
     elif camera_enabled:
         body = _camera_setup_loop_simple(input_shape, resolved_camera_pins, display_enabled, camera_module_type)
@@ -1036,7 +1344,15 @@ def _generate_readme(
     camera_pins: Dict[str, int], display_pins: Dict[str, Any],
     camera_enabled: bool, camera_module_type: str, camera_preset_id: str,
     display_enabled: bool, display_style: str, display_preset_id: str,
+    audio: str = "", tflm: Optional[Dict[str, Any]] = None,
 ) -> str:
+    tflm = tflm or {}
+    if tflm.get("supported") and tflm.get("arena_bytes"):
+        arena_note = (f"Verified with the TensorFlow Lite Micro interpreter on the host: the model needs "
+                      f"{tflm['arena_bytes'] // 1024} KB of arena; the sketch reserves {arena_bytes // 1024} KB.")
+    else:
+        arena_note = (f"Estimated from a liveness analysis of the graph ({arena_bytes // 1024} KB reserved). "
+                      "If `AllocateTensors()` fails, increase `kTensorArenaSize` and re-flash.")
     if camera_enabled:
         camera_label = CAMERA_MODULE_PRESETS.get(camera_preset_id, {}).get("label", camera_preset_id)
         camera_note = f"""
@@ -1047,6 +1363,8 @@ assignments (these match the camera module preset you chose in the
 Deployment tab; double-check them against your actual wiring if you used a
 custom module).
 """
+    elif audio:
+        camera_note = audio
     else:
         camera_note = (
             "\nThis board has no camera configured. The sketch reads a test\n"
@@ -1103,9 +1421,8 @@ via the Arduino Library Manager before flashing.
 - Optimization applied: {method}
 - Input shape: {list(input_shape)}
 - Classes: {", ".join(labels) if labels else "(none recorded)"}
-- Estimated tensor arena: {arena_bytes // 1024} KB (heuristic + 20% headroom -
-  if you see `AllocateTensors() failed` at runtime, increase `kTensorArenaSize`
-  in `sketch.ino` and re-flash)
+- Tensor arena: {arena_bytes // 1024} KB, allocated in PSRAM when available.
+  {arena_note}
 
 ## Required Arduino libraries
 1. Board package: **esp32** by Espressif Systems (Boards Manager) - version 2.0.x or newer
@@ -1133,13 +1450,30 @@ class and its confidence percentage, then a `Best: <label> (<confidence>%)`
 summary line.
 {"The status display mirrors this with the live camera preview and the current best prediction." if display_enabled and camera_enabled else ("The status display mirrors the current best prediction as text." if display_enabled else "")}
 
-## Notes on the tensor arena estimate
-The RAM figure above comes from introspecting the exported TFLite model's
-tensors on this PC, not from compiling it with TFLite Micro on the actual
-device - the real allocator may need a different amount. If allocation
-fails on-device, increase `kTensorArenaSize` in steps of a few KB and
-re-flash until `AllocateTensors()` succeeds.
+## Notes
+- The sketch registers only the ops the model uses (`MicroMutableOpResolver`),
+  which keeps flash usage down. It prints the arena actually used at boot.
+- `Inference: N us` lines report real on-device latency.
 """
+
+def _audio_readme(ctx: Dict[str, Any], mic_enabled: bool, mic_pins: Dict[str, int]) -> str:
+    n_mfcc, frames = int(ctx["input_shape"][0]), int(ctx["input_shape"][1])
+    p = preprocessing.audio_params(ctx["task"], n_mfcc)
+    common = (
+        f"\nAudio is turned into features on-device by `mfcc_frontend.h`, a port of the exact "
+        f"training front-end ({n_mfcc} MFCCs x {frames} frames from a {p['duration']} s, 16 kHz clip).\n"
+    )
+    if mic_enabled:
+        return common + (
+            f"\nAn I2S microphone (INMP441-style) is expected on SCK={mic_pins['sck']}, "
+            f"WS={mic_pins['ws']}, SD={mic_pins['sd']} (L/R pin to GND). The sketch records "
+            "a clip, computes MFCCs and classifies it in a loop.\n"
+        )
+    return common + (
+        "\nNo microphone is configured: stream a WAV file from your PC with\n"
+        "`python send_wav.py <serial-port> clip.wav` (needs `pip install pyserial numpy`).\n"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Full package (zip)
@@ -1150,6 +1484,7 @@ def generate_export_package(
     camera_pins: Optional[Dict[str, int]] = None,
     display_config: Optional[Dict[str, Any]] = None,
     camera_config: Optional[Dict[str, Any]] = None,
+    mic_config: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """Build a zip containing model_data.h, sketch.ino, and README.md,
     wired for the user's actual hardware configuration (an optional camera -
@@ -1159,8 +1494,9 @@ def generate_export_package(
 
     c_header = CArrayGenerator.binary_to_c_array(ctx["tflite_bytes"], model_name="model")
     arena_bytes = _estimate_arena_bytes(optimization_id, board)
+    is_audio = ctx["task"] in _AUDIO_TASKS
 
-    camera_enabled = _resolve_camera_enabled(board, camera_config)
+    camera_enabled = _resolve_camera_enabled(board, camera_config) and not is_audio
     resolved_camera_pins, camera_module_type, camera_preset_id = _resolve_camera_pins(camera_config, camera_pins)
     display_enabled, display_pins, display_style, display_preset_id = _resolve_display(display_config)
 
@@ -1174,7 +1510,11 @@ def generate_export_package(
         camera_pins=camera_pins,
         display_config=display_config,
         camera_config=camera_config,
+        mic_config=mic_config,
+        ops=ctx["ops"],
+        binary_output=ctx["binary_output"],
     )
+    mic_enabled, mic_pins, _ = _resolve_mic(board, mic_config) if is_audio else (False, {}, "NONE")
 
     readme = _generate_readme(
         board=board,
@@ -1191,6 +1531,8 @@ def generate_export_package(
         display_enabled=display_enabled,
         display_style=display_style,
         display_preset_id=display_preset_id,
+        audio=_audio_readme(ctx, mic_enabled, mic_pins) if is_audio else "",
+        tflm=ctx["tflm"],
     )
 
     buf = io.BytesIO()
@@ -1198,6 +1540,11 @@ def generate_export_package(
         zf.writestr("model_data.h", c_header)
         zf.writestr("sketch.ino", sketch)
         zf.writestr("README.md", readme)
+        if is_audio:
+            n_mfcc, frames = int(ctx["input_shape"][0]), int(ctx["input_shape"][1])
+            zf.writestr("mfcc_frontend.h", generate_mfcc_header(ctx["task"], n_mfcc, frames))
+            n_samples = preprocessing.audio_params(ctx["task"], n_mfcc)["n_samples"]
+            zf.writestr("send_wav.py", SEND_WAV_SCRIPT.replace("__N_SAMPLES__", str(int(n_samples))))
     buf.seek(0)
     return buf.read()
 
@@ -1206,6 +1553,7 @@ def preview_sketch(
     camera_pins: Optional[Dict[str, int]] = None,
     display_config: Optional[Dict[str, Any]] = None,
     camera_config: Optional[Dict[str, Any]] = None,
+    mic_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return just the .ino text (no zip) so the frontend can show a live
     'ready to flash' code preview as the user edits pin values, without
@@ -1222,4 +1570,7 @@ def preview_sketch(
         camera_pins=camera_pins,
         display_config=display_config,
         camera_config=camera_config,
+        mic_config=mic_config,
+        ops=ctx["ops"],
+        binary_output=ctx["binary_output"],
     )

@@ -234,6 +234,9 @@ class ExportConfigRequest(BaseModel):
     #   "cs": .., "dc": .., "rst": .., "sck": .., "mosi": .., "backlight": ..  # optional pin overrides
     # }
     display_config: Optional[dict] = None
+    # Audio models only: {"module_preset": "INMP441_ESP32_S3" | "INMP441_ESP32" | "NONE",
+    #                     "enabled": bool, "sck": .., "ws": .., "sd": ..}
+    mic_config: Optional[dict] = None
 
 @router.post("/export/{optimization_id}")
 async def export_project(optimization_id: str, request: ExportConfigRequest):
@@ -248,6 +251,7 @@ async def export_project(optimization_id: str, request: ExportConfigRequest):
             camera_pins=request.camera_pins,
             display_config=request.display_config,
             camera_config=request.camera_config,
+            mic_config=request.mic_config,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -274,6 +278,7 @@ async def preview_export_sketch(optimization_id: str, request: ExportConfigReque
             camera_pins=request.camera_pins,
             display_config=request.display_config,
             camera_config=request.camera_config,
+            mic_config=request.mic_config,
         )
         return {"status": "success", "sketch": sketch}
     except Exception as e:

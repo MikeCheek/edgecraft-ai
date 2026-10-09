@@ -29,11 +29,15 @@ logger = logging.getLogger(__name__)
 MAX_EVAL_SAMPLES_DEFAULT = 300
 
 
-def make_interpreter(tflite_bytes: bytes = None, model_path: str = None):
+def make_interpreter(tflite_bytes: bytes = None, model_path: str = None, no_delegate: bool = False):
     """TFLite interpreter, retrying without the default XNNPACK delegate when
-    it rejects a graph (it can't prepare some int8 ops, e.g. hard-swish)."""
+    it rejects a graph (it can't prepare some int8 ops, e.g. hard-swish).
+    `no_delegate` forces the plain builtin kernels, needed whenever the graph
+    itself is inspected (XNNPACK replaces ops with opaque DELEGATE nodes)."""
     kwargs = {"model_content": tflite_bytes} if tflite_bytes is not None else {"model_path": model_path}
     try:
+        if no_delegate:
+            raise RuntimeError("delegate disabled")
         interpreter = tf.lite.Interpreter(**kwargs)
         interpreter.allocate_tensors()
         return interpreter

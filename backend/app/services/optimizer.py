@@ -266,8 +266,16 @@ def _load_training_data(ctx: Dict[str, Any], split: str, max_samples: Optional[i
 # Conversion helpers
 # ---------------------------------------------------------------------------
 
+def _fixed_batch(model: keras.Model) -> keras.Model:
+    """Re-wrap the model with a static batch size of 1. Static shapes let the
+    converter fold away SHAPE / FILL / STRIDED_SLICE ops (dynamic batch
+    handling, RNN initial states) that TensorFlow Lite Micro can't run."""
+    inp = keras.Input(shape=model.input_shape[1:], batch_size=1, name="input")
+    return keras.Model(inp, model(inp, training=False))
+
+
 def _convert(model: keras.Model, quantization: str, calibration: Optional[np.ndarray] = None) -> bytes:
-    converter = tf.lite.TFLiteConverter.from_keras_model(model)
+    converter = tf.lite.TFLiteConverter.from_keras_model(_fixed_batch(model))
     if quantization == "dynamic":
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
     elif quantization == "float16":
@@ -461,6 +469,18 @@ def optimize(optimization_id: str, model_base_dir: str = None) -> None:
         compressed = len(gzip.compress(tflite_data, compresslevel=9))
         log(f"Conversion done - {len(tflite_data) / 1024:.1f} KB ({compressed / 1024:.1f} KB gzipped)")
 
+        from app.services.mcu_advisor import tflm_verify
+
+        tflm = tflm_verify(tflite_data)
+        if tflm.get("available"):
+            if tflm.get("supported"):
+                log(f"TensorFlow Lite Micro check passed - measured arena {tflm['arena_bytes'] / 1024:.1f} KB, "
+                    f"max output diff vs TFLite {tflm.get('max_abs_diff')}")
+            else:
+                log(f"TensorFlow Lite Micro can't run this model: {tflm.get('error')}", "warning")
+        elif tflm.get("unsupported_ops"):
+            log(f"Ops not in TensorFlow Lite Micro: {tflm['unsupported_ops']}", "warning")
+
         with _lock:
             session["output_path"] = str(output_path)
             session["metrics"] = {
@@ -469,6 +489,8 @@ def optimize(optimization_id: str, model_base_dir: str = None) -> None:
                 "compressed_size_bytes": compressed,
                 "baseline_compressed_size_bytes": len(gzip.compress(baseline, compresslevel=9)),
                 "note": note,
+                "tflm": tflm,
+                "ops": tflm.get("ops", []),
                 **extra,
             }
             session["optimized_size_bytes"] = len(tflite_data)
