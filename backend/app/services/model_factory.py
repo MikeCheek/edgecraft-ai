@@ -6,9 +6,10 @@ Design rules (all models):
   what app.services.preprocessing produces and what the exported sketch
   feeds on-device. Backbone-specific normalisation is a Rescaling layer
   inside the model, so it is baked into the .tflite file too.
-* Pretrained backbones are called with training=False so their
-  BatchNorm statistics stay frozen during fine-tuning (otherwise small
-  batches wreck the ImageNet features).
+* Pretrained backbones keep their BatchNorm layers frozen (inference mode)
+  during fine-tuning - otherwise small batches wreck the ImageNet features.
+  Keras 3 ignores the construction-time training=False once the backbone
+  is made trainable, so set_backbone_trainable() freezes BN explicitly.
 * The final layer always computes in float32, so mixed-precision GPU
   training stays numerically stable without wrapping the model in raw
   tf ops (which Keras 3 rejects).
@@ -103,10 +104,17 @@ def _final_dense(num_classes: int, reg=None, name: str = "predictions"):
                         dtype="float32", name=name)
 
 
-def _set_trainable(base: keras.Model, trainable_layers: int) -> None:
+def set_backbone_trainable(base: keras.Model, trainable_layers: int = 0) -> None:
+    """Unfreeze a pretrained backbone (only its last `trainable_layers`
+    layers if > 0) while keeping every BatchNormalization layer frozen: a
+    non-trainable BN layer runs in inference mode with its ImageNet
+    statistics, which fine-tuning on small batches would otherwise destroy."""
     base.trainable = True
     if trainable_layers > 0:
         for layer in base.layers[:-trainable_layers]:
+            layer.trainable = False
+    for layer in base.layers:
+        if isinstance(layer, layers.BatchNormalization):
             layer.trainable = False
 
 
@@ -200,7 +208,7 @@ class ModelFactory:
             x = layers.Rescaling(scale, offset, name="backbone_scaling")(x)
             base = ModelFactory._pretrained_backbone(base_model_name, (input_shape[0], input_shape[1]))
             base._name = "backbone"
-            _set_trainable(base, trainable_layers)
+            set_backbone_trainable(base, trainable_layers)
             x = base(x, training=False)
             x = layers.GlobalAveragePooling2D()(x)
             if base_model_name in ("EfficientNet", "ResNet50V2"):
@@ -322,7 +330,7 @@ class ModelFactory:
                 input_shape=(h, w, 3), alpha=0.35, include_top=False, weights="imagenet"
             )
             trunk = keras.Model(base.input, base.get_layer("block_6_expand_relu").output, name="backbone")
-            _set_trainable(trunk, trainable_layers)
+            set_backbone_trainable(trunk, trainable_layers)
             x = trunk(x, training=False)
         else:
             for i, filters in enumerate((8, 16, 32)):
