@@ -4,18 +4,18 @@
 
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import {
-  Play, Square, RefreshCw, TrendingUp, Clock, Award, Timer,
-  ShieldCheck, History, ZoomIn, ChevronDown, ChevronUp,
-  AlertTriangle, Settings, Activity, Shuffle, BoxSelect, Lightbulb, X
+  Play, Square, RefreshCw, Clock,
+  ShieldCheck, History, ChevronDown, ChevronUp,
+  AlertTriangle, Settings, Activity, Shuffle, Lightbulb, X
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
 import { useToast } from '../../context/ToastContext';
 import { useAppContext } from '../../context/AppContext';
 import { TinyMLTask, TrainingStatus } from '../../types';
-import { MetricChart, ChartModal } from './Chart';
+import { TrainingDashboard } from './TrainingDashboard';
 import {
   getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS, OD_MODELS, MODEL_HINTS, FREEZE_AUTO,
-  formatDate, formatTime,
+  formatDate,
   BATCH_SIZE_OPTIONS, DROPOUT_OPTIONS, LEARNING_RATE_OPTIONS,
   EPOCHS_OPTIONS,
   ES_PATIENCE_OPTIONS,
@@ -137,7 +137,6 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [isSplitting, setIsSplitting] = useState(false);
 
   // --- Chart modal ---
-  const [expandedLiveChart, setExpandedLiveChart] = useState<'accuracy' | 'loss' | null>(null);
 
   // --- Fetch helpers ---
   const fetchDatasets = async () => {
@@ -203,7 +202,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
       setStatus(s);
       dispatch({ type: 'SET_TRAINING', payload: s });
       if (s.status === 'running' || s.status === 'initialized' || s.status === 'queued') {
-        pollRef.current = setTimeout(() => pollStatus(id), s.status === 'queued' ? 3000 : 2000);
+        pollRef.current = setTimeout(() => pollStatus(id), s.status === 'queued' ? 3000 : 1000);
       } else if (s.status === 'completed' || s.status === 'cancelled' || s.status === 'failed') {
         fetchPastSessions();
         if (s.status === 'completed') onTrainingComplete?.();
@@ -215,6 +214,16 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   useEffect(() => {
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, []);
+
+  // Collapse the configuration whenever a job becomes active (started here,
+  // or reattached after navigation / reload) so the live dashboard is in view.
+  // Only on the transition, so the user can re-open it while training.
+  const wasActiveRef = useRef(false);
+  useEffect(() => {
+    const active = status?.status === 'running' || status?.status === 'initialized' || status?.status === 'queued';
+    if (active && !wasActiveRef.current) setIsConfigExpanded(false);
+    wasActiveRef.current = active;
+  }, [status?.status]);
 
   // --- Duplicate check ---
   const checkDuplicate = useCallback(() => {
@@ -357,21 +366,6 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   // --- Derived values ---
   const isRunning = status?.status === 'running' || status?.status === 'initialized' || status?.status === 'queued';
   const availableModels = isODTask ? OD_MODELS : AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
-  const latestMetrics = status?.metrics?.length
-    ? status.metrics[status.metrics.length - 1]
-    : null;
-  const accuracyData = (status?.metrics ?? []).map((m) => ({
-    epoch: m.epoch,
-    train: parseFloat((m.accuracy * 100).toFixed(2)),
-    val: parseFloat((m.val_accuracy * 100).toFixed(2)),
-  }));
-  const lossData = (status?.metrics ?? []).map((m) => ({
-    epoch: m.epoch,
-    train: parseFloat(m.loss.toFixed(4)),
-    val: parseFloat(m.val_loss.toFixed(4)),
-  }));
-  const elapsed: number = status?.elapsed_seconds ?? 0;
-  const remaining: number = status?.remaining_seconds ?? 0;
   const statusColor =
     status?.status === 'completed'
       ? 'text-green-400'
@@ -380,12 +374,6 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         : status?.status === 'cancelled'
           ? 'text-yellow-400'
           : 'text-purple-400';
-  const barColor =
-    status?.status === 'completed'
-      ? 'bg-green-500'
-      : status?.status === 'failed'
-        ? 'bg-red-500'
-        : 'bg-gradient-to-r from-purple-500 to-pink-500';
   const hasUnassigned = splitSummary ? splitSummary.unassigned > 0 : false;
   const splitReady = splitSummary
     ? splitSummary.unassigned === 0 && splitSummary.train > 0 && splitSummary.val > 0
@@ -414,6 +402,14 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
           <div className="flex items-center gap-3">
             <Settings className="w-5 h-5 text-purple-400" />
             <h3 className="text-lg font-semibold text-white">Model Configuration</h3>
+            {!isConfigExpanded && (
+              <span className="hidden sm:inline text-xs text-gray-400 font-mono truncate">
+                {isRunning && status
+                  ? `${status.base_model ?? baseModel} · ${status.total_epochs} ep · batch ${status.batch_size ?? batchSize} · lr ${status.learning_rate ?? learningRate}`
+                  : `${baseModel} · ${epochs} ep · batch ${batchSize} · lr ${learningRate}`}
+                {isRunning && <span className="ml-2 text-purple-300 font-sans">(locked while training)</span>}
+              </span>
+            )}
           </div>
           {isConfigExpanded
             ? <ChevronUp className="w-5 h-5 text-gray-400" />
@@ -1083,125 +1079,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
           </div>
 
           <div className="space-y-6">
-            {/* Progress bar */}
-            <div>
-              <div className="flex justify-between text-sm mb-1">
-                <span className="text-gray-400">
-                  Epoch {status.current_epoch} / {status.total_epochs}
-                </span>
-              </div>
-              <div className="w-full bg-slate-800 rounded-full h-3 overflow-hidden shadow-inner">
-                <div
-                  className={`h-3 rounded-full transition-all duration-500 ${barColor}`}
-                  style={{ width: `${status.progress || 0}%` }}
-                />
-              </div>
-              {(isRunning || status.status === 'completed') && elapsed > 0 && (
-                <div className="flex gap-6 mt-3 text-xs text-gray-400">
-                  <span className="flex items-center gap-1">
-                    <Clock className="w-4 h-4 text-cyan-500" />
-                    Elapsed:{' '}
-                    <span className="text-cyan-300 font-mono ml-1">{formatTime(elapsed)}</span>
-                  </span>
-                  {isRunning && (
-                    <span className="flex items-center gap-1">
-                      <Timer className="w-4 h-4 text-amber-500" />
-                      Remaining:{' '}
-                      <span className="text-amber-300 font-mono ml-1">{formatTime(remaining)}</span>
-                    </span>
-                  )}
-                  {status.status === 'completed' && (
-                    <span className="flex items-center gap-1">
-                      <Timer className="w-4 h-4 text-green-500" />
-                      Total:{' '}
-                      <span className="text-green-300 font-mono ml-1">{formatTime(elapsed)}</span>
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Latest metric tiles */}
-            {latestMetrics && (
-              <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
-                {(
-                  <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                    <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                      <TrendingUp className="w-3 h-3" /> {metricLabel}
-                    </div>
-                    <span className="text-2xl font-bold text-green-400">
-                      {(latestMetrics.accuracy * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                )}
-                {(
-                  <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                    <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                      <Award className="w-3 h-3" /> Val {metricLabel}
-                    </div>
-                    <span className="text-2xl font-bold text-cyan-400">
-                      {(latestMetrics.val_accuracy * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                )}
-                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                    {isODTask ? <BoxSelect className="w-3 h-3" /> : null}
-                    {isODTask ? 'Train Loss' : 'Loss'}
-                  </div>
-                  <span className={`text-2xl font-bold ${isODTask ? 'text-purple-400' : 'text-yellow-400'}`}>
-                    {latestMetrics.loss.toFixed(4)}
-                  </span>
-                </div>
-                <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
-                  <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                    <Clock className="w-3 h-3" /> Val Loss
-                  </div>
-                  <span className="text-2xl font-bold text-orange-400">
-                    {latestMetrics.val_loss.toFixed(4)}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Charts */}
-            {lossData.length >= 2 && (
-              <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
-                {accuracyData.length >= 2 && (
-                  <div className="relative">
-                    <button
-                      onClick={() => setExpandedLiveChart('accuracy')}
-                      className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
-                      title="Expand chart"
-                    >
-                      <ZoomIn className="w-4 h-4" />
-                    </button>
-                    <MetricChart
-                      data={accuracyData}
-                      label={`${metricLabel} (%)`}
-                      color="#22c55e"
-                      valColor="#06b6d4"
-                      formatY={(v: number) => `${v}%`}
-                    />
-                  </div>
-                )}
-                <div className="relative">
-                  <button
-                    onClick={() => setExpandedLiveChart('loss')}
-                    className="absolute top-2 right-2 z-10 p-1.5 bg-slate-700/80 hover:bg-slate-600 rounded-lg text-gray-400 hover:text-white transition"
-                    title="Expand chart"
-                  >
-                    <ZoomIn className="w-4 h-4" />
-                  </button>
-                  <MetricChart
-                    data={lossData}
-                    label={isODTask ? 'Weighted grid loss' : 'Loss'}
-                    color="#eab308"
-                    valColor="#f97316"
-                  />
-                </div>
-              </div>
-            )}
+            <TrainingDashboard status={status} isRunning={isRunning} isOD={isODTask} metricLabel={metricLabel} />
 
             {/* Queue */}
             {status.status === 'queued' && (
@@ -1236,27 +1114,6 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
             />
           </div>
         </div>
-      )}
-
-      {/* --- Chart Modals --- */}
-      {expandedLiveChart === 'accuracy' && (
-        <ChartModal
-          label={`${metricLabel} (%)`}
-          color="#22c55e"
-          valColor="#06b6d4"
-          data={accuracyData}
-          formatY={(v: number) => `${v}%`}
-          onClose={() => setExpandedLiveChart(null)}
-        />
-      )}
-      {expandedLiveChart === 'loss' && (
-        <ChartModal
-          label="Loss"
-          color="#eab308"
-          valColor="#f97316"
-          data={lossData}
-          onClose={() => setExpandedLiveChart(null)}
-        />
       )}
 
       {/* --- Past Session Detail Popup --- */}
