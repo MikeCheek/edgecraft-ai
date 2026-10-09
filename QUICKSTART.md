@@ -32,7 +32,8 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Run the backend
-uvicorn app.main:app --reload --port 8000
+cp .env.example .env
+uvicorn app.main:app --port 8000
 ```
 
 The backend will be available at `http://localhost:8000`.
@@ -50,8 +51,6 @@ npm run dev
 ```
 
 The frontend will be available at `http://localhost:5173`.
-
-> ⚠️ **New dependency:** the app now uses real URL routing via `react-router-dom` (`/collect`, `/train`, `/optimize`, `/models`, `/deploy`). If `npm install` doesn't already pull it in from `package.json`, run `npm install react-router-dom` before `npm run dev`.
 
 ## Using EdgeCraft AI
 
@@ -71,13 +70,12 @@ The frontend will be available at `http://localhost:5173`.
 
 ### 3. **Optimization**
 
-- Select a quantization/compression method:
-  - **INT8 Quantization**: ~75% size reduction (recommended)
-  - **Float16 Quantization**: ~50% size reduction (balanced)
-  - **Dynamic Range Quantization**
-  - **Pruning**: ~35% size reduction (sparse)
-  - **Weight Clustering**
-- Review the real **Test-Set Comparison**: original vs. optimized accuracy, loss, per-sample latency, and size, including an expandable per-sample prediction gallery
+- Create variants (they queue behind any running job):
+  - **Full INT8**: ~4× smaller, calibrated on real training samples (recommended for MCUs)
+  - **Dynamic range** / **Float16**
+  - **Pruning + fine-tune** and **Clustering + fine-tune**, followed by INT8 or dynamic quantization. Their gain shows in the compressed size.
+- Each variant's report compares it with a float32 TFLite baseline (accuracy/F1, size, latency, per-class metrics, confusion matrix) and shows whether TensorFlow Lite Micro can run it
+- Try the original and optimized models side by side with an upload, URL, webcam or microphone
 
 ### 4. **Models**
 
@@ -85,9 +83,9 @@ The frontend will be available at `http://localhost:5173`.
 
 ### 5. **Deployment**
 
-- Select your target board (ESP32-S3, ESP32-CAM, Raspberry Pi Pico, Arduino Nano)
+- Select your target board in the header (ESP32-S3, ESP32-CAM, Raspberry Pi Pico, Arduino Nano)
 - Evaluate model compatibility (memory usage, deployment warnings)
-- Configure camera pins (integrated for ESP32-CAM, or externally wired for any other board) and an optional SPI status display
+- Configure camera pins (image models) or I2S microphone pins (audio models, with on-device MFCC) and an optional SPI status display
 - Preview the generated `sketch.ino` live as you edit pins
 - **Export Arduino Project** — a ready-to-flash zip (`model_data.h`, `sketch.ino`, README) — or export just the raw C-array if you're integrating into your own sketch
 
@@ -114,14 +112,14 @@ The frontend will be available at `http://localhost:5173`.
 
 EdgeCraft AI can use an LLM at three points in the workflow: pre-training config recommendations, post-training diagnosis, and board-specific deployment advice. Two providers are supported:
 
-**OpenRouter** (cloud, no local install) — pick a free model directly from the app's Global Config dropdown.
+**OpenRouter** (cloud, no local install): set `OPENROUTER_API_KEY` in `backend/.env`, then pick a model (or type any model id) on the **Settings** page.
 
 **Ollama** (fully offline):
 
 ```bash
 # Install Ollama (https://ollama.ai)
 # Pull a model
-ollama pull neural-chat
+ollama pull phi3
 
 # Enable in backend .env
 OLLAMA_ENABLED=true
@@ -132,11 +130,10 @@ If neither is reachable, EdgeCraft AI falls back to rule-based suggestions — y
 ### Docker Deployment
 
 ```bash
-# Build and run with Docker Compose
-docker-compose up
+cp backend/.env.example backend/.env
+docker compose up --build
 
-# Backend: http://localhost:8000
-# Frontend: http://localhost
+# App: http://localhost (nginx proxies /api and /ws to the backend)
 ```
 
 ## Troubleshooting
@@ -150,7 +147,7 @@ docker-compose up
 ### Frontend won't load
 
 - Check if port 5173 is available
-- Confirm `react-router-dom` is installed (`npm ls react-router-dom`)
+- If the backend runs elsewhere, set its URL on the Settings page
 - Clear npm cache: `npm cache clean --force`
 - Reinstall dependencies: `rm -rf node_modules && npm install`
 
@@ -174,8 +171,8 @@ edgecraft-ai/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app
 │   │   ├── routers/             # API endpoints (datasets, training, optimization, inference, job_logs_ws)
-│   │   ├── services/            # ML services (trainer, optimizer, evaluator, exporter, mcu_advisor, model_tree, llm_advisor...)
-│   │   └── utils/                # Utilities (data_processor, c_array_generator, zip_processor)
+│   │   ├── services/            # preprocessing, trainer, job_queue, optimizer, evaluator, exporter, mcu_advisor, ...
+│   │   └── utils/                # Utilities (c_array_generator, mfcc_codegen, zip_processor)
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/

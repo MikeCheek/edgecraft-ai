@@ -2,12 +2,12 @@
 
 A self-hosted, private alternative to Edge Machine Learning building: collect data, train TinyML models, optimize them for microcontrollers, and export ready-to-flash Arduino/C++ projects, all on your own machine.
 
-> **Status:** functional end-to-end (dataset → train → optimize → evaluate → export), verified with real TensorFlow runs and a `gcc` compile check of generated headers.
+> **Status:** functional end-to-end (dataset → train → optimize → evaluate → export) for classification, keyword spotting and FOMO-style detection, covered by an automated end-to-end test suite.
 
 **🚀 Try it now:**
 
 ```bash
-cd backend  && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --reload --port 8000
+cd backend  && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt && uvicorn app.main:app --port 8000
 cd frontend && npm install && npm run dev
 ```
 
@@ -38,23 +38,32 @@ Then open **http://localhost:5173**. Full details in [Getting Started](#getting-
 
 ## Key Features
 
-**Data:** upload samples or bulk-import a labeled ZIP (with visual folder→label mapping and regex relabeling), manage classes/splits, live storage overview.
+**Data:** upload samples, bulk-import a labeled ZIP (visual folder→label mapping, regex relabeling) or pull from Kaggle / Hugging Face / any URL, manage classes and splits, import YOLO / VOC / COCO / CSV bounding boxes.
 
-**Training:** TensorFlow training with live epoch metrics, CPU/GPU/auto device selection, transfer learning with freeze/fine-tune, automatic grayscale→RGB channel adaptation, LLM-suggested configs, archive/cancel/resume, and a live WebSocket job console (full tracebacks on failure).
+**Training:** a single queue runs jobs one at a time (no GPU contention). Pretrained backbones get a frozen-backbone warm-up and then fine-tuning. You get live epoch metrics and a WebSocket console. Each finished run gets a held-out confusion matrix plus per-class precision, recall and F1. Also: LLM-suggested configs (validated, with a rule-based fallback), seeds, class balancing, and augmentation that is never baked into the exported model.
 
-**Optimization:** INT8, Float16, Dynamic Range, Pruning, and Weight Clustering. Real original-vs-optimized test-set comparison with a per-sample prediction gallery. Dataset → Model → Optimized Variant lineage tree.
+**One preprocessing path:** training, INT8 calibration, evaluation, live inference and the generated firmware share the same image and MFCC front-end (`app/services/preprocessing.py`). There is no train/serve skew.
 
-**Deployment:** full Arduino project export (`model_data.h`, `sketch.ino`, README) for **ESP32-S3** and **ESP32-CAM**, with live-camera support, optional SPI display with live preview + confidence overlay, full Serial diagnostics, and a live "ready to flash" sketch preview. Uses **[Chirale_TensorFlowLite](https://github.com/hpssjellis/Chirale_TensorFlowLite)**.
+**Optimization:** full INT8 calibrated on real samples, dynamic-range, float16, pruning with masked fine-tuning, and weight clustering. Each variant is compared against a float32 TFLite baseline: accuracy or F1, size, gzip size and latency, all measured with the same interpreter. Every variant is also checked against **TensorFlow Lite Micro**, which verifies op support and measures the exact tensor arena when the optional `tflite-micro` package is installed.
 
-**LLM Integration:** OpenRouter and Ollama providers.
+**Deployment:** an Arduino project (`model_data.h`, `sketch.ino`, README) with:
+- a `MicroMutableOpResolver` holding only the model's ops
+- a PSRAM-backed arena on ESP32
+- ESP32-S3 / ESP32-CAM camera pipelines and an optional ST7735 display
+- FOMO detection output
+- for audio models, an on-device MFCC front-end (`mfcc_frontend.h`, checked against the Python one in the test suite) with I2S microphone capture or a `send_wav.py` Serial streamer
+
+**Experiments:** compare up to four runs side by side (config diff, held-out metric, validation curves).
+
+**LLM integration:** OpenRouter and Ollama for config suggestions, post-training review and deployment advice.
 
 ---
 
 ## Tech Stack
 
-- **Backend:** Python 3.10+, FastAPI, TensorFlow 2.15+/TFLite, OpenCV, Librosa, WebSockets
-- **Frontend:** React 18+, Vite, TypeScript, Tailwind CSS, Recharts
-- **DevOps:** Docker + Docker Compose, NGINX
+- **Backend:** Python 3.10-3.12, FastAPI, TensorFlow 2.17-2.20 (Keras 3) / TFLite, librosa, optional tflite-micro
+- **Frontend:** React 18, Vite, TypeScript, Tailwind CSS, Recharts
+- **DevOps:** Docker Compose (nginx serves the UI and proxies `/api` + `/ws`), GitHub Actions CI
 
 ---
 
@@ -64,8 +73,10 @@ Then open **http://localhost:5173**. Full details in [Getting Started](#getting-
 # Backend
 cd backend
 python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+pip install -r requirements.txt                   # NVIDIA GPU: requirements-gpu.txt
+pip install -r requirements-optional.txt          # optional: TensorFlow Lite Micro checks (Linux/macOS)
+cp .env.example .env
+uvicorn app.main:app --port 8000
 
 # Frontend
 cd frontend
@@ -79,34 +90,39 @@ npm run dev
 | Backend API | http://localhost:8000      |
 | Swagger UI  | http://localhost:8000/docs |
 
-**Docker:** `docker-compose up` → frontend on `http://localhost`, backend on `http://localhost:8000`.
+**Docker:** `cp backend/.env.example backend/.env && docker compose up --build`, then open `http://localhost`. All data lives in `backend/data_storage` (mounted at `/data`).
 
-**Optional local LLM:** `ollama pull neural-chat`, then enable via `.env` (`OLLAMA_ENABLED=true`) or pick Ollama in the UI. OpenRouter free-tier models are selectable directly, no install needed.
+**Configuration** (`backend/.env`): `EDGECRAFT_STORAGE_DIR`, `ALLOWED_ORIGINS`, `EDGECRAFT_API_TOKEN` (optional shared secret, recommended whenever the API is reachable from other machines; enter it in the app's Settings page), upload limits, LLM keys. The frontend's backend URL comes from `VITE_API_BASE_URL` or the Settings page.
 
 ---
 
 ## Supported Tasks, Models & Boards
 
-**Tasks:** Image Classification, Object Detection, Visual Wake Words, Keyword Spotting, Audio Classification
+| Task | Models | Input (default) |
+| --- | --- | --- |
+| Image classification / Visual wake words | MobileNetV3Small, MobileNetV1 0.25, MobileNetV2, EfficientNetB0, ResNet50V2 (pretrained) · Custom3LayerCNN | 96×96×3 / 96×96×1 |
+| Object detection | FOMO_MobileNetV2 (pretrained 0.35 trunk), FOMO_Tiny: centroid grid at input/8 | 96×96×3 |
+| Keyword spotting / audio classification | DS-CNN, MFCC_CNN, GRU, LSTM (unrolled) | 40 MFCC × 49 frames (1 s) / × 99 (2 s) |
 
-**Models:** MobileNetV2/V3Small/V1_0.25, EfficientNet, ResNet50V2, Custom3LayerCNN (image) · MFCC_CNN, WaveNet, AudioLSTM, AudioGRU (audio) · TinyBERT (text). Each is tagged with edge-suitability so the LLM advisor steers you away from oversized backbones on MCU targets.
+Grayscale input works with every pretrained backbone. All models convert to TFLite ops supported by TensorFlow Lite Micro.
 
-| Board                  | RAM        | Flash | Export Support                    |
-| ---------------------- | ---------- | ----- | --------------------------------- |
-| ESP32-S3 (N16R8)       | 8 MB PSRAM | 16 MB | ✅ Full, optional external camera |
-| ESP32-CAM (AI-Thinker) | ~PSRAM     | ~4 MB | ✅ Full, integrated camera        |
-| Raspberry Pi Pico 2 W  | 520 KB     | 4 MB  | ⚠️ Generic Serial harness only    |
-| Arduino Nano 33 BLE    | 256 KB     | 1 MB  | ⚠️ Generic Serial harness only    |
+| Board                  | RAM        | Flash | Export                                                        |
+| ---------------------- | ---------- | ----- | ------------------------------------------------------------- |
+| ESP32-S3 (N16R8)       | 8 MB PSRAM | 16 MB | Camera or I2S mic, optional display, PSRAM arena              |
+| ESP32-CAM (AI-Thinker) | 4 MB PSRAM | 4 MB  | Integrated camera or I2S mic, optional display                |
+| Raspberry Pi Pico 2 W  | 520 KB     | 4 MB  | Serial harness (image values / streamed audio + on-device MFCC) |
+| Arduino Nano 33 BLE    | 256 KB     | 1 MB  | Serial harness (image values / streamed audio + on-device MFCC) |
 
 ---
 
 ## Workflow
 
-1. **Data Collection** — pick a task, upload/import samples, manage classes and splits.
-2. **Model Training** — choose or get an LLM-suggested config, train with live metrics/logs.
-3. **Optimization** — quantize/prune, review real accuracy/latency/size deltas.
-4. **Models** — browse the dataset → model → variant tree.
-5. **Deployment** — configure camera/display pins (or a preset), preview the sketch, export.
+1. **Data**: pick a task, import samples, split train/val/test.
+2. **Train**: choose (or let the LLM suggest) a config and watch metrics and the console. Review the held-out report.
+3. **Optimize**: create variants, compare them with the float32 baseline, check the TFLite Micro badge, and try them live.
+4. **Deploy**: pick a board and hardware, preview the sketch, and download the project.
+
+Use **Models** for the dataset → model → variant tree and **Experiments** to compare runs.
 
 ---
 
@@ -115,52 +131,37 @@ npm run dev
 ```
 GET  /api/health · /api/info · /api/storage/overview · /api/models/tree
 
-/api/datasets/*          upload, ZIP import, labeling, splits, export
-/api/remote_datasets/*   browse/import external datasets
-/api/training/*          start, status, metrics, cancel, archive, recommend
-/api/optimization/*      quantize, status, result, export, evaluate-board, llm-suggest/optimize
+/api/datasets/*          upload, chunked ZIP import, labeling, splits, export, annotations
+/api/remote_datasets/*   Kaggle / Hugging Face / URL import (SSE progress)
+/api/training/*          start (queued), status, cancel, archive, rename, queue, recommend
+/api/optimization/*      quantize (queued), status, result, history, cancel, delete,
+                         export, export-preview, evaluate-board, llm-suggest, llm-optimize
 /api/inference/*         run, history
 WS /ws/logs/{job_id}     live job console
 ```
 
-Full interactive docs at `http://localhost:8000/docs`.
+---
+
+## Development
+
+```bash
+cd backend && pip install -r requirements-dev.txt && ruff check app tests && pytest -q
+cd frontend && npm run lint && npm run typecheck && npm test && npm run build
+```
+
+The backend suite includes end-to-end train → INT8 → export → inference runs on tiny synthetic data (about 20 s on CPU). The C port of the MFCC front-end is compiled with `g++` and compared with the Python version.
 
 ---
 
 ## Known Limitations
 
-- `TRANSFER_LEARNING` downloads ImageNet weights on first use (needs outbound access to `storage.googleapis.com`); no code changes needed on a normal connection.
-- Full Arduino export only covers ESP32-S3/ESP32-CAM; Pico/Nano get a generic Serial harness.
-- Board RAM/latency figures mix real measurements with clearly-labeled heuristics — treat as ballpark until validated on hardware.
+- Pretrained backbones download ImageNet weights on first use (needs access to `storage.googleapis.com`).
+- On-device latency in the Deployment tab is a clock-scaled estimate. The generated sketch prints the real figure (`Inference: N us`).
+- Without `tflite-micro` installed, the tensor arena is a liveness-analysis estimate rather than a measurement.
+- FOMO reports object centroids, not bounding-box sizes.
+- Models trained by earlier versions used different preprocessing and should be retrained.
 
 ---
-
-<!-- ## TODO / Roadmap
-
-**Near-term**
-
-- [ ] Full camera/sensor export for Pico 2 W and Nano 33 BLE
-- [ ] On-device validation of exported projects (replace heuristic estimates with measured ones)
-- [ ] Offline/vendored ImageNet weights option
-- [ ] Frontend test coverage
-
-**Medium-term**
-
-- [ ] Model Hub of curated pre-trained starting points
-- [ ] Real on-device inference benchmarking
-- [ ] Batch optimization (multi-model queued runs)
-- [ ] Object Detection parity with other tasks
-- [ ] Model versioning/rollback
-
-**Longer-term**
-
-- [ ] OTA model updates to deployed devices
-- [ ] Edge analytics / on-device telemetry
-- [ ] AutoML constrained by board memory budget
-- [ ] Collaborative/federated training
-- [ ] Optional opt-in encrypted cloud backup
-
---- -->
 
 ## License
 
