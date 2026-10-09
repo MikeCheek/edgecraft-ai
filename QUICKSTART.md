@@ -129,12 +129,25 @@ If neither is reachable, EdgeCraft AI falls back to rule-based suggestions — y
 
 ### Docker Deployment
 
-```bash
-cp backend/.env.example backend/.env
-docker compose up --build
+Needs Docker with Compose v2.24+ (`docker compose version`).
 
-# App: http://localhost (nginx proxies /api and /ws to the backend)
+```bash
+# Optional: API keys, API token, upload limits (runs with defaults without it)
+cp backend/.env.example backend/.env
+
+docker compose up --build -d     # first build takes a while (TensorFlow is large)
+docker compose ps                # wait until backend is "healthy" (~1 min)
+
+# App: http://localhost:3990  (nginx serves the UI and proxies /api and /ws to the backend)
 ```
+
+- **Different port:** `EDGECRAFT_PORT=8080 docker compose up -d` (or put `EDGECRAFT_PORT=8080` in a `.env` file next to `docker-compose.yml`).
+- **Data:** datasets, models and jobs live in `backend/data_storage/` on the host, so they survive rebuilds. Downloaded pretrained weights are cached in the `keras-cache` volume.
+- **Logs / stop:** `docker compose logs -f backend`, `docker compose down`.
+- **Update:** `git pull && docker compose up --build -d`.
+- **Reachable from other machines:** port 3990 is published on all interfaces, so set `EDGECRAFT_API_TOKEN` in `backend/.env` and enter it in the app's Settings page.
+- **Ollama on the host:** set `OLLAMA_HOST=http://host.docker.internal:11434` in `backend/.env`.
+- **GPU:** uncomment the `deploy:` block in `docker-compose.yml` (needs nvidia-container-toolkit).
 
 ## Troubleshooting
 
