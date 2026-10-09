@@ -5,8 +5,28 @@
 import { useCallback, useState } from 'react'
 import axios, { AxiosInstance } from 'axios'
 import { ApiResponse, BoundingBox, AnnotationSummary } from '../types'
+import { API_BASE, apiFetch, authHeaders, withAuthQuery } from '../config'
 
-export const API_BASE = 'http://localhost:8000/api'
+export { API_BASE }
+
+/** Human-readable message from an axios / fetch error, preferring the
+ *  backend's own `detail` / `message` over "Request failed with status 500". */
+export function errorMessage (err: any): string {
+  const data = err?.response?.data
+  const detail = data?.detail ?? data?.message
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map((d: any) => d?.msg ?? String(d)).join('; ')
+  if (err?.response?.status === 401) return 'The backend requires an API key - set it in Settings.'
+  return err?.message || 'Network error'
+}
+
+function withAuth (instance: AxiosInstance): AxiosInstance {
+  instance.interceptors.request.use(cfg => {
+    Object.entries(authHeaders()).forEach(([k, v]) => cfg.headers.set(k, v))
+    return cfg
+  })
+  return instance
+}
 
 class APIClient {
   private client: AxiosInstance // For standard metadata (Fast)
@@ -15,13 +35,13 @@ class APIClient {
 
   constructor() {
     // Basic structural requests fail fast if backend stalls
-    this.client = axios.create({ baseURL: API_BASE, timeout: 5000 })
+    this.client = withAuth(axios.create({ baseURL: API_BASE, timeout: 10000 }))
 
     // Disk scans & processing queues get breathing room
-    this.heavyClient = axios.create({ baseURL: API_BASE, timeout: 30000 })
+    this.heavyClient = withAuth(axios.create({ baseURL: API_BASE, timeout: 60000 }))
 
     // Massive archive operations
-    this.uploadClient = axios.create({ baseURL: API_BASE, timeout: 600000 })
+    this.uploadClient = withAuth(axios.create({ baseURL: API_BASE, timeout: 600000 }))
   }
 
   async health() {
@@ -175,8 +195,8 @@ class APIClient {
     blob: Blob,
     signal?: AbortSignal
   ): Promise<void> {
-    const res = await fetch(
-      `${API_BASE}/datasets/upload_zip/chunk/${uploadId}/${chunkIndex}`,
+    const res = await apiFetch(
+      `/datasets/upload_zip/chunk/${uploadId}/${chunkIndex}`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/octet-stream' },
@@ -486,7 +506,7 @@ class APIClient {
     if (params.dataset_ref) query.set('dataset_ref', params.dataset_ref)
     if (params.repo_id) query.set('repo_id', params.repo_id)
     return new EventSource(
-      `${API_BASE}/remote_datasets/download_stream?${query.toString()}`
+      withAuthQuery(`${API_BASE}/remote_datasets/download_stream?${query.toString()}`)
     )
   }
 
@@ -501,9 +521,28 @@ class APIClient {
   async startTraining(config: any) {
     return this.client.post<ApiResponse<any>>('/training/start', {
       ...config,
-      input_shape: config.input_shape || [224, 224, 3],
       device: config.device || 'auto'
     })
+  }
+
+  async renameTraining(trainingId: string, name: string) {
+    return this.client.put<ApiResponse<any>>(`/training/session/${trainingId}/name`, { name })
+  }
+
+  async getJobQueue() {
+    return this.client.get<ApiResponse<any>>('/training/queue')
+  }
+
+  async getInfo() {
+    return this.client.get<any>('/info')
+  }
+
+  async cancelOptimization(optimizationId: string) {
+    return this.client.post<ApiResponse<any>>(`/optimization/cancel/${optimizationId}`)
+  }
+
+  async deleteOptimization(optimizationId: string) {
+    return this.client.delete<ApiResponse<any>>(`/optimization/session/${optimizationId}`)
   }
 
   async getAvailableDevices(): Promise<{
@@ -617,6 +656,7 @@ class APIClient {
       camera_pins?: Record<string, number>
       camera_config?: Record<string, any>
       display_config?: Record<string, any>
+      mic_config?: Record<string, any>
     }
   ) {
     return this.client.post<ApiResponse<any>>(
@@ -625,8 +665,10 @@ class APIClient {
         board,
         camera_pins: config?.camera_pins,
         camera_config: config?.camera_config,
-        display_config: config?.display_config
-      }
+        display_config: config?.display_config,
+        mic_config: config?.mic_config
+      },
+      { timeout: 60_000 }
     )
   }
 
@@ -648,15 +690,17 @@ class APIClient {
       // camera_pins/display_config already were.
       camera_config?: Record<string, any>
       display_config?: Record<string, any>
+      mic_config?: Record<string, any>
     }
   ) {
-    const resp = await this.client.post(
+    const resp = await this.heavyClient.post(
       `/optimization/export/${optimizationId}`,
       {
         board,
         camera_pins: config?.camera_pins,
         camera_config: config?.camera_config,
-        display_config: config?.display_config
+        display_config: config?.display_config,
+        mic_config: config?.mic_config
       },
       { responseType: 'blob' }
     )
@@ -671,7 +715,7 @@ class APIClient {
   }
 
   async evaluateBoard(optimizationId: string, board: string) {
-    return this.client.post<ApiResponse<any>>('/optimization/evaluate-board', {
+    return this.heavyClient.post<ApiResponse<any>>('/optimization/evaluate-board', {
       optimization_id: optimizationId,
       board
     })
@@ -714,14 +758,16 @@ class APIClient {
   async getLLMOptimizationAdvice(
     optimizationId: string,
     board: string,
-    useLocalLLM = false
+    provider: 'openrouter' | 'ollama' | 'rules' = 'rules',
+    modelName?: string
   ) {
     return this.client.post<ApiResponse<any>>(
       '/optimization/llm-optimize',
       {
         optimization_id: optimizationId,
         board,
-        use_local_llm: useLocalLLM
+        provider: provider === 'rules' ? null : provider,
+        model_name: modelName
       },
       {
         timeout: 120_000 // Override: Allow up to 2 minutes for LLM generation
@@ -744,8 +790,8 @@ class APIClient {
   }
 
   async previewZipRegex(uploadId: string, regexPattern: string) {
-    const res = await axios.post(
-      `${API_BASE}/datasets/upload_zip/preview_regex`,
+    const res = await this.client.post(
+      `/datasets/upload_zip/preview_regex`,
       {
         upload_id: uploadId,
         regex_pattern: regexPattern
@@ -755,8 +801,8 @@ class APIClient {
   }
 
   async relabelDatasetBulkRegex(datasetId: string, regexPattern: string) {
-    const res = await axios.post(
-      `${API_BASE}/datasets/${datasetId}/relabel_bulk_regex`,
+    const res = await this.heavyClient.post(
+      `/datasets/${datasetId}/relabel_bulk_regex`,
       {
         regex_pattern: regexPattern
       }
@@ -785,7 +831,7 @@ export function useAPI() {
           ? response.data.data
           : response.data
       } catch (err: any) {
-        setError(err.message || 'Network error')
+        setError(errorMessage(err))
         console.error('API request error:', err)
         return null
       } finally {

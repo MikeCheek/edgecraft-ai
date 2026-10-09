@@ -95,16 +95,19 @@ const ImageCameraTab: React.FC<{ onData: (blob: Blob) => void }> = ({
     setStreaming(false); setLiveActive(false); if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
   }, []);
   useEffect(() => () => stopCamera(), [stopCamera]);
-  const captureBlob = (): Blob | null => {
+  // canvas.toBlob is asynchronous: the previous version returned a variable
+  // the callback hadn't filled in yet, so every capture was null and the
+  // webcam never sent anything.
+  const captureBlob = (): Promise<Blob | null> => {
     const video = videoRef.current; const canvas = canvasRef.current;
-    if (!video || !canvas) return null; canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight; canvas.getContext("2d")?.drawImage(video, 0, 0); let captured: Blob | null = null; canvas.toBlob((b) => {
-      if (b) captured = b;
-    }, "image/jpeg");
-    return captured;
+    if (!video || !canvas || !video.videoWidth) return Promise.resolve(null);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d")?.drawImage(video, 0, 0);
+    return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", 0.92));
   };
-  const handleCapture = () => {
-    const blob = captureBlob();
+  const handleCapture = async () => {
+    const blob = await captureBlob();
     if (blob) onData(blob);
   };
   const toggleLive = () => {
@@ -112,8 +115,8 @@ const ImageCameraTab: React.FC<{ onData: (blob: Blob) => void }> = ({
       if (liveIntervalRef.current) clearInterval(liveIntervalRef.current);
       setLiveActive(false);
     } else {
-      setLiveActive(true); liveIntervalRef.current = setInterval(() => {
-        const blob = captureBlob();
+      setLiveActive(true); liveIntervalRef.current = setInterval(async () => {
+        const blob = await captureBlob();
         if (blob) onData(blob);
       }, 2000);
     }

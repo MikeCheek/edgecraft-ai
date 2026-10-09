@@ -92,7 +92,7 @@ export function ModelTree({
     } finally {
       setLoading(false);
     }
-  }, [apiClient, datasetIdFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [apiClient, datasetIdFilter]);
 
   useEffect(() => { fetchTree(); }, [fetchTree]);
 

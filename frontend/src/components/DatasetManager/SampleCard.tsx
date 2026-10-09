@@ -1,3 +1,4 @@
+import { withAuthQuery } from '../../config';
 import { ImageIcon, RefreshCw, Trash2, Check, X, Tag, Edit2, Maximize2, BoxSelect } from 'lucide-react';
 import React, { useState } from 'react'
 import { DatasetSample } from '../../types';
@@ -55,7 +56,7 @@ function SampleCard({ sample, allLabels, apiBase, onRelabel, onDelete, onSplitCh
         ) : (
           <div className="relative w-full h-full">
             <img
-              src={`/api/datasets/image/${sample.id}${sample.updated_at ? `?v=${sample.updated_at}` : ''}`}
+              src={withAuthQuery(`${apiBase}/datasets/image/${sample.id}${sample.updated_at ? `?v=${sample.updated_at}` : ''}`)}
               alt={sample.label}
               loading="lazy"
               decoding="async"

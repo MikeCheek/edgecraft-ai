@@ -4,8 +4,9 @@
 // Each fires onData(blob) when audio is ready, mirroring ImageTabs.tsx conventions.
 // ---------------------------------------------------------------------------
 
+import { blobToWav16k } from "../../utils/audio";
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { Upload, Mic, Square, Play } from "lucide-react";
+import { Upload, Mic, Square } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Upload tab
@@ -15,10 +16,19 @@ export const AudioUploadTab: React.FC<{ onData: (blob: Blob) => void }> = ({ onD
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = (file: File) => {
+  const handleFile = async (file: File) => {
     if (!file.type.startsWith("audio/") && !file.name.endsWith(".wav")) return;
     setFilename(file.name);
-    onData(file);
+    // WAV goes as-is; compressed formats are decoded to WAV in the browser.
+    if (file.type === "audio/wav" || file.name.toLowerCase().endsWith(".wav")) {
+      onData(file);
+      return;
+    }
+    try {
+      onData(await blobToWav16k(file));
+    } catch {
+      onData(file);
+    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -143,10 +153,14 @@ export const AudioMicTab: React.FC<{ onData: (blob: Blob) => void }> = ({ onData
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
 
-      mr.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+      mr.onstop = async () => {
+        const recorded = new Blob(chunksRef.current, { type: mr.mimeType || "audio/webm" });
+        try {
+          onData(await blobToWav16k(recorded));
+        } catch {
+          onData(recorded); // decoding failed - let the backend try (needs ffmpeg)
+        }
         setBlobReady(true);
-        onData(blob);
       };
 
       mr.start(250); // collect in 250 ms chunks

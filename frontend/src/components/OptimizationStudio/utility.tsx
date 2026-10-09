@@ -4,7 +4,7 @@
 
 import React from "react";
 import { Zap } from "lucide-react";
-import { API_BASE } from "../../hooks/useAPI";
+import { apiFetch } from "../../config";
 
 export interface TrainedModel {
   id: string;
@@ -40,6 +40,16 @@ export interface InferenceResult {
   topK: TopKPrediction[];
   /** 'keras' or 'tflite' */
   modelKind?: string;
+  /** Object detection only: merged FOMO centroids, coordinates in [0, 1]. */
+  detections?: Detection[];
+}
+
+export interface Detection {
+  label: string;
+  x: number;
+  y: number;
+  confidence: number;
+  cells?: number;
 }
 
 export type VersionMode = "original" | "optimized" | "both";
@@ -86,7 +96,7 @@ export async function runInference(
     form.append("file", new Blob([input.text], { type: "text/plain" }), "input.txt");
   }
 
-  const resp = await fetch(`${API_BASE}/inference/run`, {
+  const resp = await apiFetch(`/inference/run`, {
     method: "POST",
     body: form,
   });
@@ -108,6 +118,7 @@ export async function runInference(
     totalMs: Math.round(wallMs),
     topK: r.top_k_results ?? [],
     modelKind: r.model_kind,
+    detections: r.detections,
   };
 }
 
@@ -201,8 +212,25 @@ export const ResultCard: React.FC<{
           </span>
         </div>
 
+        {/* Object detection: every detected centroid */}
+        {result.detections && (
+          <div className="mt-3 space-y-1">
+            <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">
+              {result.detections.length} object(s) detected
+            </p>
+            {result.detections.map((d, i) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <span className="text-slate-200">{d.label}</span>
+                <span className="font-mono text-slate-400">
+                  x {d.x.toFixed(2)} · y {d.y.toFixed(2)} · {(d.confidence * 100).toFixed(0)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Top-K breakdown */}
-        {result.topK && result.topK.length > 1 && (
+        {!result.detections && result.topK && result.topK.length > 1 && (
           <div className="mt-3 space-y-1">
             <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Top predictions</p>
             {result.topK.map((p, i) => (

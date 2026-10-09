@@ -14,9 +14,9 @@ import { useAppContext } from '../../context/AppContext';
 import { TinyMLTask, TrainingStatus } from '../../types';
 import { MetricChart, ChartModal } from './Chart';
 import {
-  getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS, OD_MODELS,
+  getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS, OD_MODELS, MODEL_HINTS, FREEZE_AUTO,
   formatDate, formatTime,
-  BATCH_SIZE_OPTIONS, DROPOUT_OPTIONS, INPUT_SIZES, LEARNING_RATE_OPTIONS,
+  BATCH_SIZE_OPTIONS, DROPOUT_OPTIONS, LEARNING_RATE_OPTIONS,
   EPOCHS_OPTIONS,
   ES_PATIENCE_OPTIONS,
   FREEZE_EPOCHS_OPTIONS,
@@ -25,6 +25,8 @@ import {
 import PastSessionPopup from './PastSessionPopUp';
 import SelectOrCustom from './SelectOrCustom';
 import { TerminalLogPanel } from '../TerminalLogPanel';
+import { EvaluationReport } from '../EvaluationReport';
+import { useBackendInfo } from '../../hooks/useBackendInfo';
 
 const LLMAdvisor = lazy(() => import('../LLMAdvisor').then(m => ({ default: m.LLMAdvisor })));
 
@@ -42,12 +44,21 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const { toast } = useToast();
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const defaults = getTaskDefaults(task);
+  const backendInfo = useBackendInfo();
+  const taskDefaults = useCallback((t: TinyMLTask) => {
+    const d = getTaskDefaults(t);
+    const shape = backendInfo?.default_input_shapes?.[t];
+    return shape ? { ...d, input_shape: shape } : d;
+  }, [backendInfo]);
+  const defaults = taskDefaults(task);
+  const isAudio = AUDIO_TASKS.includes(task);
+  const isODTask = task === 'OBJECT_DETECTION';
 
   // --- Core config ---
   const [datasetId, setDatasetId] = useState('');
   const [datasets, setDatasets] = useState<{ id: string; name: string; sample_count: number }[]>([]);
-  const [epochs, setEpochs] = useState<number>(100);
+  const [runName, setRunName] = useState('');
+  const [epochs, setEpochs] = useState<number>(30);
   const [batchSize, setBatchSize] = useState<number>(16);
   const [learningRate, setLearningRate] = useState<number>(0.001);
   const [baseModel, setBaseModel] = useState(defaults.base_model);
@@ -69,8 +80,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
   useEffect(() => {
-    setInputShape(getTaskDefaults(task).input_shape);
-  }, [task]);
+    setInputShape(taskDefaults(task).input_shape);
+  }, [task, taskDefaults]);
 
   const updateShapeDim = (index: number, value: string) => {
     const num = parseInt(value, 10);
@@ -83,10 +94,12 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const [showRegularization, setShowRegularization] = useState(false);
 
   // --- Regularization ---
-  const [dropoutRate, setDropoutRate] = useState(0.5);
+  const [dropoutRate, setDropoutRate] = useState(0.3);
   const [l2Reg, setL2Reg] = useState(0.0);
   const [trainableLayers, setTrainableLayers] = useState(0);
-  const [freezeEpochs, setFreezeEpochs] = useState(0);
+  const [freezeEpochs, setFreezeEpochs] = useState<number>(FREEZE_AUTO);
+  const [classWeighting, setClassWeighting] = useState(false);
+  const [seed, setSeed] = useState('');
 
   // --- Early stopping ---
   const [earlyStopping, setEarlyStopping] = useState(false);
@@ -98,6 +111,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     horizontal_flip: false,
     random_rotation: 0,
     random_crop: false,
+    random_brightness: 0,
+    random_contrast: 0,
+    random_translation: 0,
   });
 
   // --- Training runtime ---
@@ -186,8 +202,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
       const s: TrainingStatus = raw.data ?? raw;
       setStatus(s);
       dispatch({ type: 'SET_TRAINING', payload: s });
-      if (s.status === 'running' || s.status === 'initialized') {
-        pollRef.current = setTimeout(() => pollStatus(id), 5000);
+      if (s.status === 'running' || s.status === 'initialized' || s.status === 'queued') {
+        pollRef.current = setTimeout(() => pollStatus(id), s.status === 'queued' ? 3000 : 2000);
       } else if (s.status === 'completed' || s.status === 'cancelled' || s.status === 'failed') {
         fetchPastSessions();
         if (s.status === 'completed') onTrainingComplete?.();
@@ -233,6 +249,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     const raw = await request(() =>
       apiClient.startTraining({
         task,
+        name: runName.trim() || undefined,
         dataset_id: datasetId,
         epochs,
         batch_size: batchSize,
@@ -250,17 +267,16 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         // "freeze_encoder_epochs"; the mismatched name meant this always
         // silently fell back to the default (0), disabling the freeze-then-
         // fine-tune two-phase training path whenever it was set in the UI.
-        freeze_encoder_epochs: freezeEpochs,
-        augmentation: {
-          horizontal_flip: augmentation.horizontal_flip,
-          random_rotation: augmentation.random_rotation,
-          random_crop: augmentation.random_crop,
-        },
+        freeze_encoder_epochs: freezeEpochs === FREEZE_AUTO ? null : freezeEpochs,
+        class_weighting: classWeighting,
+        seed: seed.trim() === '' ? null : Number(seed),
+        augmentation: isAudio || isODTask ? {} : augmentation,
       }),
     );
     setIsStarting(false);
     if (raw && raw.training_id) {
       setTrainingId(raw.training_id);
+      if (raw.queue_position > 0) toast('info', `Queued behind ${raw.queue_position} other job(s).`);
       pollStatus(raw.training_id);
     }
   };
@@ -339,8 +355,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   };
 
   // --- Derived values ---
-  const isRunning = status?.status === 'running' || status?.status === 'initialized';
-  const isODTask = task === 'OBJECT_DETECTION';
+  const isRunning = status?.status === 'running' || status?.status === 'initialized' || status?.status === 'queued';
   const availableModels = isODTask ? OD_MODELS : AUDIO_TASKS.includes(task) ? AUDIO_MODELS : IMAGE_MODELS;
   const latestMetrics = status?.metrics?.length
     ? status.metrics[status.metrics.length - 1]
@@ -355,8 +370,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
     train: parseFloat(m.loss.toFixed(4)),
     val: parseFloat(m.val_loss.toFixed(4)),
   }));
-  const elapsed: number = (status as any)?.elapsed_seconds ?? 0;
-  const remaining: number = (status as any)?.remaining_seconds ?? 0;
+  const elapsed: number = status?.elapsed_seconds ?? 0;
+  const remaining: number = status?.remaining_seconds ?? 0;
   const statusColor =
     status?.status === 'completed'
       ? 'text-green-400'
@@ -375,10 +390,10 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   const splitReady = splitSummary
     ? splitSummary.unassigned === 0 && splitSummary.train > 0 && splitSummary.val > 0
     : false;
-  const isAudio = AUDIO_TASKS.includes(task);
   const dimLabels = isAudio
     ? ['n_mfcc', 'time frames', 'channels']
-    : ['width', 'height', 'channels'];
+    : ['height', 'width', 'channels'];
+  const metricLabel = isODTask ? 'F1' : 'Accuracy';
 
   // Consistent select class
   const selectCls =
@@ -447,7 +462,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                       </div>
                     ) : splitReady ? (
                       <p className="text-xs text-emerald-400 mt-1">
-                        ? Split ready — train: {splitSummary.train} • val: {splitSummary.val} • test: {splitSummary.test}
+                        ✓ Split ready — train: {splitSummary.train} • val: {splitSummary.val} • test: {splitSummary.test}
                       </p>
                     ) : null}
                   </div>
@@ -478,6 +493,14 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 )}
               </div>
 
+              {/* Run name */}
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-300 mb-1">Run name <span className="text-gray-500 font-normal">(optional)</span></label>
+                <input value={runName} onChange={(e) => setRunName(e.target.value)} disabled={isRunning} maxLength={80}
+                  placeholder={`${baseModel} on ${datasets.find((d) => d.id === datasetId)?.name ?? 'dataset'}`}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50 focus:border-purple-500 focus:outline-none" />
+              </div>
+
               {/* Base Model */}
               <div>
                 <label className="block text-sm font-medium text-gray-300 mb-1">Base Model</label>
@@ -491,6 +514,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                     <option key={m} value={m}>{m}</option>
                   ))}
                 </select>
+                {MODEL_HINTS[baseModel] && <p className="text-[11px] text-gray-500 mt-1">{MODEL_HINTS[baseModel]}</p>}
               </div>
 
               {/* Compute Device */}
@@ -572,7 +596,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-cyan-400" />
                   Regularization
-                  {(dropoutRate !== 0.5 || l2Reg !== 0 || trainableLayers !== 0 || freezeEpochs !== 0) && (
+                  {(dropoutRate !== 0.3 || l2Reg !== 0 || trainableLayers !== 0 || freezeEpochs !== FREEZE_AUTO || classWeighting || seed !== '') && (
                     <span className="px-1.5 py-0.5 bg-cyan-900/50 border border-cyan-500/40 text-cyan-300 text-xs rounded-full">
                       active
                     </span>
@@ -621,8 +645,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   {/* Trainable Layers */}
                   <div>
                     <label className="block text-xs font-medium text-gray-400 mb-1">
-                      Freeze Top N Layers
-                      <span className="text-gray-500 ml-1" style={{ fontSize: '0.72rem' }}>(0 = all trainable)</span>
+                      Fine-tune last N backbone layers
+                      <span className="text-gray-500 ml-1" style={{ fontSize: '0.72rem' }}>(0 = whole backbone)</span>
                     </label>
                     <SelectOrCustom
                       options={TRAINABLE_LAYERS_OPTIONS}
@@ -638,8 +662,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   {/* Freeze Epochs */}
                   <div>
                     <label className="block text-xs font-medium text-gray-400 mb-1">
-                      Freeze Epochs
-                      <span className="text-gray-500 ml-1" style={{ fontSize: '0.72rem' }}>(0 = no freeze phase)</span>
+                      Head warm-up epochs
+                      <span className="text-gray-500 ml-1" style={{ fontSize: '0.72rem' }}>(backbone frozen first)</span>
                     </label>
                     <SelectOrCustom
                       options={FREEZE_EPOCHS_OPTIONS}
@@ -650,6 +674,20 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                       max={500}
                       step={1}
                     />
+                  </div>
+
+                  {/* Class weighting */}
+                  <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer select-none">
+                    <input type="checkbox" checked={classWeighting} onChange={(e) => setClassWeighting(e.target.checked)}
+                      disabled={isRunning || isODTask} className="accent-purple-500" />
+                    Balance classes (weight loss by inverse frequency)
+                  </label>
+
+                  {/* Seed */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">Random seed <span className="text-gray-500">(reproducible runs)</span></label>
+                    <input type="number" value={seed} onChange={(e) => setSeed(e.target.value)} disabled={isRunning} placeholder="random"
+                      className="w-full px-2 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50 focus:border-purple-500 focus:outline-none" />
                   </div>
 
                 </div>
@@ -712,7 +750,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               )}
             </div>
 
-            {/* --- Data Augmentation (compact single row) --- */}
+            {/* --- Data Augmentation (image classification only) --- */}
+            {!isAudio && !isODTask && (
             <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700">
               <p className="text-sm font-medium text-gray-300 flex items-center gap-2 mb-2">
                 <Shuffle className="w-4 h-4 text-purple-400" />
@@ -766,16 +805,33 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                     className="w-20 px-2 py-1 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50 focus:border-purple-500 focus:outline-none"
                   />
                 </div>
+
+                {([
+                  ['random_brightness', 'Brightness'],
+                  ['random_contrast', 'Contrast'],
+                  ['random_translation', 'Shift'],
+                ] as const).map(([key, label]) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <label className="text-sm text-gray-300 whitespace-nowrap">{label}:</label>
+                    <input type="number" step={0.05} min={0} max={0.5} value={augmentation[key]}
+                      onChange={(e) => setAugmentation({ ...augmentation, [key]: parseFloat(e.target.value) || 0 })}
+                      disabled={isRunning}
+                      className="w-20 px-2 py-1 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm disabled:opacity-50 focus:border-purple-500 focus:outline-none" />
+                  </div>
+                ))}
               </div>
+              <p className="text-[11px] text-gray-500 mt-2">Applied on the fly during training only - never baked into the exported model.</p>
             </div>
+            )}
 
             {/* --- Input Shape --- */}
             <div className="p-4 bg-slate-800/50 rounded-xl border border-slate-700 space-y-3">
               <p className="text-sm font-medium text-gray-300">
                 Input Shape
                 <span className="ml-2 text-xs text-gray-500 font-normal">
-                  ({inputShape.join(' × ')}) — must match backend{' '}
-                  <code className="text-cyan-400">data_processor.py</code>
+                  ({inputShape.join(' × ')})
+                  {isAudio && ' - time frames follow from the clip length; only n_mfcc is usually worth changing'}
+                  {isODTask && ' - height/width must be multiples of 8'}
                 </span>
               </p>
               <div className="grid grid-cols-3 gap-3">
@@ -796,11 +852,11 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                 ))}
               </div>
               <button
-                onClick={() => setInputShape(getTaskDefaults(task).input_shape)}
+                onClick={() => setInputShape(defaults.input_shape)}
                 disabled={isRunning}
                 className="text-xs text-gray-500 hover:text-purple-400 disabled:opacity-40 transition"
               >
-                ? Reset to default ({getTaskDefaults(task).input_shape.join('×')})
+                ↺ Reset to default ({defaults.input_shape.join('×')})
               </button>
             </div>
 
@@ -817,7 +873,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               {isODTask && (
                 <span>
                   Output:{' '}
-                  <span className="text-emerald-300 font-medium">boxes + class scores</span>
+                  <span className="text-emerald-300 font-medium">object centroid grid ({Math.floor(inputShape[0] / 8)}×{Math.floor(inputShape[1] / 8)})</span>
                 </span>
               )}
             </div>
@@ -843,7 +899,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
           {isStarting
             ? <RefreshCw className="w-5 h-5 animate-spin" />
             : <Play className="w-5 h-5" />}
-          {isStarting ? 'Initializing...' : 'Start Training'}
+          {isStarting ? 'Submitting...' : 'Start Training'}
         </button>
 
         {isRunning && (
@@ -925,7 +981,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
             <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar">
               {pastSessions.map((s) => {
                 const last = s.metrics?.length ? s.metrics[s.metrics.length - 1] : null;
-                const isSessionRunning = s.status === 'running' || s.status === 'initialized';
+                const isSessionRunning = s.status === 'running' || s.status === 'initialized' || s.status === 'queued';
                 const sc =
                   s.status === 'completed'
                     ? 'text-green-400 bg-green-900/20 border-green-500/30'
@@ -945,7 +1001,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                           <span className={`px-2 py-0.5 rounded-full text-xs font-semibold border ${sc}`}>
                             {s.status?.toUpperCase()}
                           </span>
-                          <span className="text-white text-sm font-medium">{s.base_model}</span>
+                          <span className="text-white text-sm font-medium">{s.name || s.base_model}</span>
+                          {s.name && <span className="text-gray-500 text-xs">{s.base_model}</span>}
                           {s.archived && (
                             <span className="text-[10px] text-gray-500 border border-slate-700 rounded px-1.5 py-0.5">archived</span>
                           )}
@@ -954,8 +1011,11 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                           <span>Ep {s.current_epoch}/{s.total_epochs}</span>
                           {last && (
                             <>
-                              <span className="text-green-400">Acc {(last.accuracy * 100).toFixed(1)}%</span>
+                              <span className="text-green-400">{s.task === 'OBJECT_DETECTION' ? 'F1' : 'Acc'} {(last.accuracy * 100).toFixed(1)}%</span>
                               <span className="text-cyan-400">Val {(last.val_accuracy * 100).toFixed(1)}%</span>
+                              {s.evaluation && (
+                                <span className="text-emerald-300">Test {(((s.task === 'OBJECT_DETECTION' ? s.evaluation.f1 : s.evaluation.accuracy) ?? 0) * 100).toFixed(1)}%</span>
+                              )}
                             </>
                           )}
                         </div>
@@ -1009,9 +1069,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               Live Training Progress
             </h3>
             <div className="flex items-center gap-2">
-              {(status as any).device_used && (
+              {status.device_used && (
                 <span className="px-2.5 py-1 text-[10px] font-bold rounded-full bg-slate-800 border border-slate-700 text-cyan-400 uppercase tracking-wide">
-                  {(status as any).device_used === 'gpu' ? '⚡ GPU' : '🖥 CPU'}
+                  {status.device_used === 'gpu' ? '⚡ GPU' : '🖥 CPU'}
                 </span>
               )}
               <span
@@ -1063,21 +1123,21 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
             {/* Latest metric tiles */}
             {latestMetrics && (
-              <div className={`grid gap-3 ${isODTask ? 'grid-cols-2' : 'grid-cols-2 md:grid-cols-4'}`}>
-                {!isODTask && (
+              <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
+                {(
                   <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
                     <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                      <TrendingUp className="w-3 h-3" /> Accuracy
+                      <TrendingUp className="w-3 h-3" /> {metricLabel}
                     </div>
                     <span className="text-2xl font-bold text-green-400">
                       {(latestMetrics.accuracy * 100).toFixed(1)}%
                     </span>
                   </div>
                 )}
-                {!isODTask && (
+                {(
                   <div className="p-4 bg-slate-800 rounded-xl border border-slate-700">
                     <div className="flex items-center gap-1 text-xs text-gray-400 mb-1">
-                      <Award className="w-3 h-3" /> Val Accuracy
+                      <Award className="w-3 h-3" /> Val {metricLabel}
                     </div>
                     <span className="text-2xl font-bold text-cyan-400">
                       {(latestMetrics.val_accuracy * 100).toFixed(1)}%
@@ -1106,8 +1166,8 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
             {/* Charts */}
             {lossData.length >= 2 && (
-              <div className={`grid gap-4 ${isODTask ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-                {!isODTask && accuracyData.length >= 2 && (
+              <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
+                {accuracyData.length >= 2 && (
                   <div className="relative">
                     <button
                       onClick={() => setExpandedLiveChart('accuracy')}
@@ -1118,7 +1178,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                     </button>
                     <MetricChart
                       data={accuracyData}
-                      label="Accuracy (%)"
+                      label={`${metricLabel} (%)`}
                       color="#22c55e"
                       valColor="#06b6d4"
                       formatY={(v: number) => `${v}%`}
@@ -1135,7 +1195,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
                   </button>
                   <MetricChart
                     data={lossData}
-                    label={isODTask ? 'Multi-Task Loss' : 'Loss'}
+                    label={isODTask ? 'Weighted grid loss' : 'Loss'}
                     color="#eab308"
                     valColor="#f97316"
                   />
@@ -1143,11 +1203,28 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
               </div>
             )}
 
+            {/* Queue */}
+            {status.status === 'queued' && (
+              <div className="p-3 bg-slate-800 border border-slate-700 rounded-xl text-sm text-gray-300 flex items-center gap-2">
+                <Clock className="w-4 h-4 text-cyan-400" />
+                Waiting for the ML worker{typeof status.queue_position === 'number' && status.queue_position >= 0 ? ` - ${status.queue_position} job(s) ahead` : ''}.
+                Jobs run one at a time so they don't fight over the GPU.
+              </div>
+            )}
+
+            {/* Held-out evaluation */}
+            {status.evaluation && (
+              <div className="p-4 bg-slate-800/60 border border-slate-700 rounded-xl">
+                <EvaluationReport metrics={status.evaluation} detection={isODTask}
+                  title={`Held-out evaluation (${status.evaluation.split} split)`} />
+              </div>
+            )}
+
             {/* Training error */}
-            {status.status === 'failed' && (status as any).error && (
+            {status.status === 'failed' && status.error && (
               <div className="p-4 bg-red-900/30 border border-red-500/50 rounded-xl text-red-300 text-sm">
                 <strong className="block mb-1">Training Error:</strong>
-                {(status as any).error}
+                {status.error}
               </div>
             )}
 
@@ -1164,7 +1241,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
       {/* --- Chart Modals --- */}
       {expandedLiveChart === 'accuracy' && (
         <ChartModal
-          label="Accuracy (%)"
+          label={`${metricLabel} (%)`}
           color="#22c55e"
           valColor="#06b6d4"
           data={accuracyData}

@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor, Code2, Copy, Check, GitBranch, ChevronDown } from 'lucide-react';
-import { useAPI, API_BASE } from '../hooks/useAPI';
+import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor, Code2, Copy, Check, GitBranch, ChevronDown, Mic, ShieldCheck } from 'lucide-react';
+import { apiFetch } from '../config';
+import { useAppContext } from '../context/AppContext';
+import { formatBytes } from '../utils/format';
 import { useToast } from '../context/ToastContext';
 import { TargetBoard } from '../types';
 import { ModelTree } from './ModelTree';
@@ -15,6 +17,21 @@ const DEFAULT_CAMERA_PINS = {
   y9: 35, y8: 34, y7: 39, y6: 36, y5: 21, y4: 19, y3: 18, y2: 5,
   vsync: 25, href: 23, pclk: 22,
 };
+
+// INMP441-style I2S microphone defaults per board (see backend MIC_MODULE_PRESETS).
+const MIC_DEFAULTS: Record<string, { preset: string; pins: { sck: number; ws: number; sd: number } }> = {
+  ESP32_S3_N16R8: { preset: 'INMP441_ESP32_S3', pins: { sck: 42, ws: 41, sd: 2 } },
+  ESP32_CAM: { preset: 'INMP441_ESP32', pins: { sck: 14, ws: 15, sd: 13 } },
+};
+
+interface TflmInfo {
+  available?: boolean;
+  supported?: boolean;
+  arena_bytes?: number;
+  unsupported_ops?: string[];
+  ops?: string[];
+  error?: string;
+}
 
 const DEFAULT_DISPLAY_PINS = {
   cs: 15, dc: 2, rst: 4, sck: 18, mosi: 23, backlight: '',
@@ -33,11 +50,13 @@ interface BoardEvaluation {
   warnings: string[];
   suggestions: string[];
   deployment_feasible: boolean;
+  ram_estimation_method?: string;
+  tflm?: TflmInfo | null;
 }
 
 export function DeploymentPanel({ board }: DeploymentPanelProps) {
-  const { apiClient } = useAPI();
   const { toast } = useToast();
+  const { state } = useAppContext();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // NOTE: this used to read `state.currentOptimization?.id` from
@@ -77,6 +96,30 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     setCameraEnabled(board === 'ESP32_CAM');
   }, [board]);
 
+  // Task + TFLite Micro status of the selected variant (audio models get a
+  // microphone section instead of the camera one).
+  const [variantTask, setVariantTask] = useState<string | null>(null);
+  const [tflm, setTflm] = useState<TflmInfo | null>(null);
+  useEffect(() => {
+    if (!optimizationId) { setVariantTask(null); setTflm(null); return; }
+    let alive = true;
+    apiFetch(`/optimization/result/${optimizationId}`)
+      .then((r) => r.json())
+      .then((j) => {
+        if (!alive || j?.status !== 'success') return;
+        const model = state.trainedModels.find((m) => m.training_id === j.result.training_id);
+        setVariantTask(model?.task ?? null);
+        setTflm(j.result.metrics?.tflm ?? null);
+      })
+      .catch(() => { /* leave unknown */ });
+    return () => { alive = false; };
+  }, [optimizationId, state.trainedModels]);
+  const isAudio = variantTask === 'KEYWORD_SPOTTING' || variantTask === 'AUDIO_CLASSIFICATION';
+  const micDefaults = MIC_DEFAULTS[board];
+  const [micEnabled, setMicEnabled] = useState(true);
+  const [micPins, setMicPins] = useState(micDefaults?.pins ?? { sck: 42, ws: 41, sd: 2 });
+  useEffect(() => { if (micDefaults) setMicPins(micDefaults.pins); }, [board]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [evaluation, setEvaluation] = useState<BoardEvaluation | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
@@ -85,6 +128,7 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
   const [exportError, setExportError] = useState<string | null>(null);
 
   const [preview, setPreview] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -108,41 +152,55 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
   }, [cameraPins]);
 
   const buildCameraConfig = useCallback(() => ({
-    enabled: cameraEnabled,
+    enabled: cameraEnabled && !isAudio,
     module_type: isIntegratedCamera ? 'integrated' : 'external',
-  }), [cameraEnabled, isIntegratedCamera]);
+  }), [cameraEnabled, isIntegratedCamera, isAudio]);
+
+  const buildMicConfig = useCallback(() => (
+    micDefaults && micEnabled
+      ? { module_preset: micDefaults.preset, enabled: true, ...micPins }
+      : { module_preset: 'NONE' }
+  ), [micDefaults, micEnabled, micPins]);
+
+  const buildBody = useCallback(() => {
+    const body: Record<string, unknown> = {
+      board, display_config: buildDisplayConfig(), camera_config: buildCameraConfig(), mic_config: buildMicConfig(),
+    };
+    if (cameraEnabled && !isAudio) body.camera_pins = buildCameraPins();
+    return body;
+  }, [board, buildDisplayConfig, buildCameraConfig, buildMicConfig, buildCameraPins, cameraEnabled, isAudio]);
 
   // Live "ready to flash" preview - refetched whenever board/pins/optimization change
   useEffect(() => {
     if (!optimizationId) { setPreview(null); return; }
     setPreviewLoading(true);
-    const body: any = { board, display_config: buildDisplayConfig(), camera_config: buildCameraConfig() };
-    if (cameraEnabled) body.camera_pins = buildCameraPins();
-
     const timeout = setTimeout(() => {
-      fetch(`${API_BASE}/optimization/export-preview/${optimizationId}`, {
+      apiFetch(`/optimization/export-preview/${optimizationId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(buildBody()),
       })
         .then((r) => r.json())
-        .then((j) => setPreview(j.status === 'success' ? j.sketch : null))
+        .then((j) => {
+          setPreview(j.status === 'success' ? j.sketch : null);
+          setPreviewError(j.status === 'success' ? null : (j.message ?? 'Preview failed'));
+        })
         .catch(() => {
           setPreview(null);
-          toast('error', 'Failed to load sketch preview');
+          setPreviewError('Failed to load sketch preview');
         })
         .finally(() => setPreviewLoading(false));
     }, 400); // debounce pin edits
 
     return () => clearTimeout(timeout);
-  }, [optimizationId, board, cameraPins, cameraEnabled, displayEnabled, displayPins, buildDisplayConfig, buildCameraPins, buildCameraConfig]);
+  }, [optimizationId, buildBody]);
 
   const handleEvaluate = async () => {
     if (!optimizationId) return;
     setIsEvaluating(true);
     setEvalError(null);
     try {
-      const resp = await fetch(`${API_BASE}/optimization/evaluate-board`, {
+      const resp = await apiFetch(`/optimization/evaluate-board`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ optimization_id: optimizationId, board }),
@@ -150,8 +208,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
       const json = await resp.json();
       if (json.status === 'success') setEvaluation(json.recommendation);
       else setEvalError(json.message ?? 'Board evaluation failed.');
-    } catch (e: any) {
-      setEvalError(e.message ?? 'Board evaluation failed.');
+    } catch (e) {
+      setEvalError((e as Error).message ?? 'Board evaluation failed.');
     } finally {
       setIsEvaluating(false);
     }
@@ -162,19 +220,17 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
     setIsExporting(true);
     setExportError(null);
     try {
-      const body: any = { board, display_config: buildDisplayConfig(), camera_config: buildCameraConfig() };
-      if (cameraEnabled) body.camera_pins = buildCameraPins();
-
-      const resp = await fetch(`${API_BASE}/optimization/export/${optimizationId}`, {
+      const resp = await apiFetch(`/optimization/export/${optimizationId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify(buildBody()),
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
         throw new Error(err?.detail ?? `HTTP ${resp.status}`);
       }
       const blob = await resp.blob();
+      toast('success', 'Arduino project downloaded');
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -183,8 +239,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-    } catch (e: any) {
-      setExportError(e.message ?? 'Export failed.');
+    } catch (e) {
+      setExportError((e as Error).message ?? 'Export failed.');
     } finally {
       setIsExporting(false);
     }
@@ -246,10 +302,55 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
             Target board: <span className="text-white font-semibold">{board.replace(/_/g, ' ')}</span>
           </p>
           <p className="text-xs text-gray-500 mt-1">
-            Change the board from the Global Config menu in the header if needed.
+            Change the target board from the selector in the header.
           </p>
+          {tflm && (
+            <p className={`text-xs mt-2 flex items-center gap-1.5 ${tflm.unsupported_ops?.length || (tflm.available && !tflm.supported) ? 'text-red-300' : 'text-emerald-300'}`}>
+              <ShieldCheck className="w-3.5 h-3.5" />
+              {tflm.unsupported_ops?.length
+                ? `Not runnable on TensorFlow Lite Micro (unsupported: ${tflm.unsupported_ops.join(', ')})`
+                : tflm.available && tflm.supported
+                  ? `Verified with TensorFlow Lite Micro - needs a ${formatBytes(tflm.arena_bytes)} tensor arena`
+                  : tflm.available ? `TensorFlow Lite Micro check failed: ${tflm.error ?? 'unknown error'}` : `All ${tflm.ops?.length ?? 0} ops are supported by TensorFlow Lite Micro`}
+            </p>
+          )}
         </div>
 
+        {isAudio && (
+          <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
+            {micDefaults ? (
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" checked={micEnabled} onChange={(e) => setMicEnabled(e.target.checked)}
+                  className="rounded border-slate-600 bg-slate-800 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-0" />
+                <h4 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <Mic className="w-4 h-4 text-cyan-400" /> I2S microphone (INMP441 / SPH0645)
+                </h4>
+              </label>
+            ) : (
+              <h4 className="text-sm font-semibold text-white flex items-center gap-2"><Mic className="w-4 h-4 text-cyan-400" /> Audio input</h4>
+            )}
+            {micDefaults && micEnabled ? (
+              <div className="grid grid-cols-3 gap-2">
+                {(['sck', 'ws', 'sd'] as const).map((key) => (
+                  <label key={key} className="text-xs text-gray-400">
+                    {key.toUpperCase()}
+                    <input type="number" value={micPins[key]}
+                      onChange={(e) => setMicPins((prev) => ({ ...prev, [key]: Number(e.target.value) }))}
+                      className="mt-1 w-full px-2 py-1.5 bg-slate-800 border border-slate-600 rounded text-white text-sm focus:border-cyan-500 focus:outline-none" />
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            <p className="text-[11px] text-slate-500">
+              The export includes <code>mfcc_frontend.h</code>, an exact port of the training audio front-end, so features
+              on the device match training. {micDefaults && micEnabled
+                ? 'The sketch records clips from the microphone and classifies them in a loop.'
+                : 'Without a microphone, stream WAV clips from your PC with the bundled send_wav.py.'}
+            </p>
+          </div>
+        )}
+
+        {!isAudio && (
         <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
           {isIntegratedCamera ? (
             <h4 className="text-sm font-semibold text-white flex items-center gap-2">
@@ -297,6 +398,7 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
             </>
           )}
         </div>
+        )}
 
         <div className="p-4 bg-slate-900/50 rounded-lg border border-slate-700 space-y-3">
           <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -370,7 +472,9 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
           <div className="space-y-3 p-4 bg-slate-900/50 rounded-lg border border-slate-700">
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <span className="text-gray-400 block mb-1">RAM (est.)</span>
+                <span className="text-gray-400 block mb-1">
+                  Tensor arena {evaluation.ram_estimation_method === 'tflite_micro_measured' ? '(measured)' : '(estimated)'}
+                </span>
                 <div className="flex justify-between items-end">
                   <span className="text-white font-mono">{evaluation.ram_usage_kb} KB</span>
                   <span className={evaluation.ram_percentage > 80 ? 'text-red-400' : 'text-green-400'}>{evaluation.ram_percentage.toFixed(1)}%</span>
@@ -384,6 +488,16 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
                 </div>
               </div>
             </div>
+            {evaluation.estimated_inference_ms_on_device != null && (
+              <p className="text-xs text-gray-400">
+                Latency: ~{evaluation.estimated_inference_ms_on_device} ms on-device (scaled from {evaluation.measured_inference_ms_on_host} ms on this host; the sketch prints the real figure).
+              </p>
+            )}
+            {evaluation.suggestions.length > 0 && (
+              <ul className="space-y-1 list-disc list-inside text-xs text-slate-400">
+                {evaluation.suggestions.map((sg, i) => <li key={i}>{sg}</li>)}
+              </ul>
+            )}
             {evaluation.warnings.length > 0 && (
               <div className="space-y-1">
                 {evaluation.warnings.map((w, i) => (
@@ -417,6 +531,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
         <div className="flex-1 overflow-auto p-4">
           {previewLoading && !preview ? (
             <p className="text-sm text-gray-500">Generating preview...</p>
+          ) : previewError ? (
+            <p className="text-sm text-red-300">{previewError}</p>
           ) : preview ? (
             <pre className="text-[11px] text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">{preview}</pre>
           ) : (

@@ -18,7 +18,6 @@ export type QuantizationMethod =
   | 'PRUNING'
   | 'WEIGHT_CLUSTERING'
   | 'DYNAMIC_QUANTIZATION'
-  | 'TRANSFER_LEARNING'
 
 export type DatasetSplit = 'train' | 'val' | 'test' | 'unassigned'
 
@@ -117,6 +116,9 @@ export interface TrainingConfig {
 }
 
 export interface ModelMetadata {
+  test_accuracy?: number | null
+  params?: number
+  input_shape?: number[]
   id: string
   name: string
   training_id: string
@@ -145,14 +147,39 @@ export interface TrainingMetrics {
   timestamp: number
 }
 
+export type JobStatus = 'queued' | 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
+
+/** Held-out evaluation stored on a finished session (see EvaluationReport). */
+export interface SessionEvaluation {
+  split: string
+  num_samples: number
+  accuracy?: number
+  macro_f1?: number
+  precision?: number
+  recall?: number
+  f1?: number
+  labels?: string[]
+  per_class?: { label?: string; precision: number; recall: number; f1: number; support?: number; tp?: number; fp?: number; fn?: number }[]
+  confusion_matrix?: number[][]
+}
+
 export interface TrainingStatus {
   id: string
-  status: 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
+  name?: string
+  task?: TinyMLTask
+  status: JobStatus
   current_epoch: number
   total_epochs: number
   progress: number
   created_at: number
   started_at?: number
+  completed_at?: number
+  elapsed_seconds?: number
+  remaining_seconds?: number
+  device_used?: 'cpu' | 'gpu' | null
+  error?: string
+  queue_position?: number
+  evaluation?: SessionEvaluation | null
   metrics: TrainingMetrics[]
 }
 
@@ -244,10 +271,18 @@ export interface TreeItem {
 
 export interface PastTrainingSession {
   id: string
+  name?: string
   dataset_id: string
   base_model: string
   task: TinyMLTask
-  status: 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
+  evaluation?: SessionEvaluation | null
+  input_shape?: number[]
+  seed?: number | null
+  augmentation?: Record<string, unknown>
+  archived?: boolean
+  freeze_encoder_epochs?: number
+  trainable_layers?: number
   current_epoch: number
   total_epochs: number
   batch_size: number

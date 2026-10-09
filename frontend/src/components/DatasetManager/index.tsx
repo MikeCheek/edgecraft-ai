@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { CardSkeleton } from '../Skeleton';
 import { useAPI, API_BASE } from '../../hooks/useAPI';
+import { withAuthQuery } from '../../config';
 import { useToast } from '../../context/ToastContext';
 import { TinyMLTask, DatasetInfo } from '../../types';
 import ClassManager from './ClassManager';
@@ -127,7 +128,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const handleExportFull = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`full-${dataset.id}`);
-    try { window.location.href = `${API_BASE}/datasets/export/full/${dataset.id}`; }
+    try { window.location.href = withAuthQuery(`${API_BASE}/datasets/export/full/${dataset.id}`); }
     catch { toast('error', 'Export failed'); }
     finally { setExportingId(null); }
   };
@@ -135,7 +136,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const handleExportSplit = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`split-${dataset.id}`);
-    try { window.location.href = `${API_BASE}/datasets/export/split/${dataset.id}`; }
+    try { window.location.href = withAuthQuery(`${API_BASE}/datasets/export/split/${dataset.id}`); }
     catch { toast('error', 'Export failed'); }
     finally { setExportingId(null); }
   };
@@ -153,7 +154,9 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     try {
       const res = await apiClient.getSplitSummary(datasetId);
       setSplitSummaries(prev => ({ ...prev, [datasetId]: res.summary }));
-    } catch { }
+    } catch {
+      /* summary refresh is best-effort; the list reloads on the next change */
+    }
     onDatasetChanged?.();
   };
 
@@ -361,7 +364,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                 {expandedUpload === dataset.id && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                     <DataImporter datasetId={dataset.id} task={task}
-                      onImportSuccess={(newId) => { fetchDatasets(); onDatasetChanged?.(); }} />
+                      onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                   </div>
                 )}
               </div>

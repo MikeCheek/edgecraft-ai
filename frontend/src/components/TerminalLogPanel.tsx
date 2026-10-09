@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal, ChevronDown, Trash2, Circle } from 'lucide-react';
-import { API_BASE } from '../hooks/useAPI';
+import { WS_BASE, withAuthQuery } from '../config';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 interface LogEntry {
+  seq?: number;
   ts: number;
   level: 'info' | 'warning' | 'error';
   message: string;
@@ -18,9 +19,6 @@ interface TerminalLogPanelProps {
   defaultOpen?: boolean;
 }
 
-const WS_BASE = (() => {
-  return API_BASE.replace(/^http/, 'ws').replace(/\/api$/, '');
-})();
 
 function levelColor(level: LogEntry['level']): string {
   switch (level) {
@@ -36,27 +34,35 @@ export function TerminalLogPanel({ jobId, title = 'Live Console', defaultOpen = 
   const bottomRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
 
-  const wsUrl = jobId ? `${WS_BASE}/ws/logs/${jobId}` : null;
-  const { status, lastMessage } = useWebSocket(wsUrl);
+  const wsUrl = jobId ? withAuthQuery(`${WS_BASE}/ws/logs/${jobId}`) : null;
+  // Highest sequence number already shown: the server replays the whole
+  // buffer on every (re)connect, so anything at or below it is a duplicate.
+  const lastSeqRef = useRef(0);
 
-  const connected = status === 'connected';
-
-  // Parse incoming messages
-  useEffect(() => {
-    if (!lastMessage) return;
+  const handleMessage = useCallback((raw: string) => {
+    let entry: LogEntry;
     try {
-      const entry: LogEntry = JSON.parse(lastMessage);
-      setLogs((prev) => (prev.length > 3000 ? [...prev.slice(-2000), entry] : [...prev, entry]));
+      entry = JSON.parse(raw);
     } catch {
-      // ignore malformed frames
+      return; // ignore malformed frames
     }
-  }, [lastMessage]);
+    if (typeof entry.seq === 'number') {
+      if (entry.seq <= lastSeqRef.current) return;
+      lastSeqRef.current = entry.seq;
+    }
+    setLogs((prev) => (prev.length > 3000 ? [...prev.slice(-2000), entry] : [...prev, entry]));
+  }, []);
 
   // Reset logs when job changes
   useEffect(() => {
     setLogs([]);
+    lastSeqRef.current = 0;
   }, [jobId]);
 
+  const { status } = useWebSocket(wsUrl, handleMessage);
+  const connected = status === 'connected';
+
+  // Clearing keeps lastSeqRef, so a reconnect doesn't bring cleared lines back.
   const clearLogs = useCallback(() => setLogs([]), []);
 
   // Auto-scroll to bottom on new lines

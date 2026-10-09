@@ -1,12 +1,11 @@
 import { useEffect, useState, useMemo } from 'react';
-import { Database, FolderHeart, Activity, CheckCircle2, XCircle, BrainCircuit, Box, HardDrive, ChevronDown, FileType, LayoutTemplate, GripVertical, Settings } from 'lucide-react';
+import { Database, FolderHeart, Activity, CheckCircle2, XCircle, BrainCircuit, Box, HardDrive, LayoutTemplate, GripVertical, Settings } from 'lucide-react';
 import { GridSkeleton } from './Skeleton';
 import { DatasetStatistics } from '../types';
 import { useAppContext } from '../context/AppContext';
 import { useAPI } from '../hooks/useAPI';
 import { useLocalStorage } from '../hooks/useLocalStorage';
-import { formatBytes } from '../utils/format';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
 interface DashboardOverviewProps {
   stats: DatasetStatistics;
@@ -34,7 +33,6 @@ export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) 
 
   const [storageOverview, setStorageOverview] = useState<any | null>(null);
   const [trainingSessions, setTrainingSessions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
   const [isEditMode, setIsEditMode] = useState(false);
 
   // View Management State
@@ -46,14 +44,13 @@ export function DashboardOverview({ stats, isHealthy }: DashboardOverviewProps) 
   const [draggedWidget, setDraggedWidget] = useState<WidgetID | null>(null);
 
   useEffect(() => {
-    setLoading(true);
     Promise.all([
       request(() => apiClient.getStorageOverview()),
       request(() => apiClient.listAllSessions(false)) // Fetch past trainings for chart
     ]).then(([storeRes, sessionRes]: any) => {
       if (storeRes && storeRes.overview) setStorageOverview(storeRes.overview);
       if (sessionRes && sessionRes.sessions) setTrainingSessions(sessionRes.sessions.reverse()); // Oldest to newest
-    }).finally(() => setLoading(false));
+    });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Prepare chart data from training history
