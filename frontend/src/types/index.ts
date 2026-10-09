@@ -290,12 +290,61 @@ export interface BoardRecommendation {
   deployment_feasible: boolean
 }
 
-export interface LLMSuggestion {
-  quality_score: number
-  suggestion: string
+export type ReviewSeverity = 'critical' | 'warning' | 'info' | 'good'
+
+export interface TrainingChanges {
+  base_model?: string
+  input_shape?: number[]
+  epochs?: number
+  batch_size?: number
+  learning_rate?: number
+  dropout_rate?: number
+  l2_reg?: number
+  early_stopping?: boolean
+  early_stopping_patience?: number
+  early_stopping_monitor?: 'val_loss' | 'val_accuracy'
+  freeze_encoder_epochs?: number
+  trainable_layers?: number
+  class_weighting?: boolean
+  augmentation?: Record<string, boolean | number>
+}
+
+export interface ReviewSuggestion {
+  title: string
+  priority: 'high' | 'medium' | 'low'
+  category: 'training' | 'data' | 'deployment'
   reasoning: string
-  parameters_to_adjust: Record<string, any>
-  estimated_improvement: string
+  changes: TrainingChanges
+  rejected_changes?: string[] | null
+  expected_effect: string
+  source: 'ai' | 'rules'
+}
+
+export interface TrainingReview {
+  version: number
+  training_id: string
+  score: number
+  score_label: string
+  score_breakdown: { name: string; points: number; max: number; detail: string }[]
+  summary: string
+  ai_summary?: string
+  findings: { severity: ReviewSeverity; title: string; evidence: string }[]
+  suggestions: ReviewSuggestion[]
+  rule_suggestions: ReviewSuggestion[]
+  suggestions_source: 'ai' | 'rules'
+  ai_error?: string
+  ai_provider?: string
+  ai_model?: string
+  ai_seconds?: number
+  generated_at: number
+  board?: string | null
+  comparison?: {
+    runs: number
+    best_previous: Record<string, any>
+    this_run_best_val_accuracy: number
+    delta_vs_best_previous_pts: number | null
+  } | null
+  facts: Record<string, any>
 }
 
 export interface DatasetStatistics {

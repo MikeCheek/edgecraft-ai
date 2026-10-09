@@ -735,23 +735,26 @@ class APIClient {
     return this.client.get<ApiResponse<any>>('/optimization/llm-config')
   }
 
-  async getLLMSuggestions(
+  /**
+   * Post-training review. provider null = deterministic review only
+   * (instant); 'openrouter' / 'ollama' adds AI suggestions grounded in it.
+   * The backend retries the LLM within a ~170 s budget and falls back to
+   * the rule-based suggestions instead of failing, so wait a bit longer.
+   */
+  async getTrainingReview(
     trainingId: string,
-    provider: 'ollama' | 'openrouter',
-    modelName: string,
-    pastSessions?: any[]
+    opts: { provider?: 'ollama' | 'openrouter' | null; modelName?: string; board?: string; useCache?: boolean } = {}
   ) {
     return this.client.post<ApiResponse<any>>(
       '/optimization/llm-suggest',
       {
         training_id: trainingId,
-        provider,
-        model_name: modelName,
-        past_sessions: pastSessions
+        provider: opts.provider ?? null,
+        model_name: opts.modelName,
+        board: opts.board,
+        use_cache: opts.useCache ?? false
       },
-      {
-        timeout: 120_000
-      }
+      { timeout: opts.provider ? 200_000 : 60_000 }
     )
   }
 
