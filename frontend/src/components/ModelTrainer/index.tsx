@@ -13,6 +13,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAppContext } from '../../context/AppContext';
 import { TinyMLTask, TrainingStatus } from '../../types';
 import { TrainingDashboard } from './TrainingDashboard';
+import { APPLY_TRAINING_CHANGES_EVENT, ApplyTrainingChangesDetail } from '../../utils/trainingChanges';
 import {
   getTaskDefaults, AUDIO_TASKS, AUDIO_MODELS, IMAGE_MODELS, OD_MODELS, MODEL_HINTS, FREEZE_AUTO,
   formatDate,
@@ -214,6 +215,39 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
   useEffect(() => {
     return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, []);
+
+  // "Apply to configuration" from the training review: load the reviewed
+  // run's settings plus the suggested changes into the form, so the next run
+  // is exactly "that run, with this fix".
+  useEffect(() => {
+    const onApply = (e: Event) => {
+      const { changes, datasetId: ds, base } = (e as CustomEvent<ApplyTrainingChangesDetail>).detail;
+      const cfg = { ...base, ...changes, augmentation: { ...(base?.augmentation ?? {}), ...(changes.augmentation ?? {}) } };
+      if (ds) setDatasetId(ds);
+      if (cfg.base_model) setBaseModel(cfg.base_model);
+      if (Array.isArray(cfg.input_shape)) setInputShape(cfg.input_shape);
+      if (cfg.epochs != null) setEpochs(cfg.epochs);
+      if (cfg.batch_size != null) setBatchSize(cfg.batch_size);
+      if (cfg.learning_rate != null) setLearningRate(cfg.learning_rate);
+      if (cfg.dropout_rate != null) setDropoutRate(cfg.dropout_rate);
+      if (cfg.l2_reg != null) setL2Reg(cfg.l2_reg);
+      if (cfg.trainable_layers != null) setTrainableLayers(cfg.trainable_layers);
+      if (cfg.freeze_encoder_epochs != null) setFreezeEpochs(cfg.freeze_encoder_epochs);
+      if (cfg.class_weighting != null) setClassWeighting(!!cfg.class_weighting);
+      if (cfg.early_stopping != null) setEarlyStopping(!!cfg.early_stopping);
+      if (cfg.early_stopping_patience != null) setEsPatience(cfg.early_stopping_patience);
+      if (cfg.early_stopping_monitor) setEsMonitor(cfg.early_stopping_monitor);
+      setAugmentation((prev) => ({ ...prev, ...cfg.augmentation }));
+      if (changes.dropout_rate != null || changes.l2_reg != null || changes.trainable_layers != null
+        || changes.freeze_encoder_epochs != null || changes.class_weighting != null) setShowRegularization(true);
+      setSuggestSession(null);
+      setIsConfigExpanded(true);
+      toast('success', `Applied ${Object.keys(changes).length} change(s) to the configuration. Review and start training.`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+    window.addEventListener(APPLY_TRAINING_CHANGES_EVENT, onApply);
+    return () => window.removeEventListener(APPLY_TRAINING_CHANGES_EVENT, onApply);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Collapse the configuration whenever a job becomes active (started here,
   // or reattached after navigation / reload) so the live dashboard is in view.
@@ -784,7 +818,7 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
 
                 {/* Rotation inline */}
                 <div className="flex items-center gap-2">
-                  <label className="text-sm text-gray-300 whitespace-nowrap">Rotation (%):</label>
+                  <label className="text-sm text-gray-300 whitespace-nowrap">Rotation (× 360°):</label>
                   <input
                     type="number"
                     step={0.1}

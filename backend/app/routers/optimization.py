@@ -5,7 +5,6 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 import io
 
-from app import config
 from app.services.job_queue import job_queue
 
 from app.services.shared_state import trainer
@@ -77,9 +76,15 @@ class BoardEvaluationRequest(BaseModel):
 
 class LLMSuggestRequest(BaseModel):
     training_id: str
-    provider: str = "openrouter"
-    model_name: str = config.DEFAULT_OPENROUTER_MODEL
-    past_sessions: Optional[List[dict]] = None
+    # "openrouter" | "ollama" -> AI suggestions on top of the deterministic
+    # review; None / "none" -> deterministic review only (instant, offline).
+    provider: Optional[str] = None
+    model_name: Optional[str] = None
+    board: Optional[str] = None
+    # Return the stored review of this run when there is one instead of
+    # recomputing (the UI uses this when it opens).
+    use_cache: bool = False
+    past_sessions: Optional[List[dict]] = None  # ignored: the backend reads past runs itself
 
 class LLMOptimizeRequest(BaseModel):
     optimization_id: str
@@ -327,19 +332,34 @@ async def get_llm_provider_config():
 
 @router.post("/llm-suggest")
 async def get_llm_suggestions(request: LLMSuggestRequest):
-    """Post-training suggestions based on the actual training run's metrics history."""
-    try:
-        session_context = trainer.get_training_status(request.training_id)
+    """Post-training review: deterministic analysis of the whole run (score,
+    findings, recommendations) plus optional AI suggestions grounded in it.
+    LLM failures never fail the request - the review falls back to the rule
+    recommendations and reports `ai_error`."""
+    from app.services.training_review import REVIEW_VERSION, review_training
 
-        suggestions = await llm_advisor.generate_suggestions(
-            context=session_context,
-            provider=request.provider,
-            model_name=request.model_name,
-            past_sessions=request.past_sessions,
-        )
-        return {"status": "success", "suggestions": suggestions}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    session = trainer.training_sessions.get(request.training_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Training session not found")
+    if session.get("status") not in ("completed", "cancelled") or not session.get("metrics"):
+        raise HTTPException(status_code=400, detail="The run must finish at least one epoch before it can be reviewed.")
+
+    cached = session.get("review")
+    if request.use_cache and cached and cached.get("version") == REVIEW_VERSION \
+            and cached.get("source_completed_at") == session.get("completed_at"):
+        return {"status": "success", "review": cached, "cached": True}
+
+    provider = request.provider if request.provider in ("openrouter", "ollama") else None
+    try:
+        review = await review_training(session, board=request.board, provider=provider, model_name=request.model_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    review["source_completed_at"] = session.get("completed_at")
+    if provider or not (cached and cached.get("suggestions_source") == "ai"):
+        with trainer.lock:
+            session["review"] = review
+        trainer._save_to_disk()
+    return {"status": "success", "review": review, "cached": False}
 
 @router.post("/llm-optimize")
 async def get_llm_optimization_advice(request: LLMOptimizeRequest):

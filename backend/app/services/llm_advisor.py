@@ -1,11 +1,8 @@
-import os
-import aiohttp
-import asyncio
 import json
 import logging
+import os
 
 from app import config
-from app.services.shared_state import data_manager
 
 logger = logging.getLogger(__name__)
 
@@ -50,232 +47,23 @@ def get_provider_config() -> dict:
 
 
 class LLMAdvisor:
-    async def generate_suggestions(self, context, provider="openrouter", model_name=config.DEFAULT_OPENROUTER_MODEL, past_sessions=None):
-        # 1. Safely Extract Training Context
-        # NOTE: `context` here is the raw training session dict returned by
-        # Trainer.get_training_status() - a FLAT dict (task, dataset_id,
-        # epochs, batch_size, base_model, input_shape, metrics, ...), not
-        # nested under a "config" key. Reading `context.get("config", {})`
-        # always returned an empty dict, silently breaking every
-        # base_model/epochs/batch_size/learning_rate lookup below.
-        task = context.get("task", "Unknown Task")
-        training_config = context
-        metrics_history = context.get("metrics", [])
-        dataset_id = training_config.get("dataset_id") or context.get("dataset_id")
-
-        # 2. Safely Extract Dataset Context
-        # BUGFIX: `dataset_info` never actually has a "labels" key - labels
-        # are tracked separately in data_manager.dataset_labels, not nested
-        # inside the dataset dict. The old check `"labels" in dataset_info`
-        # was therefore always False, so `labels` was always the literal
-        # string "Unknown" and the LLM never saw the real class names.
-        # Also added: the dataset's user-authored `description` and the
-        # auto-computed image-size/aspect-ratio stats, so the model can
-        # reason about resolution/augmentation choices grounded in what the
-        # dataset actually contains, not just a sample count.
-        dataset_info = {}
-        labels = []
-        description = ""
-        image_stats = None
-        if dataset_id:
-            dataset_info = data_manager.get_dataset(dataset_id) or {}
-            labels = data_manager.get_dataset_labels(dataset_id)
-            description = dataset_info.get("description", "")
-            try:
-                image_stats = data_manager.get_dataset_image_stats(dataset_id)
-            except Exception:
-                image_stats = None
-
-        # 3. Prevent Context Window Overflow (Limit to last 10 epochs)
-        if len(metrics_history) > 10:
-            metrics_summary = metrics_history[-10:]
-        else:
-            metrics_summary = metrics_history
-
-        # 4. Construct the TinyML-Specific System Prompt
-        system_prompt = (
-            "You are an expert Edge AI Architect and Machine Learning Advisor embedded inside 'EdgeCraft AI', "
-            "a local TinyML Studio. Your purpose is to help developers train highly efficient neural networks "
-            "for extreme edge microcontrollers (e.g., ESP32, Raspberry Pi Pico, Arduino Nano).\n\n"
-            "Analyze the provided dataset constraints, hyperparameters, and epoch metrics history. "
-            "Identify issues like overfitting, vanishing gradients, under-capacity, or memory bloat.\n\n"
-            "FIRST, compute a single overall Training Quality Score from 0 to 100 based on: "
-            "final validation accuracy/loss, overfitting gap (train vs val loss), convergence behavior, "
-            "and edge-deployment readiness. 90-100 = excellent, 70-89 = good, 50-69 = needs work, below 50 = poor.\n\n"
-            "You MUST respond STRICTLY in valid JSON format as a list of objects. Do not include markdown formatting like ```json. "
-            "Each object must precisely match this schema:\n"
-            "[\n"
-            "  {\n"
-            "    \"quality_score\": 75,\n"
-            "    \"suggestion\": \"Short, actionable title\",\n"
-            "    \"reasoning\": \"Deep, metric-driven explanation of why this will help.\",\n"
-            "    \"parameters_to_adjust\": {\"learning_rate\": 0.0005, \"batch_size\": 16},\n"
-            "    \"estimated_improvement\": \"Expected result on accuracy or RAM/Flash.\"\n"
-            "  }\n"
-            "]\n"
-            "The quality_score MUST be the same integer in every object in the list — it is the single overall score for this training run."
-        )
-
-        # 5. Inject the Real-Time Variables into the User Prompt
-        user_prompt = f"""
-        Analyze the following TinyML training session and provide 2 to 3 concrete suggestions for improvement:
-
-        [PROJECT & TASK CONTEXT]
-        - Platform: EdgeCraft AI (TinyML deployment)
-        - Task Type: {task}
-        - Base Architecture: {training_config.get('base_model', 'Unknown Base Model')}
-
-        [DATASET CONTEXT]
-        - Total Samples: {dataset_info.get('sample_count', 'Unknown')}
-        - Target Classes: {labels if labels else 'Unknown'}
-        - Validation Split: {training_config.get('validation_split', 'Unknown')}
-        - Description: {description or 'Not provided'}
-        - Image Stats: {json.dumps(image_stats, indent=2) if image_stats else 'Not available (non-image task or no dimension data captured yet)'}
-
-        [CURRENT HYPERPARAMETERS]
-        - Target Epochs: {training_config.get('epochs', 'Unknown')}
-        - Batch Size: {training_config.get('batch_size', 'Unknown')}
-        - Learning Rate: {training_config.get('learning_rate', 'Unknown')}
-
-        [METRICS HISTORY (Last {len(metrics_summary)} Epochs)]
-        {json.dumps(metrics_summary, indent=2)}
-        {f'''
-        [PAST TRAINING TRIALS ON THIS DATASET]
-        The user has run {len(past_sessions)} previous training(s) on the same dataset. Analyze these to identify what worked, what didn't, and avoid repeating failed approaches.
-        {json.dumps(past_sessions, indent=2)}
-        ''' if past_sessions else ''}
-        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
-        """
-
-        # 6. Dispatch to your LLM API Wrapper (e.g., OpenRouter, OpenAI, or Ollama)
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        try:
-            if provider == "openrouter":
-                return await self._call_openrouter(messages, model_name)
-            elif provider == "ollama":
-                if not _ollama_enabled():
-                    raise ValueError(
-                        "Ollama is not enabled on this backend. Set OLLAMA_ENABLED=true "
-                        "in the backend .env (optionally with OLLAMA_MODEL / OLLAMA_HOST), "
-                        "or switch the provider back to 'openrouter'."
-                    )
-                return await self._call_ollama(messages, model_name)
-            else:
-                raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
-        except Exception as e:
-            # NOTE: this used to swallow every failure and silently return
-            # generic mock advice via _mock_suggestions(), so a broken API
-            # key, a network error, or a bad model name all looked exactly
-            # like a successful, real suggestion to the user. Now the real
-            # error propagates up to the router, which returns it as
-            # {"status": "error", "message": ...} for the frontend to show.
-            detail = str(e) or e.__class__.__name__
-            logger.error(f"LLM Advisor Error ({provider}): {detail}")
-            raise RuntimeError(f"LLM suggestion request failed ({provider}): {detail}") from e
+    # Post-training review lives in app.services.training_review (deterministic
+    # analysis + grounded AI suggestions). These helpers back the other LLM
+    # features and go through llm_client.chat_json (retries, time budget,
+    # tolerant JSON parsing).
 
     async def _call_openrouter(self, messages, model_name):
-        # SECURE: Pulling directly from the backend environment
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            raise ValueError("OPENROUTER_API_KEY is missing from the backend .env file.")
+        from app.services.llm_client import chat_json
 
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": model_name,
-            "messages": messages,
-            "response_format": {"type": "json_object"} # OpenRouter strict JSON mode
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as response:
-                    body_text = await response.text()
-                    if response.status != 200:
-                        raise RuntimeError(
-                            f"OpenRouter returned HTTP {response.status}: {body_text[:500]}"
-                        )
-
-                    data = json.loads(body_text)
-                    if "error" in data:
-                        # OpenRouter puts API-level errors (bad model id, rate
-                        # limit, no credit, etc.) in a 200 response body.
-                        raise RuntimeError(f"OpenRouter API error: {data['error']}")
-
-                    content = data["choices"][0]["message"]["content"]
-
-                    # Clean up markdown code blocks if the LLM ignores the response_format
-                    if content.startswith("```json"):
-                        content = content.replace("```json", "").replace("```", "").strip()
-                    elif content.startswith("```"):
-                        content = content.replace("```", "").strip()
-
-                    try:
-                        parsed = json.loads(content)
-                    except json.JSONDecodeError as je:
-                        raise RuntimeError(
-                            f"OpenRouter response was not valid JSON: {je}. Raw content: {content[:500]}"
-                        ) from je
-
-                    # Handle varied JSON root structures
-                    if isinstance(parsed, dict) and "suggestions" in parsed:
-                        return parsed["suggestions"]
-                    return parsed
-            except aiohttp.ClientError as e:
-                # e.g. connection refused, DNS failure, SSL error - these
-                # often stringify to "" on their own, so always include the
-                # exception type name too.
-                raise RuntimeError(f"Could not reach OpenRouter ({type(e).__name__}: {e})") from e
-            except asyncio.TimeoutError as e:
-                raise RuntimeError("OpenRouter request timed out after 45s") from e
+        return await chat_json(messages, "openrouter", model_name or config.DEFAULT_OPENROUTER_MODEL)
 
     async def _call_ollama(self, messages, model_name):
-        # BUGFIX: Switched to /api/chat endpoint for structured message handling.
+        from app.services.llm_client import chat_json
+
         if not model_name or "/" in model_name:
             model_name = _ollama_default_model()
+        return await chat_json(messages, "ollama", model_name)
 
-        url = f"{_ollama_host()}/api/chat" # Changed from /api/generate to /api/chat
-        payload = {
-            "model": model_name,
-            "messages": messages, # Pass the full message list
-            "stream": False,
-            "format": "json"
-        }
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=45)) as response:
-                    body_text = await response.text()
-                    if response.status != 200:
-                        raise RuntimeError(f"Ollama returned HTTP {response.status}: {body_text[:500]}")
-
-                    data = json.loads(body_text)
-                    # The chat endpoint returns the content directly in data['message']['content']
-                    response_text = data.get("message", {}).get("content", "")
-                    try:
-                        parsed = json.loads(response_text)
-                    except json.JSONDecodeError as je:
-                        raise RuntimeError(
-                            f"Ollama response was not valid JSON: {je}. Raw content: {response_text[:500]}"
-                        ) from je
-
-                    if isinstance(parsed, dict) and "suggestions" in parsed:
-                        return parsed["suggestions"]
-                    return parsed
-            except aiohttp.ClientError as e:
-                raise RuntimeError(
-                    f"Could not reach local Ollama at {url} ({type(e).__name__}: {e}). "
-                    "Is Ollama running? (ollama serve)"
-                ) from e
-            except asyncio.TimeoutError as e:
-                raise RuntimeError("Ollama request timed out after 45s") from e
     # ------------------------------------------------------------------
     # Board-specific optimization advice (used by /optimization/llm-optimize)
     # ------------------------------------------------------------------
