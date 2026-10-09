@@ -92,7 +92,7 @@ npm run dev
 | Backend API | http://localhost:8000      |
 | Swagger UI  | http://localhost:8000/docs |
 
-**Docker:** `cp backend/.env.example backend/.env && docker compose up --build`, then open `http://localhost`. All data lives in `backend/data_storage` (mounted at `/data`).
+**Docker:** `docker compose up --build -d`, then open `http://localhost:3990` (another port: `EDGECRAFT_PORT=8080 docker compose up -d`). `backend/.env` is optional (`cp backend/.env.example backend/.env` to set LLM keys, an API token, etc.). All data lives in `backend/data_storage` (mounted at `/data`). See [QUICKSTART](QUICKSTART.md#docker-deployment) for details.
 
 **Configuration** (`backend/.env`): `EDGECRAFT_STORAGE_DIR`, `ALLOWED_ORIGINS`, `EDGECRAFT_API_TOKEN` (optional shared secret, recommended whenever the API is reachable from other machines; enter it in the app's Settings page), upload limits, LLM keys. The frontend's backend URL comes from `VITE_API_BASE_URL` or the Settings page.
 

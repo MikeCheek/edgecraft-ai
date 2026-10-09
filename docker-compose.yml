@@ -7,12 +7,17 @@ services:
     # expose the API directly (then set EDGECRAFT_API_TOKEN in backend/.env).
     # ports:
     #   - "127.0.0.1:8000:8000"
+    # Optional: copy backend/.env.example to backend/.env to set API keys,
+    # an API token, upload limits, etc. Runs with defaults without it.
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: false
     environment:
       - EDGECRAFT_STORAGE_DIR=/data
     volumes:
       - ./backend/data_storage:/data
+      # Pretrained ImageNet weights downloaded by Keras (kept across rebuilds)
+      - keras-cache:/root/.keras
     extra_hosts:
       # Reach an Ollama server on the host: OLLAMA_HOST=http://host.docker.internal:11434
       - "host.docker.internal:host-gateway"
@@ -35,8 +40,12 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+    # App on http://localhost:3990 (override: EDGECRAFT_PORT=8080 docker compose up)
     ports:
-      - "80:80"
+      - "${EDGECRAFT_PORT:-3990}:80"
     depends_on:
       backend:
         condition: service_healthy
+
+volumes:
+  keras-cache:
