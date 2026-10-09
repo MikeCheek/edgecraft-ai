@@ -24,7 +24,7 @@ from app.services import dataset_loader, preprocessing
 from app.services.detection import FOMO_STRIDE, score_detections
 from app.services.job_logs import job_log_broker
 from app.services.json_store import atomic_write_json, read_json
-from app.services.model_factory import ModelFactory
+from app.services.model_factory import ModelFactory, set_backbone_trainable
 
 logger = logging.getLogger(__name__)
 
@@ -73,25 +73,123 @@ def make_fomo_loss(object_weight: float = FOMO_OBJECT_WEIGHT):
     return fomo_loss
 
 
+LIVE_EVAL_MAX_SAMPLES = 2000   # val samples scored per epoch for the dashboard
+LIVE_UPDATE_SECONDS = 0.5      # throttle for intra-epoch (batch) progress
+BATCH_HISTORY_MAX = 600        # batch points kept for the live loss curve
+
+
+def _memory_mb() -> Optional[float]:
+    """Resident memory of the backend process (best effort, no psutil)."""
+    try:
+        with open("/proc/self/statm") as f:
+            return round(int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e6, 1)
+    except Exception:
+        try:
+            import resource
+            import sys
+
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return round(peak / (1e6 if sys.platform == "darwin" else 1e3), 1)
+        except Exception:
+            return None
+
+
+def _gpu_memory_mb() -> Optional[float]:
+    try:
+        if tf.config.list_physical_devices("GPU"):
+            return round(tf.config.experimental.get_memory_info("GPU:0")["current"] / 1e6, 1)
+    except Exception:
+        pass
+    return None
+
+
+def calibration_stats(probs: np.ndarray, y_true: np.ndarray, bins: int = 10) -> Dict:
+    """Mean confidence and expected calibration error (ECE) of softmax outputs."""
+    conf = probs.max(axis=-1)
+    correct = probs.argmax(axis=-1) == y_true
+    ece = 0.0
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        m = (conf > lo) & (conf <= hi)
+        if m.any():
+            ece += m.mean() * abs(correct[m].mean() - conf[m].mean())
+    return {"confidence": float(conf.mean()), "ece": float(ece)}
+
+
 class TrainingCallback(keras.callbacks.Callback):
     """Records per-epoch metrics on the session, streams them to the job
-    console, and honours cancellation at epoch boundaries."""
+    console, publishes intra-epoch progress for the live dashboard, and
+    honours cancellation at epoch boundaries."""
 
-    def __init__(self, session: dict, trainer: "Trainer", od_eval: Optional[dict] = None):
+    def __init__(self, session: dict, trainer: "Trainer", od_eval: Optional[dict] = None,
+                 val_eval: Optional[dict] = None, num_train: int = 0):
         super().__init__()
         self.session = session
         self.trainer = trainer
         self.od_eval = od_eval
+        self.val_eval = val_eval
+        self.num_train = num_train
+        self.phase = "train"
         self.epoch_start = 0.0
+        self.current_epoch = 0
+        self._last_live = 0.0
+        self._prev_weights: Optional[List[np.ndarray]] = None
+
+    def on_train_begin(self, logs=None):
+        # A new fit() (e.g. phase 2) may train a different set of weights.
+        self._prev_weights = [np.array(w) for w in self.model.trainable_weights]
 
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start = time.time()
+        self.current_epoch = epoch + 1
+        self._last_live = 0.0
 
-    def _od_f1(self, X, Y) -> float:
+    def on_train_batch_end(self, batch, logs=None):
+        now = time.time()
+        steps = int((self.params or {}).get("steps") or 0)
+        last = steps and batch + 1 >= steps
+        if now - self._last_live < LIVE_UPDATE_SECONDS and not last:
+            return
+        self._last_live = now
+        logs = logs or {}
+        loss = float(logs.get("loss", 0.0))
+        acc = logs.get("accuracy", logs.get("acc"))
+        point = {"step": round(self.current_epoch - 1 + (batch + 1) / max(1, steps), 4), "loss": loss}
+        if acc is not None:
+            point["accuracy"] = float(acc)
+        s = self.session
+        with self.trainer.lock:
+            s["live"] = {
+                "epoch": self.current_epoch, "batch": batch + 1, "batches": steps,
+                "loss": loss, "accuracy": point.get("accuracy"), "phase": self.phase,
+                "epoch_elapsed": now - self.epoch_start, "updated_at": now,
+            }
+            hist = s.setdefault("batch_history", [])
+            hist.append(point)
+            if len(hist) > BATCH_HISTORY_MAX:
+                s["batch_history"] = hist[::2]
+
+    def _od_scores(self, X, Y) -> Dict:
         if X is None or len(X) == 0:
-            return 0.0
+            return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
         probs = self.model.predict(X, verbose=0, batch_size=64)
-        return score_detections(list(Y), list(probs), self.od_eval["num_classes"])["f1"]
+        return score_detections(list(Y), list(probs), self.od_eval["num_classes"])
+
+    def _learning_rate(self) -> Optional[float]:
+        try:
+            return float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
+        except Exception:
+            return None
+
+    def _weight_stats(self) -> Dict:
+        cur = [np.array(w) for w in self.model.trainable_weights]
+        norm = float(np.sqrt(sum(float(np.sum(np.square(w, dtype=np.float64))) for w in cur)))
+        update = None
+        if self._prev_weights is not None and len(self._prev_weights) == len(cur):
+            delta = sum(float(np.sum(np.square(c.astype(np.float64) - p))) for c, p in zip(cur, self._prev_weights))
+            update = float(np.sqrt(delta) / norm) if norm else None
+        self._prev_weights = cur
+        return {"weight_norm": norm, "update_ratio": update}
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -101,12 +199,32 @@ class TrainingCallback(keras.callbacks.Callback):
         done = epoch + 1
         started = s.get("started_at") or now
         elapsed = now - started
+        epoch_seconds = now - self.epoch_start
         accuracy = float(logs.get("accuracy", logs.get("acc", 0.0)))
         val_accuracy = float(logs.get("val_accuracy", logs.get("val_acc", 0.0)))
+        extra: Dict = {}
+        live_eval = None
         if self.od_eval:
             # For detection, "accuracy" means object-level F1 (centroid matching).
-            accuracy = self._od_f1(self.od_eval["X_train"], self.od_eval["Y_train"])
-            val_accuracy = self._od_f1(self.od_eval["X_val"], self.od_eval["Y_val"])
+            accuracy = self._od_scores(self.od_eval["X_train"], self.od_eval["Y_train"])["f1"]
+            val = self._od_scores(self.od_eval["X_val"], self.od_eval["Y_val"])
+            val_accuracy = val["f1"]
+            extra.update(val_precision=val["precision"], val_recall=val["recall"], val_f1=val["f1"])
+            live_eval = {"epoch": done, "per_class": [
+                {"label": lbl, **pc} for lbl, pc in zip(self.od_eval.get("labels", []), val["per_class"])]}
+        elif self.val_eval and len(self.val_eval["X"]):
+            X, y, labels = self.val_eval["X"], self.val_eval["y"], self.val_eval["labels"]
+            probs = np.asarray(self.model.predict(X, verbose=0, batch_size=64), dtype=np.float32)
+            cm = classification_metrics(y, probs.argmax(axis=-1), labels)
+            pcs = cm["per_class"]
+            extra.update(
+                val_precision=float(np.mean([c["precision"] for c in pcs])),
+                val_recall=float(np.mean([c["recall"] for c in pcs])),
+                val_f1=cm["macro_f1"],
+                **{f"val_{k}": v for k, v in calibration_stats(probs, y).items()},
+            )
+            live_eval = {"epoch": done, "labels": labels, "confusion_matrix": cm["confusion_matrix"],
+                         "per_class": pcs, "num_samples": int(len(X))}
 
         entry = {
             "epoch": done,
@@ -114,7 +232,14 @@ class TrainingCallback(keras.callbacks.Callback):
             "val_accuracy": val_accuracy,
             "loss": float(logs.get("loss", 0.0)),
             "val_loss": float(logs.get("val_loss", 0.0)),
-            "time_ms": (now - self.epoch_start) * 1000,
+            **extra,
+            "learning_rate": self._learning_rate(),
+            "phase": self.phase,
+            "time_ms": epoch_seconds * 1000,
+            "samples_per_sec": self.num_train / epoch_seconds if epoch_seconds > 0 else None,
+            **self._weight_stats(),
+            "memory_mb": _memory_mb(),
+            "gpu_memory_mb": _gpu_memory_mb(),
             "timestamp": now,
         }
         with self.trainer.lock:
@@ -123,14 +248,17 @@ class TrainingCallback(keras.callbacks.Callback):
             s["progress"] = int(done / total * 100)
             s["elapsed_seconds"] = elapsed
             s["remaining_seconds"] = max(0.0, elapsed / max(1, len(s["metrics"])) * (total - done))
+            if live_eval:
+                s["live_eval"] = live_eval
 
         metric_name = "f1" if self.od_eval else "accuracy"
-        job_log_broker.log(
-            s["id"],
-            f"Epoch {done}/{total} - loss: {entry['loss']:.4f} - {metric_name}: {accuracy:.4f} - "
-            f"val_loss: {entry['val_loss']:.4f} - val_{metric_name}: {val_accuracy:.4f} "
-            f"({entry['time_ms'] / 1000:.1f}s)",
-        )
+        msg = (f"Epoch {done}/{total} - loss: {entry['loss']:.4f} - {metric_name}: {accuracy:.4f} - "
+               f"val_loss: {entry['val_loss']:.4f} - val_{metric_name}: {val_accuracy:.4f}")
+        if "val_f1" in extra and not self.od_eval:
+            msg += f" - val_macro_f1: {extra['val_f1']:.4f}"
+        if entry["learning_rate"] is not None:
+            msg += f" - lr: {entry['learning_rate']:.2e}"
+        job_log_broker.log(s["id"], f"{msg} ({epoch_seconds:.1f}s)")
         if s.get("stop_requested"):
             self.model.stop_training = True
             job_log_broker.log(s["id"], "Cancellation requested - stopping after this epoch.", level="warning")
@@ -369,11 +497,14 @@ class Trainer:
             loss = make_fomo_loss() if is_od else "sparse_categorical_crossentropy"
             metrics = [] if is_od else ["accuracy"]
 
-            od_eval = None
+            od_eval = val_eval = None
             if is_od:
-                od_eval = {"num_classes": len(labels), "X_train": X_train[:200], "Y_train": y_train[:200],
-                           "X_val": X_val, "Y_val": y_val}
-            callbacks: list = [TrainingCallback(session, self, od_eval)]
+                od_eval = {"num_classes": len(labels), "labels": labels, "X_train": X_train[:200],
+                           "Y_train": y_train[:200], "X_val": X_val, "Y_val": y_val}
+            else:
+                val_eval = {"X": X_val[:LIVE_EVAL_MAX_SAMPLES], "y": y_val[:LIVE_EVAL_MAX_SAMPLES], "labels": labels}
+            progress_cb = TrainingCallback(session, self, od_eval, val_eval, num_train=len(X_train))
+            callbacks: list = [progress_cb]
             if session.get("early_stopping"):
                 monitor = session.get("early_stopping_monitor", "val_loss")
                 if is_od and "accuracy" in monitor:
@@ -399,18 +530,29 @@ class Trainer:
             backbone = ModelFactory.get_backbone(core)
             lr = float(session["learning_rate"])
 
+            batch_size = int(session["batch_size"])
+            with self.lock:
+                session["run_info"] = {
+                    "num_train": int(len(X_train)), "num_val": int(len(X_val)), "num_classes": len(labels),
+                    "labels": labels, "steps_per_epoch": int(np.ceil(len(X_train) / batch_size)),
+                    "params_total": int(core.count_params()),
+                    "params_trainable": int(sum(int(np.prod(w.shape)) for w in core.trainable_weights)),
+                    "train_class_counts": (
+                        None if is_od else {labels[i]: int(c) for i, c in
+                                            enumerate(np.bincount(y_train, minlength=len(labels)))}),
+                }
+                session["batch_history"] = []
+
             if freeze_epochs > 0 and backbone is not None:
                 self._log(training_id, f"Phase 1: training the head for {freeze_epochs} epochs (backbone frozen).")
                 backbone.trainable = False
+                progress_cb.phase = "head"
                 train_model.compile(optimizer=keras.optimizers.Adam(lr), loss=loss, metrics=metrics)
                 train_model.fit(epochs=freeze_epochs, **fit_kwargs)
                 if not session.get("stop_requested") and total_epochs > freeze_epochs:
                     self._log(training_id, "Phase 2: fine-tuning the backbone at lr x0.1.")
-                    backbone.trainable = True
-                    n = int(session.get("trainable_layers", 0))
-                    if n > 0:
-                        for layer in backbone.layers[:-n]:
-                            layer.trainable = False
+                    set_backbone_trainable(backbone, int(session.get("trainable_layers", 0)))
+                    progress_cb.phase = "fine-tune"
                     train_model.compile(optimizer=keras.optimizers.Adam(lr * 0.1), loss=loss, metrics=metrics)
                     # initial_epoch keeps epoch numbering / progress continuous across phases.
                     train_model.fit(epochs=total_epochs, initial_epoch=freeze_epochs, **fit_kwargs)
@@ -418,6 +560,8 @@ class Trainer:
                 train_model.compile(optimizer=keras.optimizers.Adam(lr), loss=loss, metrics=metrics)
                 train_model.fit(epochs=total_epochs, **fit_kwargs)
 
+        with self.lock:
+            session.pop("live", None)
         was_cancelled = bool(session.get("stop_requested"))
         if was_cancelled and not session["metrics"]:
             with self.lock:

@@ -145,6 +145,50 @@ export interface TrainingMetrics {
   val_loss: number
   val_accuracy: number
   timestamp: number
+  // Live-dashboard extras (absent on sessions trained before they existed)
+  val_precision?: number
+  val_recall?: number
+  val_f1?: number
+  val_confidence?: number
+  val_ece?: number
+  learning_rate?: number | null
+  phase?: string
+  time_ms?: number
+  samples_per_sec?: number | null
+  weight_norm?: number
+  update_ratio?: number | null
+  memory_mb?: number | null
+  gpu_memory_mb?: number | null
+}
+
+export interface TrainingLiveProgress {
+  epoch: number
+  batch: number
+  batches: number
+  loss: number
+  accuracy?: number | null
+  phase?: string
+  epoch_elapsed: number
+  updated_at: number
+}
+
+export interface TrainingRunInfo {
+  num_train: number
+  num_val: number
+  num_classes: number
+  labels: string[]
+  steps_per_epoch: number
+  params_total: number
+  params_trainable: number
+  train_class_counts?: Record<string, number> | null
+}
+
+export interface TrainingLiveEval {
+  epoch: number
+  labels?: string[]
+  confusion_matrix?: number[][]
+  per_class?: { label?: string; precision: number; recall: number; f1: number; support?: number; tp?: number; fp?: number; fn?: number }[]
+  num_samples?: number
 }
 
 export type JobStatus = 'queued' | 'initialized' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -181,6 +225,19 @@ export interface TrainingStatus {
   queue_position?: number
   evaluation?: SessionEvaluation | null
   metrics: TrainingMetrics[]
+  live?: TrainingLiveProgress | null
+  batch_history?: { step: number; loss: number; accuracy?: number }[]
+  live_eval?: TrainingLiveEval | null
+  run_info?: TrainingRunInfo | null
+  base_model?: string
+  batch_size?: number
+  learning_rate?: number
+  input_shape?: number[]
+  early_stopping?: boolean
+  early_stopping_patience?: number
+  early_stopping_monitor?: string
+  freeze_encoder_epochs?: number
+  dataset_id?: string
 }
 
 export interface OptimizationComparisonSide {

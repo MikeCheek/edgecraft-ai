@@ -291,6 +291,9 @@ def _labels_array_cpp(labels: List[str]) -> str:
 # TFLite builtin op name -> MicroMutableOpResolver method. Most follow the
 # CamelCase rule in _resolver_method; these are the exceptions.
 _RESOLVER_EXCEPTIONS = {
+    "BATCH_MATMUL": "AddBatchMatMul",
+    "CUMSUM": "AddCumSum",
+    "PADV2": "AddPadV2",
     "UNIDIRECTIONAL_SEQUENCE_LSTM": "AddUnidirectionalSequenceLSTM",
     "L2_NORMALIZATION": "AddL2Normalization",
     "L2_POOL_2D": "AddL2Pool2D",
@@ -306,7 +309,9 @@ def _resolver_method(op: str) -> str:
 
 
 def _op_resolver_block(ops: Optional[List[str]] = None) -> str:
-    ops = [o for o in (ops or []) if o and o != "DELEGATE"]
+    # De-duplicated so the template capacity matches the Add*() calls (TFLM
+    # rejects a second registration of the same op anyway).
+    ops = list(dict.fromkeys(o for o in (ops or []) if o and o != "DELEGATE"))
     if not ops:
         return (
             "  // Op list unavailable for this model - registering every op.\n"
@@ -581,7 +586,9 @@ def _base_ino_header(
         print_fn = """
 // FOMO-style detector output: a (gridH, gridW, classes+1) grid. Channel 0 is
 // background; a cell whose best channel k>0 scores above the threshold holds
-// the centre of an object of class k-1. Adjacent duplicate cells are skipped.
+// the centre of an object of class k-1. 4-connected cells of the same class
+// are merged into one object reported at their probability-weighted centroid
+// with the highest cell score - the same decoding as the EdgeCraft backend.
 const float kDetectionThreshold = 0.5f;
 int lastBestIdx = 0;
 float lastBestVal = 0.0f;
@@ -598,29 +605,69 @@ static int bestClassAt(int gw, int k1, int r, int c, float* score) {
   return best;
 }
 
+static int* g_cellClass = nullptr;   // class k>0 of a cell above threshold, 0 = none, -1 = visited
+static float* g_cellScore = nullptr;
+static int* g_cellStack = nullptr;
+static int g_cellCount = 0;
+
 void printPrediction() {
   const int gh = model_output->dims->data[1];
   const int gw = model_output->dims->data[2];
   const int k1 = model_output->dims->data[3];
+  const int n = gh * gw;
+  if (n > g_cellCount) {
+    free(g_cellClass); free(g_cellScore); free(g_cellStack);
+    g_cellClass = (int*)malloc(n * sizeof(int));
+    g_cellScore = (float*)malloc(n * sizeof(float));
+    g_cellStack = (int*)malloc(n * sizeof(int));
+    g_cellCount = (g_cellClass && g_cellScore && g_cellStack) ? n : 0;
+    if (!g_cellCount) { Serial.println("ERROR: out of memory for detections"); return; }
+  }
+  for (int i = 0; i < n; i++) {
+    float p;
+    int k = bestClassAt(gw, k1, i / gw, i % gw, &p);
+    g_cellClass[i] = (k > 0 && p >= kDetectionThreshold) ? k : 0;
+    g_cellScore[i] = p;
+  }
   int count = 0;
   lastBestVal = 0.0f;
   Serial.println("--- Detections ---");
-  for (int r = 0; r < gh; r++) {
-    for (int c = 0; c < gw; c++) {
-      float p;
-      int k = bestClassAt(gw, k1, r, c, &p);
-      if (k == 0 || p < kDetectionThreshold) continue;
-      float pl, pu;
-      if (c > 0 && bestClassAt(gw, k1, r, c - 1, &pl) == k && pl >= kDetectionThreshold) continue;
-      if (r > 0 && bestClassAt(gw, k1, r - 1, c, &pu) == k && pu >= kDetectionThreshold) continue;
+  for (int k = 1; k < k1; k++) {
+    for (int seed = 0; seed < n; seed++) {
+      if (g_cellClass[seed] != k) continue;
+      // Flood-fill one 4-connected blob of class k.
+      float sumW = 0.0f, sumR = 0.0f, sumC = 0.0f, maxW = 0.0f;
+      int top = 0;
+      g_cellStack[top++] = seed;
+      g_cellClass[seed] = -1;
+      while (top > 0) {
+        const int i = g_cellStack[--top];
+        const int r = i / gw, c = i % gw;
+        const float w = g_cellScore[i];
+        sumW += w; sumR += w * r; sumC += w * c;
+        if (w > maxW) maxW = w;
+        const int nb[4] = {c > 0 ? i - 1 : -1, c < gw - 1 ? i + 1 : -1, r > 0 ? i - gw : -1, r < gh - 1 ? i + gw : -1};
+        for (int j = 0; j < 4; j++) {
+          if (nb[j] >= 0 && g_cellClass[nb[j]] == k) { g_cellClass[nb[j]] = -1; g_cellStack[top++] = nb[j]; }
+        }
+      }
       count++;
-      Serial.printf("  %s at x=%.2f y=%.2f (%.1f%%)\\n", kLabels[k - 1],
-                    (c + 0.5f) / gw, (r + 0.5f) / gh, p * 100.0f);
-      if (p > lastBestVal) { lastBestVal = p; lastBestIdx = k - 1; }
+      const char* name = (k - 1 < kNumLabels) ? kLabels[k - 1] : "object";
+      Serial.print("  ");
+      Serial.print(name);
+      Serial.print(" at x=");
+      Serial.print((sumC / sumW + 0.5f) / gw, 3);
+      Serial.print(" y=");
+      Serial.print((sumR / sumW + 0.5f) / gh, 3);
+      Serial.print(" (");
+      Serial.print(maxW * 100.0f, 1);
+      Serial.println("%)");
+      if (maxW > lastBestVal) { lastBestVal = maxW; lastBestIdx = (k - 1 < kNumLabels) ? k - 1 : 0; }
     }
   }
   lastDetectionCount = count;
-  Serial.printf("%d object(s)\\n", count);
+  Serial.print(count);
+  Serial.println(" object(s)");
 }
 """
     else:
@@ -789,7 +836,14 @@ bool readSensorFrame() {
 }
 """
         ready = "Model ready. Run send_wav.py to stream a clip."
-        extra_setup = "  Serial.setTimeout(5000);\n  g_audio = (float*)allocateLarge(MFCC_N_SAMPLES * sizeof(float));\n"
+        extra_setup = (
+            "  Serial.setTimeout(5000);\n"
+            "  g_audio = (float*)allocateLarge(MFCC_N_SAMPLES * sizeof(float));\n"
+            "  if (!g_audio) {\n"
+            "    Serial.println(\"ERROR: could not allocate the audio buffer\");\n"
+            "    while (1) delay(1000);\n"
+            "  }\n"
+        )
     else:
         capture = r"""
 // ---------------------------------------------------------------------------
@@ -832,7 +886,10 @@ void loop() {{
       Serial.println("ERROR: inference failed");
       return;
     }}
-    Serial.printf("Inference: %lu us\\n", micros() - t0);
+    unsigned long dt = micros() - t0;
+    Serial.print("Inference: ");
+    Serial.print(dt);
+    Serial.println(" us");
     printPrediction();
 {display_call}  }}
 }}
@@ -975,7 +1032,9 @@ def _camera_pins_defines(pins: Dict[str, int]) -> str:
 
 def _camera_init_block(pixfmt: str) -> str:
     return f"""bool initCamera() {{
-  camera_config_t config;
+  // Zero-initialised: camera_config_t has fields not set below (sccb_i2c_port,
+  // jpeg_buffer_size, ...) that would otherwise hold stack garbage.
+  camera_config_t config = {{}};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;  config.pin_d1 = Y3_GPIO_NUM;
@@ -996,9 +1055,11 @@ def _camera_init_block(pixfmt: str) -> str:
 
   if (psramFound()) {{
     config.fb_count = 2;
+    config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;
   }} else {{
     config.fb_count = 1;
+    config.fb_location = CAMERA_FB_IN_DRAM;
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   }}
 
@@ -1007,8 +1068,11 @@ def _camera_init_block(pixfmt: str) -> str:
     return false;
   }}
 
+  // Only the OV3660 is mounted upside-down on these boards (same as
+  // Espressif's CameraWebServer example); flipping an OV2640 would feed the
+  // model upside-down frames.
   sensor_t *s = esp_camera_sensor_get();
-  if (s) {{
+  if (s && s->id.PID == OV3660_PID) {{
     s->set_vflip(s, 1);
   }}
   return true;
@@ -1175,7 +1239,7 @@ def _camera_setup_loop_pixel_hud(
 {_camera_pins_defines(camera_pins)}
 
 bool initCamera() {{
-  camera_config_t cfg;
+  camera_config_t cfg = {{}};  // zero-init the fields not set below
   cfg.ledc_channel  = LEDC_CHANNEL_0;
   cfg.ledc_timer    = LEDC_TIMER_0;
   cfg.pin_d0        = Y2_GPIO_NUM;
@@ -1187,8 +1251,8 @@ bool initCamera() {{
   cfg.pin_d6        = Y8_GPIO_NUM;
   cfg.pin_d7        = Y9_GPIO_NUM;
   cfg.pin_xclk      = XCLK_GPIO_NUM;
-  cfg.pin_sioc      = SIOC_GPIO_NUM;
-  cfg.pin_siod      = SIOD_GPIO_NUM;
+  cfg.pin_sscb_scl  = SIOC_GPIO_NUM;
+  cfg.pin_sscb_sda  = SIOD_GPIO_NUM;
   cfg.pin_vsync     = VSYNC_GPIO_NUM;
   cfg.pin_href      = HREF_GPIO_NUM;
   cfg.pin_pclk      = PCLK_GPIO_NUM;
@@ -1201,11 +1265,13 @@ bool initCamera() {{
     cfg.frame_size   = FRAMESIZE_QQVGA;   // {src_w}x{src_h}
     cfg.jpeg_quality = 14;
     cfg.fb_count     = 2;
+    cfg.fb_location  = CAMERA_FB_IN_PSRAM;
     cfg.grab_mode    = CAMERA_GRAB_LATEST;
   }} else {{
     cfg.frame_size   = FRAMESIZE_QQVGA;
     cfg.jpeg_quality = 16;
     cfg.fb_count     = 1;
+    cfg.fb_location  = CAMERA_FB_IN_DRAM;
     cfg.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   }}
 
@@ -1214,7 +1280,7 @@ bool initCamera() {{
 
   sensor_t *s = esp_camera_sensor_get();
   if (s) {{
-    s->set_vflip(s, 1);
+    if (s->id.PID == OV3660_PID) s->set_vflip(s, 1);  // OV3660 is mounted upside-down
     s->set_brightness(s, 1);
     s->set_saturation(s, 0);
   }}

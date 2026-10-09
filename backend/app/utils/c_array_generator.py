@@ -30,7 +30,9 @@ class CArrayGenerator:
 // Size: {len(binary_data)} bytes
 // Generated automatically for TinyML deployment
 
-#define DATA_ALIGN_ATTRIBUTE __attribute__((aligned(8)))
+// 16-byte alignment, as TFLM's own generated model arrays use (alignas(16)):
+// the flatbuffer's weight buffers are 16-byte aligned relative to its start.
+#define DATA_ALIGN_ATTRIBUTE __attribute__((aligned(16)))
 
 const uint8_t g_{model_name}[] DATA_ALIGN_ATTRIBUTE = {{
   {hex_string}

@@ -38,6 +38,15 @@ def test_image_classification_pipeline(client):
     assert session["evaluation"]["accuracy"] >= 0.9
     assert len(session["evaluation"]["confusion_matrix"]) == 2
 
+    # Live dashboard data
+    m = session["metrics"][-1]
+    for key in ("val_precision", "val_recall", "val_f1", "val_confidence", "val_ece", "learning_rate",
+                "samples_per_sec", "weight_norm", "update_ratio"):
+        assert m[key] is not None, key
+    assert 0 <= m["val_f1"] <= 1 and 0 <= m["val_ece"] <= 1
+    assert session["live_eval"]["confusion_matrix"] and session["run_info"]["num_classes"] == 2
+    assert session["batch_history"] and "live" not in session
+
     oid, opt = _optimize(tid)
     assert opt["status"] == "completed", opt.get("error")
     comparison = opt["comparison"]
@@ -90,5 +99,6 @@ def test_object_detection_pipeline():
     assert session["status"] == "completed", session.get("error")
     assert session["labels"] == ["chip"]
     assert "f1" in session["evaluation"]
+    assert "val_recall" in session["metrics"][-1] and session["live_eval"]["per_class"][0]["label"] == "chip"
     oid, opt = _optimize(tid)
     assert opt["status"] == "completed", opt.get("error")
