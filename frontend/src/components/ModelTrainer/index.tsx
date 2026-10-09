@@ -242,7 +242,9 @@ export function ModelTrainer({ task, onTrainingComplete }: ModelTrainerProps) {
         || changes.freeze_encoder_epochs != null || changes.class_weighting != null) setShowRegularization(true);
       setSuggestSession(null);
       setIsConfigExpanded(true);
-      toast('success', `Applied ${Object.keys(changes).length} change(s) to the configuration. Review and start training.`);
+      const { augmentation: augChanges, ...scalar } = changes;
+      const n = Object.keys(scalar).length + Object.keys(augChanges ?? {}).length;
+      toast('success', `Applied ${n} change${n !== 1 ? 's' : ''} to the configuration. Review and start training.`);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     };
     window.addEventListener(APPLY_TRAINING_CHANGES_EVENT, onApply);

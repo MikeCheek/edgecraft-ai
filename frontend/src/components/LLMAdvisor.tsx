@@ -7,11 +7,11 @@ import {
   Lightbulb, RefreshCw, AlertTriangle, CheckCircle2, Info, XCircle, Sparkles, Wand2, ChevronDown, ChevronRight,
   Database, Cpu, SlidersHorizontal,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAPI } from '../hooks/useAPI';
 import { useAppContext } from '../context/AppContext';
 import { ReviewSeverity, ReviewSuggestion, TrainingChanges, TrainingReview } from '../types';
-import { applyTrainingChanges } from '../utils/trainingChanges';
+import { applyTrainingChanges, mergeSuggestionChanges } from '../utils/trainingChanges';
 
 interface LLMAdvisorProps {
   trainingId?: string;
@@ -164,6 +164,12 @@ export function LLMAdvisor({ trainingId, status, datasetId }: LLMAdvisorProps) {
     applyTrainingChanges({ changes, datasetId: datasetId ?? review?.facts?.run?.dataset_id, base });
   };
 
+  const allChanges = useMemo(() => {
+    const changes = mergeSuggestionChanges(review?.suggestions ?? []);
+    const { augmentation, ...rest } = changes;
+    return { changes, count: Object.keys(rest).length + Object.keys(augmentation ?? {}).length };
+  }, [review]);
+
   if (!reviewable) {
     return <p className="text-sm text-gray-400">The review is available once the run has finished.</p>;
   }
@@ -303,6 +309,15 @@ export function LLMAdvisor({ trainingId, status, datasetId }: LLMAdvisorProps) {
                 {aiDone ? <><Sparkles className="w-3 h-3" /> AI · {review.ai_model}{review.ai_seconds != null ? ` · ${review.ai_seconds}s` : ''}</> : <><Lightbulb className="w-3 h-3" /> rule-based</>}
               </span>
             </div>
+            {allChanges.count > 0 && (
+              <button
+                onClick={() => applyChanges(allChanges.changes)}
+                className="w-full mb-2.5 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-purple-600 hover:bg-purple-500 text-white transition"
+                title={`Load this run's settings with every suggested change into the training form (${allChanges.count} parameter${allChanges.count !== 1 ? 's' : ''})`}
+              >
+                <Wand2 className="w-3.5 h-3.5" /> Apply all suggested values ({allChanges.count})
+              </button>
+            )}
             {review.suggestions.length ? (
               <ul className="space-y-2.5">
                 {review.suggestions.map((s, i) => <SuggestionCard key={i} sug={s} base={base} onApply={applyChanges} />)}
