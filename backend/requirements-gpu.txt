@@ -1,0 +1,3 @@
+# GPU build: bundles CUDA/cuDNN as pip wheels (Linux / WSL2 only).
+-r requirements.txt
+tensorflow[and-cuda]>=2.17,<2.21

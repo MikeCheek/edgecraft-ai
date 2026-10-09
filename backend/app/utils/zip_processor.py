@@ -24,6 +24,15 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 ALL_EXTENSIONS = VALID_EXTENSIONS | ANNOTATION_EXTENSIONS
 
 
+
+def _max_sample_bytes() -> int:
+    from app import config
+
+    return config.MAX_SAMPLE_MB * 1024 * 1024
+
+
+_MAX_SAMPLE_BYTES = _max_sample_bytes()
+
 def scan_zip_tree(zip_path: str) -> dict:
     """Scans a ZIP and generates a suggested mapping tree with file names.
 
@@ -243,8 +252,10 @@ def extract_zip_with_mapping(
                 else:
                     unmatched_regex += 1
 
+            if info.file_size > _MAX_SAMPLE_BYTES:  # zip-bomb / oversized entry guard
+                continue
             with z.open(info) as f:
-                content = f.read()
+                content = f.read(_MAX_SAMPLE_BYTES + 1)
 
             width, height = (None, None)
             if ext in IMAGE_EXTENSIONS:

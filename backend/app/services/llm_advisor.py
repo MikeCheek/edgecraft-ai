@@ -395,7 +395,7 @@ class LLMAdvisor:
             "ARDUINO_NANO_33_BLE": {
                 "strategies": [
                     "Maximum INT8 quantisation plus pruning/clustering is strongly recommended",
-                    "Prefer the Custom3LayerCNN / MFCC_CNN architectures over any MobileNet variant",
+                    "Prefer the Custom3LayerCNN (image) or DS_CNN (audio) architectures over any MobileNet variant",
                 ],
                 "challenges": [
                     "256KB RAM is extremely limited for anything beyond tiny models",
