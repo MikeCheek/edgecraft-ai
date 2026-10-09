@@ -4,6 +4,8 @@ import { Cpu, Download, RefreshCw, AlertTriangle, CheckCircle2, Camera, Monitor,
 import { apiFetch } from '../config';
 import { useAppContext } from '../context/AppContext';
 import { formatBytes } from '../utils/format';
+import { DeviceMonitor } from './DeviceMonitor';
+import { useBackendInfo } from '../hooks/useBackendInfo';
 import { useToast } from '../context/ToastContext';
 import { TargetBoard } from '../types';
 import { ModelTree } from './ModelTree';
@@ -99,6 +101,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
   // Task + TFLite Micro status of the selected variant (audio models get a
   // microphone section instead of the camera one).
   const [variantTask, setVariantTask] = useState<string | null>(null);
+  const [variantInputShape, setVariantInputShape] = useState<number[] | undefined>(undefined);
+  const backendInfo = useBackendInfo();
   const [tflm, setTflm] = useState<TflmInfo | null>(null);
   useEffect(() => {
     if (!optimizationId) { setVariantTask(null); setTflm(null); return; }
@@ -109,6 +113,8 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
         if (!alive || j?.status !== 'success') return;
         const model = state.trainedModels.find((m) => m.training_id === j.result.training_id);
         setVariantTask(model?.task ?? null);
+        setVariantInputShape(model?.input_shape);
+        if (model) setSelectedLabel((cur) => cur ?? `${model.name} · ${String(j.result.method).replace(/_/g, ' ').toLowerCase()}`);
         setTflm(j.result.metrics?.tflm ?? null);
       })
       .catch(() => { /* leave unknown */ });
@@ -511,6 +517,13 @@ export function DeploymentPanel({ board }: DeploymentPanelProps) {
             </p>
           </div>
         )}
+
+        <DeviceMonitor
+          inputKind={variantTask ? (isAudio ? 'audio' : 'image') : null}
+          inputShape={variantInputShape}
+          audioSamples={variantTask ? backendInfo?.audio_frontend?.[variantTask]?.n_samples : undefined}
+          serialInput={isAudio ? !(micDefaults && micEnabled) : !cameraEnabled}
+        />
       </div>
 
       {/* Right: live sketch preview */}

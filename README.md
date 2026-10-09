@@ -38,7 +38,7 @@ Then open **http://localhost:5173**. Full details in [Getting Started](#getting-
 
 ## Key Features
 
-**Data:** upload samples, bulk-import a labeled ZIP (visual folder→label mapping, regex relabeling) or pull from Kaggle / Hugging Face / any URL, manage classes and splits, import YOLO / VOC / COCO / CSV bounding boxes.
+**Data:** a quality check per dataset (class imbalance, tiny classes, missing splits, duplicates leaking across train/test, unreadable files, missing boxes) with one-click duplicate removal. Upload samples, bulk-import a labeled ZIP (visual folder→label mapping, regex relabeling) or pull from Kaggle / Hugging Face / any URL, manage classes and splits, import YOLO / VOC / COCO / CSV bounding boxes.
 
 **Training:** a single queue runs jobs one at a time (no GPU contention). Pretrained backbones get a frozen-backbone warm-up and then fine-tuning. You get live epoch metrics and a WebSocket console. Each finished run gets a held-out confusion matrix plus per-class precision, recall and F1. Also: LLM-suggested configs (validated, with a rule-based fallback), seeds, class balancing, and augmentation that is never baked into the exported model.
 
@@ -52,6 +52,8 @@ Then open **http://localhost:5173**. Full details in [Getting Started](#getting-
 - ESP32-S3 / ESP32-CAM camera pipelines and an optional ST7735 display
 - FOMO detection output
 - for audio models, an on-device MFCC front-end (`mfcc_frontend.h`, checked against the Python one in the test suite) with I2S microphone capture or a `send_wav.py` Serial streamer
+
+**On-device benchmarking:** the Deploy page's Device monitor connects to the flashed board over Web Serial (Chrome / Edge), shows its real inference latency, arena usage and predictions, and can send a test image or audio clip to boards without a camera or microphone.
 
 **Experiments:** compare up to four runs side by side (config diff, held-out metric, validation curves).
 
@@ -156,7 +158,8 @@ The backend suite includes end-to-end train → INT8 → export → inference ru
 ## Known Limitations
 
 - Pretrained backbones download ImageNet weights on first use (needs access to `storage.googleapis.com`).
-- On-device latency in the Deployment tab is a clock-scaled estimate. The generated sketch prints the real figure (`Inference: N us`).
+- The Deployment tab's latency figure is a clock-scaled estimate until you connect the board with the Device monitor, which reads the real one.
+- Quantization-aware training isn't available: `tensorflow-model-optimization` doesn't support Keras 3. Post-training INT8 is calibrated on real data.
 - Without `tflite-micro` installed, the tensor arena is a liveness-analysis estimate rather than a measurement.
 - FOMO reports object centroids, not bounding-box sizes.
 - Models trained by earlier versions used different preprocessing and should be retrained.

@@ -47,3 +47,25 @@ def test_fomo_targets_decode_and_score():
     score = score_detections([grid], [probs], 2)
     assert score["tp"] == 1 and score["fp"] == 1 and score["fn"] == 0
     assert score["per_class"][0]["f1"] == 1.0
+
+
+def test_quality_report_finds_leakage_and_removes_duplicates(client):
+    from tests.conftest import make_png
+
+    dm = _dm()
+    ds = dm.create_dataset("quality", "IMAGE_CLASSIFICATION")["id"]
+    same = make_png((10, 200, 10))
+    ids = [dm.add_sample(ds, "a", "IMAGE_CLASSIFICATION", same, f"dup{i}.png") for i in range(2)]
+    dm.add_sample(ds, "b", "IMAGE_CLASSIFICATION", make_png((200, 10, 10)), "b.png")
+    dm.add_sample(ds, "b", "IMAGE_CLASSIFICATION", b"not an image", "broken.png")
+    dm.set_sample_split(ids[0], "train")
+    dm.set_sample_split(ids[1], "test")
+
+    report = client.get(f"/api/datasets/{ds}/quality").json()["report"]
+    codes = {i["code"] for i in report["issues"]}
+    assert {"leakage", "unreadable", "small_classes"} <= codes
+    assert report["leakage_group_count"] == 1 and report["unreadable_count"] == 1
+
+    assert client.post(f"/api/datasets/{ds}/remove_duplicates").json()["removed"] == 1
+    remaining = {s["id"]: s["split"] for s in dm.get_samples(ds)}
+    assert ids[0] in remaining and ids[1] not in remaining  # the train copy is kept

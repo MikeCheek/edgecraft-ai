@@ -122,6 +122,26 @@ async def update_dataset_metadata(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/{dataset_id}/quality")
+async def dataset_quality(dataset_id: str):
+    """Class balance, split coverage, duplicates / train-test leakage,
+    unreadable files and annotation problems, as a list of issues."""
+    from app.services.dataset_quality import analyze_dataset
+
+    try:
+        return {"status": "success", "report": await _run_in_executor(analyze_dataset, dataset_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{dataset_id}/remove_duplicates")
+async def dataset_remove_duplicates(dataset_id: str):
+    from app.services.dataset_quality import remove_duplicates
+
+    removed = await _run_in_executor(remove_duplicates, dataset_id)
+    return {"status": "success", "removed": removed}
+
+
 @router.get("/{dataset_id}/image_stats")
 async def get_dataset_image_stats(dataset_id: str):
     """Aggregate image size / aspect-ratio / storage stats for a dataset -

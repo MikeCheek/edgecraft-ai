@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
-  Eye, Tags, Download, Upload, AlertTriangle, Shuffle
+  Eye, Tags, Download, Upload, AlertTriangle, Shuffle, ShieldCheck
 } from 'lucide-react';
 import { CardSkeleton } from '../Skeleton';
 import { useAPI, API_BASE } from '../../hooks/useAPI';
@@ -11,6 +11,7 @@ import { TinyMLTask, DatasetInfo } from '../../types';
 import ClassManager from './ClassManager';
 import DataImporter from './DataImporter';
 import DatasetExplorer from './DatasetExplorer';
+import QualityPanel from './QualityPanel';
 
 interface DatasetManagerProps {
   task: TinyMLTask;
@@ -37,6 +38,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const [editName, setEditName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [expandedUpload, setExpandedUpload] = useState<string | null>(null);
+  const [expandedQuality, setExpandedQuality] = useState<string | null>(null);
   const [expandedClasses, setExpandedClasses] = useState<string | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
 
@@ -333,6 +335,10 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                           className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quick Classes">
                           <Tags className="w-4 h-4" />
                         </button>
+                        <button onClick={() => setExpandedQuality(prev => prev === dataset.id ? null : dataset.id)}
+                          className={`p-1.5 rounded-lg transition ${expandedQuality === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quality check" aria-label="Quality check">
+                          <ShieldCheck className="w-4 h-4" />
+                        </button>
                         <button onClick={() => setExpandedUpload(prev => prev === dataset.id ? null : dataset.id)}
                           className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Upload & Import">
                           <Upload className="w-4 h-4" />
@@ -358,6 +364,12 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                 {expandedClasses === dataset.id && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                     <ClassManager datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
+                  </div>
+                )}
+
+                {expandedQuality === dataset.id && (
+                  <div className="px-4 pb-4 pt-3 border-t border-slate-700 bg-slate-900/20">
+                    <QualityPanel datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                   </div>
                 )}
 

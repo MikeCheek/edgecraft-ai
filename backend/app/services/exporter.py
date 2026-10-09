@@ -796,26 +796,22 @@ bool readSensorFrame() {
 // Input over Serial (no camera configured)
 // ---------------------------------------------------------------------------
 // Replace readSensorFrame() with your sensor capture code. As a starting
-// point it reads one line of comma-separated floats (normalised exactly like
-// training data: pixels in [0,1]) so you can test inference end to end.
+// point it accepts one frame over Serial: the byte 'I' followed by
+// kInputHeight * kInputWidth * kInputChannels raw pixel bytes (0-255,
+// row-major, RGB order). EdgeCraft's Device monitor sends exactly this.
 bool readSensorFrame() {
-  if (!Serial.available()) return false;
-  String line = Serial.readStringUntil('\n');
-  int idx = 0;
-  int start = 0;
+  if (Serial.available() < 1 || Serial.read() != 'I') return false;
   const int total = kInputHeight * kInputWidth * kInputChannels;
-  for (int i = 0; i < (int)line.length() && idx < total; i++) {
-    if (line[i] == ',' || i == (int)line.length() - 1) {
-      String tok = line.substring(start, (i == (int)line.length() - 1) ? i + 1 : i);
-      setInputSample(idx++, tok.toFloat());
-      start = i + 1;
-    }
+  for (int i = 0; i < total; i++) {
+    uint8_t px;
+    if (Serial.readBytes(&px, 1) != 1) return false;
+    setInputSample(i, px / 255.0f);
   }
-  return idx == total;
+  return true;
 }
 """
-        ready = "Model ready. Send a comma-separated normalised input line to run inference."
-        extra_setup = ""
+        ready = "Model ready. Send 'I' + raw pixels (EdgeCraft Device monitor) to run inference."
+        extra_setup = "  Serial.setTimeout(5000);\n"
 
     return capture + f"""
 void setup() {{
@@ -1365,8 +1361,8 @@ custom module).
         camera_note = audio
     else:
         camera_note = (
-            "\nThis board has no camera configured. The sketch reads a test\n"
-            "input as a comma-separated line over Serial so you can validate\n"
+            "\nThis board has no camera configured. The sketch reads test frames\n"
+            "over Serial ('I' + raw pixel bytes - the app's Device monitor sends them) so you can validate\n"
             "inference before wiring up your real sensor/microphone capture code\n"
             "in `readSensorFrame()`.\n"
         )

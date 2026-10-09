@@ -52,3 +52,14 @@ export async function blobToWav16k (blob: Blob): Promise<Blob> {
     ctx.close().catch(() => {})
   }
 }
+
+/** Decode any audio blob to `nSamples` of 16 kHz mono int16 PCM (padded or
+ *  trimmed) - the format the exported sketches' Serial harness expects. */
+export async function blobToPcm16 (blob: Blob, nSamples: number): Promise<Int16Array> {
+  const wav = await blobToWav16k(blob)
+  const view = new DataView(await wav.arrayBuffer())
+  const available = (view.byteLength - 44) / 2
+  const out = new Int16Array(nSamples)
+  for (let i = 0; i < Math.min(nSamples, available); i++) out[i] = view.getInt16(44 + i * 2, true)
+  return out
+}
