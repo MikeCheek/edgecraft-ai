@@ -9,7 +9,10 @@ from typing import Dict, List, Optional, Set, Tuple
 class DataManager:
     """Persistent data management for datasets"""
 
-    def __init__(self, storage_dir: str = "data_storage"):
+    def __init__(self, storage_dir: Optional[str] = None):
+        from app import config
+
+        storage_dir = str(storage_dir or config.STORAGE_DIR)
         self.storage_dir = storage_dir
         self.db_file = os.path.join(storage_dir, "db.json")
 

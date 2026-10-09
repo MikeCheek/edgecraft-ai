@@ -1,6 +1,8 @@
-from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import APIRouter, Body
+from pydantic import BaseModel, Field
+from app import config
 from app.services.shared_state import trainer, data_manager
+from app.services.job_queue import job_queue
 from app.services.llm_advisor import LLMAdvisor
 from typing import List, Optional
 
@@ -12,30 +14,36 @@ class TrainingRecommendRequest(BaseModel):
     dataset_id: str
     target_board: str = "ESP32_S3_N16R8"
     provider: str = "openrouter"
-    model_name: str = "google/gemini-2.0-flash-lite-preview-02-05:free"
+    model_name: str = config.DEFAULT_OPENROUTER_MODEL
 
 class TrainingRequest(BaseModel):
     task: str
     dataset_id: str
-    epochs: int = 50
-    batch_size: int = 32
-    learning_rate: float = 0.001
-    base_model: str = "MobileNetV2"
-    input_shape: List[int] = [224, 224, 3]
+    name: Optional[str] = None
+    epochs: int = Field(30, ge=1, le=1000)
+    batch_size: int = Field(32, ge=1, le=1024)
+    learning_rate: float = Field(0.001, gt=0, le=1)
+    base_model: str = "MobileNetV3Small"
+    # None = task default from app.services.preprocessing
+    input_shape: Optional[List[int]] = None
     # Compute target: "auto" (let TF prefer GPU if present), "cpu", or "gpu".
     # Forcing CPU is useful for small models where GPU offers no real
     # speedup and just adds host<->device transfer overhead.
     device: str = "auto"
     # Regularisation
-    dropout_rate: float = 0.5
-    l2_reg: float = 0.0
+    dropout_rate: float = Field(0.3, ge=0, lt=1)
+    l2_reg: float = Field(0.0, ge=0)
     # Early stopping
     early_stopping: bool = False
     early_stopping_patience: int = 5
     early_stopping_monitor: str = "val_loss"
     trainable_layers: int = 0  # 0 = unfreeze all, >0 = unfreeze last N layers
-    freeze_encoder_epochs: int = 0
+    # None = auto (head warm-up for ~1/3 of the epochs on pretrained backbones)
+    freeze_encoder_epochs: Optional[int] = None
     augmentation: dict = {}
+    seed: Optional[int] = None
+    # Re-weight the loss by inverse class frequency (imbalanced datasets).
+    class_weighting: bool = False
 
 @router.get("/devices")
 async def get_available_devices():
@@ -47,7 +55,7 @@ async def get_available_devices():
         return {"status": "error", "message": str(e)}
 
 @router.post("/start")
-async def start_training(request: TrainingRequest, background_tasks: BackgroundTasks):
+async def start_training(request: TrainingRequest):
     try:
         if not data_manager.is_split_ready(request.dataset_id):
             return {
@@ -74,9 +82,13 @@ async def start_training(request: TrainingRequest, background_tasks: BackgroundT
             freeze_encoder_epochs=request.freeze_encoder_epochs,
             augmentation=request.augmentation,
             device=request.device,
+            seed=request.seed,
+            class_weighting=request.class_weighting,
+            name=request.name,
         )
-        background_tasks.add_task(trainer.train, training_id)
-        return {"status": "success", "training_id": training_id}
+        job_queue.submit(training_id, trainer.train, training_id)
+        return {"status": "success", "training_id": training_id,
+                "queue_position": job_queue.position(training_id)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -129,6 +141,17 @@ async def unarchive_training(training_id: str):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.put("/session/{training_id}/name")
+async def rename_training_session(training_id: str, name: str = Body(..., embed=True)):
+    if not trainer.rename_training(training_id, name.strip()):
+        return {"status": "error", "message": "Session not found."}
+    return {"status": "success"}
+
+@router.get("/queue")
+async def get_job_queue():
+    """Jobs (training or optimization ids) waiting for the single ML worker."""
+    return {"status": "success", "pending": job_queue.pending()}
+
 @router.delete("/session/{training_id}")
 async def delete_training_session(training_id: str):
     """Permanently delete a training session and its saved model. Refuses
@@ -169,7 +192,7 @@ async def get_active_training(task: str = None):
     """
     try:
         sessions = trainer.get_all_sessions(include_archived=True)
-        active = [s for s in sessions if s.get("status") in ("initialized", "running")]
+        active = [s for s in sessions if s.get("status") in ("queued", "initialized", "running")]
         if task:
             active = [s for s in active if s.get("task") == task]
         active.sort(key=lambda s: s.get("created_at", 0), reverse=True)
