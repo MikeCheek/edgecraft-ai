@@ -1,9 +1,13 @@
 import axios from 'axios'
-import { API_BASE } from '../hooks/useAPI'
+import { API_BASE, authHeaders, withAuthQuery } from '../config'
 
 const client = axios.create({
   baseURL: `${API_BASE}/remote_datasets`,
   timeout: 600000 // 10 minutes for large downloads
+})
+client.interceptors.request.use(cfg => {
+  Object.entries(authHeaders()).forEach(([k, v]) => cfg.headers.set(k, v))
+  return cfg
 })
 
 export interface TokenStatus {
@@ -67,12 +71,11 @@ function streamDownload (
 ): Promise<number> {
   return new Promise((resolve, reject) => {
     const qs = new URLSearchParams(params).toString()
-    const url = `${API_BASE}/download_stream?${qs}`
+    const url = withAuthQuery(`${API_BASE}/remote_datasets/download_stream?${qs}`)
 
     const es = new EventSource(url)
 
     let downloadId: string | null = null
-    let startTime = Date.now()
     let lastDownloaded = 0
     let lastTime = Date.now()
 
@@ -98,7 +101,6 @@ function streamDownload (
       switch (data.type) {
         case 'start':
           downloadId = data.download_id ?? null
-          startTime = Date.now()
           break
 
         case 'dataset_created':

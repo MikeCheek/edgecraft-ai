@@ -1,33 +1,40 @@
-import numpy as np
+"""
+Model builders for every supported task.
+
+Design rules (all models):
+* Inputs are float32 in [0, 1] (images) or z-scored MFCCs (audio) - exactly
+  what app.services.preprocessing produces and what the exported sketch
+  feeds on-device. Backbone-specific normalisation is a Rescaling layer
+  inside the model, so it is baked into the .tflite file too.
+* Pretrained backbones are called with training=False so their
+  BatchNorm statistics stay frozen during fine-tuning (otherwise small
+  batches wreck the ImageNet features).
+* The final layer always computes in float32, so mixed-precision GPU
+  training stays numerically stable without wrapping the model in raw
+  tf ops (which Keras 3 rejects).
+* Data augmentation is NOT part of these models. The trainer wraps the
+  model with an augmentation front-end for training only and saves the
+  bare model, so augmentation layers never reach TFLite.
+"""
+
+from typing import Dict, Optional, Sequence, Tuple
+
 import tensorflow as tf
 from tensorflow import keras
-import keras as _keras_top  # needed for keras.saving.register_keras_serializable below
+import keras as _keras_top
 from tensorflow.keras import layers, regularizers
-from typing import Tuple
 
 
-# ---------------------------------------------------------------------------
-# Custom layers (replacing layers.Lambda(lambda ...) - see note below)
-# ---------------------------------------------------------------------------
-# layers.Lambda wrapping a raw Python lambda (e.g. `lambda t: tf.repeat(...)`)
-# looks fine at first: the model builds, trains, and even reloads with
-# safe_mode=False. But the reconstructed lambda's __globals__ doesn't
-# reliably carry over the enclosing module's imports after
-# deserialization, so the FIRST time the model needs to be retraced -
-# which TFLite conversion always does - it can fail with
-# `NameError: name 'tf' is not defined` deep inside TensorFlow's tracing
-# machinery. A properly registered Layer subclass has a real `call()`
-# method (no serialized bytecode closures at all), so it doesn't have
-# this problem, and doesn't even need Lambda's safe_mode=False escape
-# hatch since the Keras-3 "unsafe Lambda deserialization" guard only
-# applies to actual Lambda layers.
 @_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
 class ChannelTile3(keras.layers.Layer):
-    """Tiles a 1-channel (grayscale) input to 3 channels, e.g. so it can
-    feed an ImageNet-pretrained (RGB-only) backbone."""
+    """Tiles a 1-channel input to 3 channels for an RGB-only pretrained backbone.
+
+    Implemented as a concatenation: tf.repeat lowers to TILE/SHAPE ops that
+    TensorFlow Lite Micro doesn't support, which made grayscale models on
+    pretrained backbones impossible to run on a microcontroller."""
 
     def call(self, inputs):
-        return tf.repeat(inputs, 3, axis=-1)
+        return tf.concat([inputs, inputs, inputs], axis=-1)
 
     def compute_output_shape(self, input_shape):
         return tuple(input_shape[:-1]) + (3,)
@@ -35,8 +42,7 @@ class ChannelTile3(keras.layers.Layer):
 
 @_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
 class GrayscaleToRGB(keras.layers.Layer):
-    """Converts a 1-channel image to 3-channel RGB via
-    tf.image.grayscale_to_rgb (used by the Visual Wake Words model)."""
+    """Kept only so models saved by earlier versions still deserialise."""
 
     def call(self, inputs):
         return tf.image.grayscale_to_rgb(inputs)
@@ -47,9 +53,7 @@ class GrayscaleToRGB(keras.layers.Layer):
 
 @_keras_top.saving.register_keras_serializable(package="EdgeCraftAI")
 class AudioToRGB(keras.layers.Layer):
-    """Tiles a 1-channel MFCC/spectrogram input to 3 channels and resizes
-    it to a fixed spatial size, so it can feed an ImageNet-pretrained
-    backbone (used by the transfer-learning optimization path)."""
+    """Kept only so models saved by earlier versions still deserialise."""
 
     def __init__(self, target_size=(96, 96), **kwargs):
         super().__init__(**kwargs)
@@ -67,475 +71,317 @@ class AudioToRGB(keras.layers.Layer):
         return config
 
 
+# Input scaling each pretrained backbone expects, applied to [0, 1] pixels:
+# (scale, offset) for layers.Rescaling.
+_BACKBONE_INPUT_SCALING = {
+    "MobileNetV2": (2.0, -1.0),        # [-1, 1]
+    "MobileNetV1_0.25": (2.0, -1.0),   # [-1, 1]
+    "MobileNetV3Small": (2.0, -1.0),   # [-1, 1] with include_preprocessing=False
+    "EfficientNet": (255.0, 0.0),      # [0, 255], normalisation built in
+    "ResNet50V2": (2.0, -1.0),         # [-1, 1]
+}
+
+IMAGE_BACKBONES = list(_BACKBONE_INPUT_SCALING) + ["Custom3LayerCNN"]
+AUDIO_MODELS = ["DS_CNN", "MFCC_CNN", "AudioGRU", "AudioLSTM"]
+OD_MODELS = ["FOMO_MobileNetV2", "FOMO_Tiny"]
+
+# Names used by earlier versions -> current builder.
+MODEL_ALIASES = {
+    "WaveNet": "DS_CNN",
+    "SSD_MobileNetV2": "FOMO_MobileNetV2",
+    "EfficientDet_Lite": "FOMO_MobileNetV2",
+    "YOLO_Nano": "FOMO_Tiny",
+    "NanoDet": "FOMO_Tiny",
+}
+
+# FOMO output grid is input / 8 on each axis.
+FOMO_STRIDE = 8
+
+
+def _final_dense(num_classes: int, reg=None, name: str = "predictions"):
+    return layers.Dense(num_classes, activation="softmax", kernel_regularizer=reg,
+                        dtype="float32", name=name)
+
+
+def _set_trainable(base: keras.Model, trainable_layers: int) -> None:
+    base.trainable = True
+    if trainable_layers > 0:
+        for layer in base.layers[:-trainable_layers]:
+            layer.trainable = False
+
+
 class ModelFactory:
-    """Factory for creating TinyML models for different tasks.
+    """Factory for creating TinyML models for different tasks."""
 
-    All models accept optional `dropout_rate` and `l2_reg` arguments so the
-    LLM-advisor suggestions can actually be applied without editing code.
-    """
-
-    # Rough edge-suitability tiers for the image base models, used by the
-    # LLM advisor and MCU advisor to steer recommendations away from models
-    # that are unrealistic on MCU-class hardware. Params are approximate
-    # (ImageNet-pretrained, include_top=False) and vary with input_shape.
-    EDGE_SUITABILITY = {
-        "Custom3LayerCNN":  {"tier": "tiny",   "approx_params_m": 0.05, "note": "Best for the tightest MCUs (Nano 33 BLE, Pico)"},
-        "MobileNetV1_0.25": {"tier": "tiny",   "approx_params_m": 0.47, "note": "Smallest ImageNet-pretrained option; great default for ESP32-class boards"},
-        "MobileNetV3Small": {"tier": "small",  "approx_params_m": 1.5,  "note": "Good default for ESP32-S3 with PSRAM"},
+    EDGE_SUITABILITY: Dict[str, Dict] = {
+        "Custom3LayerCNN":  {"tier": "tiny",   "approx_params_m": 0.03, "note": "Best for the tightest MCUs (Nano 33 BLE, Pico)"},
+        "MobileNetV1_0.25": {"tier": "tiny",   "approx_params_m": 0.22, "note": "Smallest ImageNet-pretrained option; great default for ESP32-class boards"},
+        "MobileNetV3Small": {"tier": "small",  "approx_params_m": 0.94, "note": "Good default for ESP32-S3 with PSRAM"},
         "MobileNetV2":      {"tier": "medium", "approx_params_m": 2.3,  "note": "Fine for ESP32-S3 with PSRAM; heavier than V3Small for similar accuracy"},
-        "EfficientNet":     {"tier": "large",  "approx_params_m": 4.0,  "note": "Not recommended for MCU deployment without aggressive pruning/quantization"},
-        "ResNet50V2":       {"tier": "very_large", "approx_params_m": 23.5, "note": "Not suitable for MCU deployment - use for desktop/server baselines only"},
-        "SSD_MobileNetV2":  {"tier": "medium", "approx_params_m": 3.5,  "note": "Best default for edge OD; good accuracy/size tradeoff on ESP32-S3"},
-        "EfficientDet_Lite":{"tier": "medium", "approx_params_m": 3.8,  "note": "Highest accuracy edge OD model; heavier than SSD but better mAP"},
-        "YOLO_Nano":        {"tier": "tiny",   "approx_params_m": 0.8,  "note": "Ultra-lightweight OD; best for MCU-class boards with tight flash/RAM"},
-        "NanoDet":          {"tier": "small",  "approx_params_m": 1.2,  "note": "Anchor-free OD; good balance of speed and accuracy for ESP32-S3"},
+        "EfficientNet":     {"tier": "large",  "approx_params_m": 4.0,  "note": "Not recommended for MCU deployment"},
+        "ResNet50V2":       {"tier": "very_large", "approx_params_m": 23.5, "note": "Desktop/server baseline only"},
+        "DS_CNN":           {"tier": "tiny",   "approx_params_m": 0.02, "note": "Depthwise-separable CNN, the standard MCU keyword-spotting model"},
+        "MFCC_CNN":         {"tier": "small",  "approx_params_m": 0.1,  "note": "Plain CNN over MFCCs"},
+        "AudioGRU":         {"tier": "small",  "approx_params_m": 0.05, "note": "Recurrent; check TFLite Micro op support for your board"},
+        "AudioLSTM":        {"tier": "small",  "approx_params_m": 0.06, "note": "Recurrent; check TFLite Micro op support for your board"},
+        "FOMO_MobileNetV2": {"tier": "small",  "approx_params_m": 0.1,  "note": "Centroid detector on a MobileNetV2-0.35 trunk; fits ESP32-S3"},
+        "FOMO_Tiny":        {"tier": "tiny",   "approx_params_m": 0.02, "note": "From-scratch centroid detector for very small MCUs"},
     }
 
-    # --- Image Models ---
+    @staticmethod
+    def resolve_name(name: str) -> str:
+        return MODEL_ALIASES.get(name, name)
+
+    # ------------------------------------------------------------------
+    # Augmentation (training-only front-end, see Trainer)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def build_augmentation(augmentation: Optional[dict]) -> Optional[keras.Sequential]:
+        augmentation = augmentation or {}
+        aug = []
+        if augmentation.get("horizontal_flip"):
+            aug.append(layers.RandomFlip("horizontal"))
+        if augmentation.get("vertical_flip"):
+            aug.append(layers.RandomFlip("vertical"))
+        if augmentation.get("random_rotation"):
+            aug.append(layers.RandomRotation(float(augmentation["random_rotation"])))
+        if augmentation.get("random_crop") or augmentation.get("random_zoom"):
+            aug.append(layers.RandomZoom(float(augmentation.get("random_zoom") or 0.2)))
+        if augmentation.get("random_translation"):
+            t = float(augmentation["random_translation"])
+            aug.append(layers.RandomTranslation(t, t))
+        if augmentation.get("random_brightness"):
+            aug.append(layers.RandomBrightness(float(augmentation["random_brightness"]), value_range=(0.0, 1.0)))
+        if augmentation.get("random_contrast"):
+            aug.append(layers.RandomContrast(float(augmentation["random_contrast"])))
+        return keras.Sequential(aug, name="augmentation") if aug else None
+
+    # ------------------------------------------------------------------
+    # Image classification (also used for Visual Wake Words)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pretrained_backbone(name: str, input_hw: Tuple[int, int]):
+        shape = (input_hw[0], input_hw[1], 3)
+        if name == "MobileNetV2":
+            return keras.applications.MobileNetV2(input_shape=shape, include_top=False, weights="imagenet")
+        if name == "MobileNetV1_0.25":
+            return keras.applications.MobileNet(input_shape=shape, alpha=0.25, include_top=False, weights="imagenet")
+        if name == "MobileNetV3Small":
+            return keras.applications.MobileNetV3Small(
+                input_shape=shape, include_top=False, weights="imagenet",
+                include_preprocessing=False, minimalistic=False,
+            )
+        if name == "EfficientNet":
+            return keras.applications.EfficientNetB0(input_shape=shape, include_top=False, weights="imagenet")
+        if name == "ResNet50V2":
+            return keras.applications.ResNet50V2(input_shape=shape, include_top=False, weights="imagenet")
+        raise ValueError(f"Unknown backbone {name}")
 
     @staticmethod
     def create_image_classification_model(
-        input_shape: Tuple[int, int, int] = (224, 224, 3),
-        num_classes: int = 10,
-        base_model_name: str = "MobileNetV2",
-        dropout_rate: float = 0.5,
-        l2_reg: float = 0.0,
-        trainable_layers: int = 0,  # 0 = unfreeze all, >0 = unfreeze last N layers
-        augmentation: dict = None,
-    ) -> keras.Model:
-        """Create image classification model with optional regularisation."""
-        if augmentation is None:
-            augmentation = {}
-
-        # 1. Prepare Data Augmentation Block
-        # FIX: only build the Sequential when there are actual aug layers;
-        #      keras.Sequential([]) raises an error on build.
-        aug_layers = []
-        if augmentation:
-            if augmentation.get("horizontal_flip"):
-                aug_layers.append(layers.RandomFlip("horizontal"))
-            if augmentation.get("random_rotation"):
-                aug_layers.append(layers.RandomRotation(augmentation["random_rotation"]))
-            if augmentation.get("random_crop"):
-                aug_layers.append(layers.RandomZoom(0.2))
-
-        # Only create the augmentation block when it has at least one layer
-        data_augmentation = keras.Sequential(aug_layers, name="data_augmentation") if aug_layers else None
-
-        # 2. Prepare Regularization
-        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-
-        # Helper: prepend augmentation layer to a list only when it exists
-        def _with_aug(layer_list):
-            return ([data_augmentation] + layer_list) if data_augmentation else layer_list
-
-        # 3. Build Model Pipeline
-        if base_model_name in ["MobileNetV2", "MobileNetV3Small", "MobileNetV1_0.25"]:
-            channels = input_shape[2] if len(input_shape) >= 3 else 3
-            # ImageNet-pretrained weights are only defined for 3-channel RGB
-            # input. Previously, choosing one of these backbones together
-            # with a 1-channel (grayscale) input_shape crashed with a
-            # confusing Keras error at weight-load time ("Weight expects
-            # shape (3, 3, 1, 16). Received saved weight with shape
-            # (3, 3, 3, 16)"). We now build the backbone at (H, W, 3) and
-            # transparently tile a 1-channel input to 3 channels beforehand,
-            # the same pattern already used in create_visual_wake_words_model.
-            backbone_input_shape = (input_shape[0], input_shape[1], 3)
-
-            if base_model_name == "MobileNetV2":
-                base = keras.applications.MobileNetV2(
-                    input_shape=backbone_input_shape, include_top=False, weights="imagenet"
-                )
-            elif base_model_name == "MobileNetV1_0.25":
-                # Width multiplier 0.25x - by far the smallest ImageNet-pretrained
-                # option available in keras.applications, purpose-built for
-                # microcontroller-class RAM/flash budgets (ESP32, Nano 33 BLE).
-                base = keras.applications.MobileNet(
-                    input_shape=backbone_input_shape, alpha=0.25, include_top=False, weights="imagenet"
-                )
-            else:
-                base = keras.applications.MobileNetV3Small(
-                    input_shape=backbone_input_shape, include_top=False, weights="imagenet"
-                )
-
-            if trainable_layers > 0:
-                base.trainable = True
-                for layer in base.layers[:-trainable_layers]:
-                    layer.trainable = False
-            else:
-                base.trainable = True
-
-            inp = keras.Input(shape=input_shape)
-            x = data_augmentation(inp) if data_augmentation else inp
-            if channels != 3:
-                x = ChannelTile3(name="channel_adapter")(x)
-            x = base(x)
-            x = layers.GlobalAveragePooling2D()(x)
-            x = layers.Dropout(dropout_rate)(x)
-            out = layers.Dense(num_classes, activation="softmax", kernel_regularizer=reg)(x)
-            model = keras.Model(inp, out)
-
-        elif base_model_name == "EfficientNet":
-            channels = input_shape[2] if len(input_shape) >= 3 else 3
-            backbone_input_shape = (input_shape[0], input_shape[1], 3)
-            base = keras.applications.EfficientNetB0(
-                input_shape=backbone_input_shape,
-                include_top=False,
-                weights="imagenet",
-            )
-            base.trainable = False
-
-            inp = keras.Input(shape=input_shape)
-            x = data_augmentation(inp) if data_augmentation else inp
-            if channels != 3:
-                x = ChannelTile3(name="channel_adapter")(x)
-            x = base(x)
-            x = layers.GlobalAveragePooling2D()(x)
-            x = layers.Dense(256, activation="relu", kernel_regularizer=reg)(x)
-            x = layers.Dropout(dropout_rate)(x)
-            out = layers.Dense(num_classes, activation="softmax")(x)
-            model = keras.Model(inp, out)
-
-        elif base_model_name == "ResNet50V2":
-            channels = input_shape[2] if len(input_shape) >= 3 else 3
-            backbone_input_shape = (input_shape[0], input_shape[1], 3)
-            base = keras.applications.ResNet50V2(
-                input_shape=backbone_input_shape,
-                include_top=False,
-                weights="imagenet",
-            )
-            base.trainable = False
-
-            inp = keras.Input(shape=input_shape)
-            x = data_augmentation(inp) if data_augmentation else inp
-            if channels != 3:
-                x = ChannelTile3(name="channel_adapter")(x)
-            x = base(x)
-            x = layers.GlobalAveragePooling2D()(x)
-            x = layers.Dense(256, activation="relu", kernel_regularizer=reg)(x)
-            x = layers.Dropout(dropout_rate)(x)
-            out = layers.Dense(num_classes, activation="softmax")(x)
-            model = keras.Model(inp, out)
-
-        else:
-            # Custom3LayerCNN — ultra-low memory
-            model = keras.Sequential(
-                _with_aug([
-                    layers.Conv2D(16, 3, activation="relu", input_shape=input_shape,
-                                  kernel_regularizer=reg),
-                    layers.MaxPooling2D(2),
-                    layers.Conv2D(32, 3, activation="relu", kernel_regularizer=reg),
-                    layers.MaxPooling2D(2),
-                    layers.Conv2D(64, 3, activation="relu", kernel_regularizer=reg),
-                    layers.GlobalAveragePooling2D(),
-                    layers.Dense(128, activation="relu", kernel_regularizer=reg),
-                    layers.Dropout(dropout_rate),
-                    layers.Dense(num_classes, activation="softmax"),
-                ])
-            )
-
-        return model
-
-    # --- Visual Wake Words ---
-
-    @staticmethod
-    def create_visual_wake_words_model(
-        input_shape: Tuple[int, int, int] = (96, 96, 1),
-        dropout_rate: float = 0.3,
-        l2_reg: float = 0.0,
-    ) -> keras.Model:
-        """Binary classifier for Visual Wake Words."""
-        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-        base = keras.applications.MobileNetV2(
-            input_shape=(96, 96, 3),
-            include_top=False,
-            weights="imagenet",
-        )
-        base.trainable = False
-        model = keras.Sequential([
-            GrayscaleToRGB(input_shape=input_shape, name="grayscale_to_rgb"),
-            base,
-            layers.GlobalAveragePooling2D(),
-            layers.Dense(128, activation="relu", kernel_regularizer=reg),
-            layers.Dropout(dropout_rate),
-            layers.Dense(1, activation="sigmoid"),
-        ])
-        return model
-
-    # --- Audio Models ---
-
-    @staticmethod
-    def create_audio_classification_model(
-        input_shape: Tuple[int, int] = (40, 101),
-        num_classes: int = 4,
-        base_model_name: str = "MFCC_CNN",
-        dropout_rate: float = 0.5,
-        l2_reg: float = 0.0,
-    ) -> keras.Model:
-        """Audio classification model using MFCC spectrograms."""
-        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-
-        if base_model_name == "AudioLSTM":
-            model = keras.Sequential([
-                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
-                layers.LSTM(64, return_sequences=True, kernel_regularizer=reg),
-                layers.LSTM(64, kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        elif base_model_name == "AudioGRU":
-            model = keras.Sequential([
-                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
-                layers.GRU(64, return_sequences=True, kernel_regularizer=reg),
-                layers.GRU(64, kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        else:  # MFCC_CNN / WaveNet fallback
-            model = keras.Sequential([
-                layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
-                              kernel_regularizer=reg),
-                layers.MaxPooling2D((2, 2)),
-                layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
-                layers.MaxPooling2D((2, 2)),
-                layers.Conv2D(128, (3, 3), activation="relu", kernel_regularizer=reg),
-                layers.GlobalAveragePooling2D(),
-                layers.Dense(256, activation="relu", kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        return model
-
-    @staticmethod
-    def create_keyword_spotting_model(
-        input_shape: Tuple[int, int] = (40, 101),
+        input_shape: Tuple[int, int, int] = (96, 96, 3),
         num_classes: int = 2,
-        base_model_name: str = "MFCC_CNN",
+        base_model_name: str = "MobileNetV3Small",
+        dropout_rate: float = 0.3,
+        l2_reg: float = 0.0,
+        trainable_layers: int = 0,
+    ) -> keras.Model:
+        reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
+        channels = input_shape[2] if len(input_shape) >= 3 else 3
+        inp = keras.Input(shape=tuple(input_shape), name="input")
+
+        if base_model_name in _BACKBONE_INPUT_SCALING:
+            scale, offset = _BACKBONE_INPUT_SCALING[base_model_name]
+            x = inp
+            if channels != 3:
+                x = ChannelTile3(name="channel_adapter")(x)
+            x = layers.Rescaling(scale, offset, name="backbone_scaling")(x)
+            base = ModelFactory._pretrained_backbone(base_model_name, (input_shape[0], input_shape[1]))
+            base._name = "backbone"
+            _set_trainable(base, trainable_layers)
+            x = base(x, training=False)
+            x = layers.GlobalAveragePooling2D()(x)
+            if base_model_name in ("EfficientNet", "ResNet50V2"):
+                x = layers.Dense(128, activation="relu", kernel_regularizer=reg)(x)
+            x = layers.Dropout(dropout_rate)(x)
+            out = _final_dense(num_classes, reg)(x)
+            return keras.Model(inp, out, name=f"IC_{base_model_name}")
+
+        # Custom3LayerCNN - from scratch, ultra-low memory.
+        x = inp
+        for filters in (8, 16, 32):
+            x = layers.Conv2D(filters, 3, padding="same", activation="relu", kernel_regularizer=reg)(x)
+            x = layers.MaxPooling2D(2)(x)
+        x = layers.Conv2D(64, 3, padding="same", activation="relu", kernel_regularizer=reg)(x)
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dropout(dropout_rate)(x)
+        out = _final_dense(num_classes, reg)(x)
+        return keras.Model(inp, out, name="IC_Custom3LayerCNN")
+
+    # ------------------------------------------------------------------
+    # Audio (keyword spotting / audio classification)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_audio_model(
+        input_shape: Sequence[int],
+        num_classes: int,
+        base_model_name: str = "DS_CNN",
         dropout_rate: float = 0.3,
         l2_reg: float = 0.0,
     ) -> keras.Model:
-        """Lightweight keyword spotting model."""
         reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
+        n_mfcc, frames = int(input_shape[0]), int(input_shape[1])
+        inp = keras.Input(shape=(n_mfcc, frames, 1), name="input")
 
-        if base_model_name == "AudioLSTM":
-            model = keras.Sequential([
-                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
-                layers.LSTM(32, kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        elif base_model_name == "AudioGRU":
-            model = keras.Sequential([
-                layers.Reshape((input_shape[1], input_shape[0]), input_shape=(*input_shape, 1)),
-                layers.GRU(32, kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        else:  # MFCC_CNN / WaveNet fallback
-            model = keras.Sequential([
-                layers.Conv2D(32, (3, 3), activation="relu", input_shape=(*input_shape, 1),
-                              kernel_regularizer=reg),
-                layers.MaxPooling2D((2, 2)),
-                layers.Conv2D(64, (3, 3), activation="relu", kernel_regularizer=reg),
-                layers.MaxPooling2D((2, 2)),
-                layers.Flatten(),
-                layers.Dense(128, activation="relu", kernel_regularizer=reg),
-                layers.Dropout(dropout_rate),
-                layers.Dense(num_classes, activation="softmax"),
-            ])
-        return model
+        if base_model_name in ("AudioLSTM", "AudioGRU"):
+            # (n_mfcc, frames, 1) -> (frames, n_mfcc): a real transpose, not a
+            # reshape, so each timestep is one MFCC frame.
+            x = layers.Permute((2, 1, 3))(inp)
+            x = layers.Reshape((frames, n_mfcc))(x)
+            rnn = layers.LSTM if base_model_name == "AudioLSTM" else layers.GRU
+            # unroll=True: a static graph converts to plain TFLite ops
+            # (TensorList-based loops can't be INT8-quantized or run on TFLM).
+            x = rnn(48, return_sequences=True, unroll=True, kernel_regularizer=reg)(x)
+            x = rnn(48, unroll=True, kernel_regularizer=reg)(x)
+        elif base_model_name == "MFCC_CNN":
+            x = inp
+            for filters in (32, 64):
+                x = layers.Conv2D(filters, 3, padding="same", activation="relu", kernel_regularizer=reg)(x)
+                x = layers.MaxPooling2D(2)(x)
+            x = layers.Conv2D(128, 3, padding="same", activation="relu", kernel_regularizer=reg)(x)
+            x = layers.GlobalAveragePooling2D()(x)
+            x = layers.Dense(64, activation="relu", kernel_regularizer=reg)(x)
+        else:
+            # DS-CNN (Zhang et al., "Hello Edge"), small variant. BatchNorm
+            # momentum 0.9 (instead of Keras' 0.99) so the moving statistics
+            # keep up on the few hundred clips typical of a custom dataset.
+            x = layers.Conv2D(64, (10, 4), strides=(2, 2), padding="same", use_bias=False,
+                              kernel_regularizer=reg)(inp)
+            x = layers.BatchNormalization(momentum=0.9)(x)
+            x = layers.ReLU()(x)
+            for _ in range(4):
+                x = layers.DepthwiseConv2D(3, padding="same", use_bias=False)(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
+                x = layers.Conv2D(64, 1, use_bias=False, kernel_regularizer=reg)(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
+            x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dropout(dropout_rate)(x)
+        out = _final_dense(num_classes, reg)(x)
+        return keras.Model(inp, out, name=f"AUDIO_{base_model_name}")
 
-    # --- Object Detection Models ---
+    # Back-compat names
+    @staticmethod
+    def create_keyword_spotting_model(input_shape=(40, 49), num_classes=2, base_model_name="DS_CNN",
+                                      dropout_rate=0.3, l2_reg=0.0):
+        return ModelFactory.create_audio_model(input_shape, num_classes, base_model_name, dropout_rate, l2_reg)
+
+    @staticmethod
+    def create_audio_classification_model(input_shape=(40, 99), num_classes=4, base_model_name="DS_CNN",
+                                          dropout_rate=0.3, l2_reg=0.0):
+        return ModelFactory.create_audio_model(input_shape, num_classes, base_model_name, dropout_rate, l2_reg)
+
+    # ------------------------------------------------------------------
+    # Object detection: FOMO-style centroid detection
+    # ------------------------------------------------------------------
 
     @staticmethod
     def create_object_detection_model(
         input_shape: Tuple[int, int, int] = (96, 96, 3),
         num_classes: int = 1,
-        base_model_name: str = "SSD_MobileNetV2",
-        num_anchors_per_cell: int = 3,
-        dropout_rate: float = 0.3,
+        base_model_name: str = "FOMO_MobileNetV2",
+        dropout_rate: float = 0.1,
         l2_reg: float = 0.0,
+        trainable_layers: int = 0,
     ) -> keras.Model:
-        """Create object detection model with multi-scale feature heads.
+        """Faster-Objects-More-Objects style detector.
 
-        Output format: dict with
-          "boxes":   (batch, max_detections, 4)  — normalized cx, cy, w, h
-          "classes": (batch, max_detections, num_classes)  — class logits
-          "scores":  (batch, max_detections)  — objectness score
-
-        max_detections = grid_h * grid_w * num_anchors_per_cell.
+        Output: (H/8, W/8, num_classes + 1) softmax grid. Channel 0 is
+        background; a cell whose argmax is k>0 contains the centre of an
+        object of class k-1. Small enough for MCUs, trains with a plain
+        weighted cross-entropy, and post-processing on-device is just an
+        argmax per cell.
         """
         reg = regularizers.l2(l2_reg) if l2_reg > 0 else None
-        img_h, img_w = input_shape[0], input_shape[1]
+        h, w = int(input_shape[0]), int(input_shape[1])
+        if h % FOMO_STRIDE or w % FOMO_STRIDE:
+            raise ValueError(f"Object detection input height/width must be multiples of {FOMO_STRIDE}.")
         channels = input_shape[2] if len(input_shape) >= 3 else 3
-        backbone_input_shape = (img_h, img_w, 3)
-        B = num_anchors_per_cell
+        inp = keras.Input(shape=(h, w, channels), name="input")
+        x = inp
 
-        def _conv_block(x, filters, kernel_size=3, strides=1, name=""):
-            x = layers.Conv2D(filters, kernel_size, strides=strides, padding="same",
-                              kernel_regularizer=reg, name=f"{name}_conv")(x)
-            x = layers.BatchNormalization(name=f"{name}_bn")(x)
-            x = layers.ReLU(name=f"{name}_relu")(x)
-            return x
-
-        def _detection_head(feature_map, grid_size, filters=128, name="head"):
-            x = _conv_block(feature_map, filters, name=f"{name}_pre1")
-            x = _conv_block(x, filters, name=f"{name}_pre2")
-            # box offsets: cx, cy, w, h per anchor (all sigmoid-activated)
-            box_out = layers.Conv2D(B * 4, 1, padding="same",
-                                    activation="sigmoid",
-                                    kernel_regularizer=reg,
-                                    name=f"{name}_boxes")(x)
-            # class scores (logits, softmax applied in loss)
-            cls_out = layers.Conv2D(B * num_classes, 1, padding="same",
-                                    kernel_regularizer=reg,
-                                    name=f"{name}_classes")(x)
-            # objectness score
-            obj_out = layers.Conv2D(B * 1, 1, padding="same",
-                                    activation="sigmoid",
-                                    kernel_regularizer=reg,
-                                    name=f"{name}_obj")(x)
-            grid_h = grid_size[0]
-            grid_w = grid_size[1]
-            box_out = layers.Reshape((grid_h * grid_w * B, 4), name=f"{name}_box_reshape")(box_out)
-            cls_out = layers.Reshape((grid_h * grid_w * B, num_classes), name=f"{name}_cls_reshape")(cls_out)
-            obj_out = layers.Reshape((grid_h * grid_w * B,), name=f"{name}_obj_reshape")(obj_out)
-            return box_out, cls_out, obj_out
-
-        inp = keras.Input(shape=input_shape, name="input")
-
-        if channels != 3:
-            x = ChannelTile3(name="channel_adapter")(inp)
-        else:
-            x = inp
-
-        # ── Backbone ──────────────────────────────────────────────────
-        if base_model_name in ("SSD_MobileNetV2", "YOLO_Nano"):
+        if base_model_name == "FOMO_MobileNetV2":
+            if channels != 3:
+                x = ChannelTile3(name="channel_adapter")(x)
+            x = layers.Rescaling(2.0, -1.0, name="backbone_scaling")(x)
             base = keras.applications.MobileNetV2(
-                input_shape=backbone_input_shape, include_top=False, weights="imagenet"
+                input_shape=(h, w, 3), alpha=0.35, include_top=False, weights="imagenet"
             )
-            base.trainable = True
+            trunk = keras.Model(base.input, base.get_layer("block_6_expand_relu").output, name="backbone")
+            _set_trainable(trunk, trainable_layers)
+            x = trunk(x, training=False)
+        else:
+            for i, filters in enumerate((8, 16, 32)):
+                x = layers.Conv2D(filters, 3, strides=2, padding="same", use_bias=False,
+                                  kernel_regularizer=reg, name=f"fomo_s{i}")(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
+                x = layers.Conv2D(filters, 3, padding="same", use_bias=False, kernel_regularizer=reg)(x)
+                x = layers.BatchNormalization(momentum=0.9)(x)
+                x = layers.ReLU()(x)
 
-            # Build a multi-output feature extractor connected to x
-            layer_names = [l.name for l in base.layers]
-            c8_name  = "block_5_add" if "block_5_add" in layer_names else base.layers[min(20, len(base.layers)-1)].name
-            c16_name = "block_11_add" if "block_11_add" in layer_names else base.layers[min(60, len(base.layers)-1)].name
-            feature_extractor = keras.Model(
-                inputs=base.input,
-                outputs=[
-                    base.get_layer(c8_name).output,
-                    base.get_layer(c16_name).output,
-                    base.output,
-                ],
-            )
-            c8, c16, c32 = feature_extractor(x)
+        x = layers.Conv2D(32, 1, activation="relu", kernel_regularizer=reg, name="head_conv")(x)
+        x = layers.Dropout(dropout_rate)(x)
+        out = layers.Conv2D(num_classes + 1, 1, activation="softmax", dtype="float32", name="head_logits")(x)
+        return keras.Model(inp, out, name=f"OD_{base_model_name}")
 
-            # Light neck convolutions
-            p8  = _conv_block(c8,  64, name="neck_p8")
-            p16 = _conv_block(c16, 64, name="neck_p16")
-            p32 = _conv_block(c32, 64, name="neck_p32")
-
-        elif base_model_name == "EfficientDet_Lite":
-            base = keras.applications.EfficientNetB0(
-                input_shape=backbone_input_shape, include_top=False, weights="imagenet"
-            )
-            base.trainable = True
-
-            # Build a multi-output feature extractor connected to x
-            n = len(base.layers)
-            c8_idx  = min(30, n - 1)
-            c16_idx = min(90, n - 1)
-            feature_extractor = keras.Model(
-                inputs=base.input,
-                outputs=[
-                    base.layers[c8_idx].output,
-                    base.layers[c16_idx].output,
-                    base.output,
-                ],
-            )
-            c8, c16, c32 = feature_extractor(x)
-
-            p8  = _conv_block(c8,  64, name="neck_p8")
-            p16 = _conv_block(c16, 64, name="neck_p16")
-            p32 = _conv_block(c32, 64, name="neck_p32")
-
-        else:  # NanoDet — lightweight from-scratch backbone
-            x = _conv_block(x, 16, strides=2, name="nd_s1")
-            x = _conv_block(x, 16, name="nd_b1")
-            x = _conv_block(x, 32, strides=2, name="nd_s2")
-            x = _conv_block(x, 32, name="nd_b2")
-            c8 = x
-            x = _conv_block(x, 64, strides=2, name="nd_s3")
-            x = _conv_block(x, 64, name="nd_b3")
-            c16 = x
-            x = _conv_block(x, 128, strides=2, name="nd_s4")
-            x = _conv_block(x, 128, name="nd_b4")
-            c32 = x
-
-            p8  = _conv_block(c8,  64, name="neck_p8")
-            p16 = _conv_block(c16, 64, name="neck_p16")
-            p32 = _conv_block(c32, 64, name="neck_p32")
-
-        # ── Detection Heads (multi-scale) ─────────────────────────────
-        # Compute grid sizes from actual feature map shapes, not assumed strides
-        grid8  = (int(p8.shape[1]),  int(p8.shape[2]))
-        grid16 = (int(p16.shape[1]), int(p16.shape[2]))
-        grid32 = (int(p32.shape[1]), int(p32.shape[2]))
-
-        b8,  s8,  o8  = _detection_head(p8,  grid8,  name="d8")
-        b16, s16, o16 = _detection_head(p16, grid16, name="d16")
-        b32, s32, o32 = _detection_head(p32, grid32, name="d32")
-
-        boxes   = layers.Concatenate(axis=1, name="all_boxes")([b8,  b16,  b32])
-        classes = layers.Concatenate(axis=1, name="all_classes")([s8,  s16,  s32])
-        scores  = layers.Concatenate(axis=1, name="all_scores")([o8,  o16,  o32])
-
-        model = keras.Model(
-            inp,
-            {"boxes": boxes, "classes": classes, "scores": scores},
-            name=f"OD_{base_model_name}",
-        )
-        return model
-
-    # --- Router ---
+    # ------------------------------------------------------------------
+    # Router
+    # ------------------------------------------------------------------
 
     @staticmethod
     def create_model(
         task: str,
-        num_classes: int = 10,
-        base_model: str = "MobileNetV2",
-        input_shape: tuple = (224, 224, 3),
-        dropout_rate: float = 0.5,
+        num_classes: int = 2,
+        base_model: str = "MobileNetV3Small",
+        input_shape: tuple = (96, 96, 3),
+        dropout_rate: float = 0.3,
         l2_reg: float = 0.0,
         trainable_layers: int = 0,
-        augmentation: dict = None,
+        augmentation: dict = None,  # accepted for back-compat; see build_augmentation
     ) -> keras.Model:
-        """Dispatch to the correct model builder."""
-        if augmentation is None:
-            augmentation = {}
+        base_model = ModelFactory.resolve_name(base_model)
+        if task in ("IMAGE_CLASSIFICATION", "VISUAL_WAKE_WORDS"):
+            if base_model not in IMAGE_BACKBONES:
+                base_model = "Custom3LayerCNN"
+            return ModelFactory.create_image_classification_model(
+                input_shape=tuple(input_shape), num_classes=num_classes, base_model_name=base_model,
+                dropout_rate=dropout_rate, l2_reg=l2_reg, trainable_layers=trainable_layers,
+            )
+        if task in ("KEYWORD_SPOTTING", "AUDIO_CLASSIFICATION"):
+            if base_model not in AUDIO_MODELS:
+                base_model = "DS_CNN"
+            return ModelFactory.create_audio_model(
+                input_shape=input_shape, num_classes=num_classes, base_model_name=base_model,
+                dropout_rate=dropout_rate, l2_reg=l2_reg,
+            )
+        if task == "OBJECT_DETECTION":
+            if base_model not in OD_MODELS:
+                base_model = "FOMO_MobileNetV2"
+            return ModelFactory.create_object_detection_model(
+                input_shape=tuple(input_shape), num_classes=num_classes, base_model_name=base_model,
+                dropout_rate=dropout_rate, l2_reg=l2_reg, trainable_layers=trainable_layers,
+            )
+        raise ValueError(f"Unknown task: {task}")
 
-        factories = {
-            "IMAGE_CLASSIFICATION": lambda: ModelFactory.create_image_classification_model(
-                input_shape=input_shape, num_classes=num_classes,
-                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-                trainable_layers=trainable_layers, augmentation=augmentation,
-            ),
-            "OBJECT_DETECTION": lambda: ModelFactory.create_object_detection_model(
-                input_shape=input_shape, num_classes=num_classes,
-                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-            ),
-            "VISUAL_WAKE_WORDS": lambda: ModelFactory.create_visual_wake_words_model(
-                input_shape=input_shape, dropout_rate=dropout_rate, l2_reg=l2_reg,
-            ),
-            "KEYWORD_SPOTTING": lambda: ModelFactory.create_keyword_spotting_model(
-                input_shape=input_shape, num_classes=num_classes,
-                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-            ),
-            "AUDIO_CLASSIFICATION": lambda: ModelFactory.create_audio_classification_model(
-                input_shape=input_shape, num_classes=num_classes,
-                base_model_name=base_model, dropout_rate=dropout_rate, l2_reg=l2_reg,
-            ),
-        }
-        if task not in factories:
-            raise ValueError(f"Unknown task: {task}")
-        return factories[task]()
+    @staticmethod
+    def get_backbone(model: keras.Model) -> Optional[keras.Model]:
+        """The nested pretrained backbone (for freeze / fine-tune phases), if any."""
+        for layer in model.layers:
+            if isinstance(layer, keras.Model):
+                return layer
+        return None

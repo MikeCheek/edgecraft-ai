@@ -1,0 +1,7 @@
+line-length = 120
+target-version = "py310"
+
+[lint]
+# Pyflakes: undefined names, unused imports/variables - the class of bug that
+# hid a NameError in the COCO upload path.
+select = ["F"]

@@ -1,5 +1,3 @@
-import struct
-from typing import List
 
 class CArrayGenerator:
     """Generate C-array representations of model files"""

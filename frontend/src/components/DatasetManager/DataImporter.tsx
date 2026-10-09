@@ -1,3 +1,4 @@
+import { apiFetch } from '../../config';
 import { Check, X, AlertTriangle, ExternalLink, Download, Upload, Loader2, Globe, Database, Info, FolderOpen, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useAPI } from '../../hooks/useAPI';
@@ -147,7 +148,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
         formData.append('files', files[i]);
       }
 
-      const response = await fetch(`http://localhost:8000/api/datasets/upload_folder`, {
+      const response = await apiFetch(`/datasets/upload_folder`, {
         method: 'POST',
         body: formData,
       });
@@ -323,7 +324,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
 
   // --- Sorted & filtered Kaggle results ---
   const sortedKaggleResults = useMemo(() => {
-    let filtered = kaggleResults.filter(ds => (ds.download_count || 0) >= kaggleMinDownloads);
+    const filtered = kaggleResults.filter(ds => (ds.download_count || 0) >= kaggleMinDownloads);
     return filtered.sort((a, b) => {
       if (kaggleSortField === 'name') {
         const va = a.title || '', vb = b.title || '';
@@ -347,7 +348,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
 
   // --- Sorted & filtered HuggingFace results ---
   const sortedHfResults = useMemo(() => {
-    let filtered = hfResults.filter(ds => (ds.downloads || 0) >= hfMinDownloads);
+    const filtered = hfResults.filter(ds => (ds.downloads || 0) >= hfMinDownloads);
     return filtered.sort((a, b) => {
       if (hfSortField === 'name') {
         const va = a.title || '', vb = b.title || '';
@@ -518,8 +519,7 @@ function DataImporter({ datasetId, task, onImportSuccess }: DataImporterProps) {
                 <span className="block text-xs font-medium mb-0.5">Select Folder</span>
                 <span className="text-[10px] text-slate-500">Upload a folder with class subdirectories (e.g., cat/, dog/)</span>
                 <input type="file" ref={folderInputRef} onChange={handleFolderUpload}
-                  // @ts-ignore - webkitdirectory is not in the type definitions
-                  webkitdirectory="" directory="" multiple className="hidden" />
+                  {...{ webkitdirectory: '', directory: '' }} multiple className="hidden" />
               </div>
             </div>
           )}

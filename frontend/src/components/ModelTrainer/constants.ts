@@ -1,8 +1,8 @@
 import { TinyMLTask } from '../../types'
 
-// --- Input Size Configuration ---
-// Edit these values to change the input dimensions sent to the backend.
-// Keep them in sync with IMAGE_SHAPES / AUDIO_PARAMS in data_processor.py.
+// --- Input Size Defaults ---
+// Fallbacks only: the backend's GET /api/info is the source of truth
+// (app/services/preprocessing.py) and overrides these at runtime.
 
 export const INPUT_SIZES = {
   // Image tasks — [width, height, channels]
@@ -16,9 +16,9 @@ export const INPUT_SIZES = {
   VISUAL_WAKE_WORDS:     [96,  96,  1] as number[],   // grayscale
 
   // Audio tasks — [n_mfcc, time_frames, 1]
-  // time_frames ? ceil(sample_rate * duration / hop_length)  (default hop = 512)
-  KEYWORD_SPOTTING:      [40, 101, 1] as number[],
-  AUDIO_CLASSIFICATION:  [64, 101, 1] as number[],
+  // time_frames = 1 + (samples - 512) / 320  (1 s clip -> 49, 2 s -> 99)
+  KEYWORD_SPOTTING:      [40, 49, 1] as number[],
+  AUDIO_CLASSIFICATION:  [40, 99, 1] as number[],
 } satisfies Record<TinyMLTask, number[]>
 
 // ----------------------------------------
@@ -31,11 +31,11 @@ export function getTaskDefaults (task: TinyMLTask): {
     case 'VISUAL_WAKE_WORDS':
       return { input_shape: INPUT_SIZES.VISUAL_WAKE_WORDS, base_model: 'MobileNetV3Small' }
     case 'KEYWORD_SPOTTING':
-      return { input_shape: INPUT_SIZES.KEYWORD_SPOTTING, base_model: 'MFCC_CNN' }
+      return { input_shape: INPUT_SIZES.KEYWORD_SPOTTING, base_model: 'DS_CNN' }
     case 'AUDIO_CLASSIFICATION':
-      return { input_shape: INPUT_SIZES.AUDIO_CLASSIFICATION, base_model: 'MFCC_CNN' }
+      return { input_shape: INPUT_SIZES.AUDIO_CLASSIFICATION, base_model: 'DS_CNN' }
     case 'OBJECT_DETECTION':
-      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'SSD_MobileNetV2' }
+      return { input_shape: INPUT_SIZES.OBJECT_DETECTION, base_model: 'FOMO_MobileNetV2' }
     case 'IMAGE_CLASSIFICATION':
     default:
       // MobileNetV3Small at 96x96 is a far more realistic edge default than
@@ -56,13 +56,24 @@ export const IMAGE_MODELS = [
   'ResNet50V2',
   'Custom3LayerCNN'
 ]
-export const OD_MODELS = [
-  'SSD_MobileNetV2',
-  'EfficientDet_Lite',
-  'NanoDet',
-  'YOLO_Nano',
-]
-export const AUDIO_MODELS = ['MFCC_CNN', 'WaveNet', 'AudioLSTM', 'AudioGRU']
+export const OD_MODELS = ['FOMO_MobileNetV2', 'FOMO_Tiny']
+export const AUDIO_MODELS = ['DS_CNN', 'MFCC_CNN', 'AudioGRU', 'AudioLSTM']
+
+/** One-line hints shown under the model picker. */
+export const MODEL_HINTS: Record<string, string> = {
+  MobileNetV3Small: 'Pretrained, ~0.9M params - good default for ESP32-S3.',
+  'MobileNetV1_0.25': 'Pretrained, ~0.2M params - smallest pretrained option.',
+  MobileNetV2: 'Pretrained, ~2.3M params - heavier, fine with PSRAM.',
+  EfficientNet: 'Pretrained, ~4M params - usually too big for MCUs.',
+  ResNet50V2: 'Pretrained, ~23M params - desktop baseline only.',
+  Custom3LayerCNN: 'Tiny from-scratch CNN for Nano 33 BLE / Pico class boards.',
+  DS_CNN: 'Depthwise-separable CNN - the standard keyword-spotting model.',
+  MFCC_CNN: 'Plain CNN over MFCCs.',
+  AudioGRU: 'Recurrent, unrolled for TFLite Micro.',
+  AudioLSTM: 'Recurrent, unrolled for TFLite Micro.',
+  FOMO_MobileNetV2: 'Centroid detector on a pretrained MobileNetV2-0.35 trunk (output grid = input / 8).',
+  FOMO_Tiny: 'From-scratch centroid detector for very small MCUs.',
+}
 export const AUDIO_TASKS: TinyMLTask[] = [
   'KEYWORD_SPOTTING',
   'AUDIO_CLASSIFICATION'
@@ -98,10 +109,10 @@ export const DROPOUT_OPTIONS: SelectOption[] = [
 ];
 
 export const EPOCHS_OPTIONS: SelectOption[] = [
-  { label: '10', value: 10 },
-  { label: '25 (Quick)', value: 25 },
+  { label: '10 (Quick)', value: 10 },
+  { label: '30 (Default)', value: 30 },
   { label: '50', value: 50 },
-  { label: '100 (Default)', value: 100 },
+  { label: '100', value: 100 },
   { label: '150', value: 150 },
   { label: '200 (Long)', value: 200 },
   { label: 'Custom...', value: 'custom' },
@@ -117,7 +128,7 @@ export const ES_PATIENCE_OPTIONS: SelectOption[] = [
 ];
 
 export const TRAINABLE_LAYERS_OPTIONS: SelectOption[] = [
-  { label: 'All layers (0)', value: 0 },
+  { label: 'Whole backbone (0)', value: 0 },
   { label: '1', value: 1 },
   { label: '2', value: 2 },
   { label: '4', value: 4 },
@@ -125,7 +136,11 @@ export const TRAINABLE_LAYERS_OPTIONS: SelectOption[] = [
   { label: 'Custom...', value: 'custom' },
 ];
 
+/** -1 = let the backend pick (≈ a third of the epochs on pretrained backbones). */
+export const FREEZE_AUTO = -1
+
 export const FREEZE_EPOCHS_OPTIONS: SelectOption[] = [
+  { label: 'Auto (recommended)', value: FREEZE_AUTO },
   { label: 'None (0)', value: 0 },
   { label: '5', value: 5 },
   { label: '10', value: 10 },
@@ -140,7 +155,7 @@ export function formatTime (secs: number): string {
   const s = Math.floor(secs % 60)
   if (h > 0)
     return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '00')}`
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
 export function formatDate (ts: number): string {

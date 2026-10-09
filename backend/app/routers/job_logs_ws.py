@@ -10,8 +10,11 @@ happen. Purely additive/read-only - closing the connection has no effect
 on the job itself.
 """
 
+import hmac
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app import config
 from app.services.job_logs import job_log_broker
 
 router = APIRouter()
@@ -19,6 +22,13 @@ router = APIRouter()
 
 @router.websocket("/ws/logs/{job_id}")
 async def stream_job_logs(websocket: WebSocket, job_id: str):
+    # HTTP middleware doesn't cover WebSockets; browsers can't set headers
+    # on them, so the optional API token travels as ?api_key=.
+    if config.API_TOKEN:
+        provided = websocket.query_params.get("api_key", "")
+        if not (provided and hmac.compare_digest(provided, config.API_TOKEN)):
+            await websocket.close(code=4401)
+            return
     await websocket.accept()
 
     # Send buffered history first so a client connecting mid-job (or

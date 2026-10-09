@@ -27,13 +27,16 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
+from app import config
 from app.services.shared_state import trainer
-from app.services.optimizer import get_output_path, OPTIMIZATION_DIR
+from app.services.optimizer import get_output_path
 from app.services.inference_engine import (
     run_inference,
     get_inference_history,
-    INFERENCE_LOG_PATH,
+    clear_inference_history as _clear_history,
 )
+
+MAX_INPUT_BYTES = config.MAX_SAMPLE_MB * 1024 * 1024
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -85,7 +88,10 @@ def _resolve_labels_and_task(training_id: str) -> tuple[list[str], str]:
     classes will be labelled class_0, class_1, …).
     """
     try:
-        models = trainer.get_trained_models()
+        session = trainer.training_sessions.get(training_id) or {}
+        if session.get("labels"):
+            return list(session["labels"]), session.get("task", "IMAGE_CLASSIFICATION")
+        models = trainer.get_trained_models(include_archived=True)
         for m in models:
             if m.get("training_id") == training_id or m.get("id") == training_id:
                 # IMPORTANT: do NOT alphabetically sort these. Class index i
@@ -129,16 +135,23 @@ async def run_model_inference(
 
     # 2. Fetch raw bytes
     if file is not None:
-        raw_bytes = await file.read()
+        raw_bytes = await file.read(MAX_INPUT_BYTES + 1)
+        if len(raw_bytes) > MAX_INPUT_BYTES:
+            raise HTTPException(status_code=413, detail=f"Input exceeds {config.MAX_SAMPLE_MB} MB limit.")
     elif input_url:
+        if not input_url.lower().startswith(("http://", "https://")):
+            raise HTTPException(status_code=422, detail="input_url must be an http(s) URL.")
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(input_url, follow_redirects=True)
-                resp.raise_for_status()
-                raw_bytes = resp.content
-                # Guard against absurdly large downloads
-                if len(raw_bytes) > 50 * 1024 * 1024:
-                    raise HTTPException(status_code=413, detail="Input file exceeds 50 MB limit.")
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                async with client.stream("GET", input_url) as resp:
+                    resp.raise_for_status()
+                    chunks, size = [], 0
+                    async for chunk in resp.aiter_bytes():
+                        size += len(chunk)
+                        if size > MAX_INPUT_BYTES:
+                            raise HTTPException(status_code=413, detail=f"Input exceeds {config.MAX_SAMPLE_MB} MB limit.")
+                        chunks.append(chunk)
+                    raw_bytes = b"".join(chunks)
         except httpx.HTTPStatusError as exc:
             raise HTTPException(status_code=502, detail=f"Failed to fetch URL: {exc}") from exc
         except httpx.RequestError as exc:
@@ -164,6 +177,8 @@ async def run_model_inference(
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:  # undecodable input (e.g. unsupported audio codec)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception(f"Inference error for training_id={training_id}: {exc}")
         raise HTTPException(status_code=500, detail=f"Inference failed: {exc}") from exc
@@ -183,8 +198,7 @@ async def inference_history(limit: int = 100):
 async def clear_inference_history():
     """Wipe the inference log (useful during development / testing)."""
     try:
-        if INFERENCE_LOG_PATH.exists():
-            INFERENCE_LOG_PATH.unlink()
+        _clear_history()
         return {"status": "success", "message": "Inference history cleared."}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

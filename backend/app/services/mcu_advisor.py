@@ -18,8 +18,11 @@ Nothing here pretends to be a cycle-accurate hardware simulator - anywhere
 a number can't be measured directly, it is explicitly marked as estimated.
 """
 
+from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,137 @@ logger = logging.getLogger(__name__)
 _HOST_CLOCK_GHZ_ASSUMPTION = 3.0
 
 
+TFLM_FIXED_OVERHEAD_BYTES = 8 * 1024
+TFLM_PER_OP_OVERHEAD_BYTES = 512
+
+
+def graph_ops(tflite_bytes: bytes) -> List[dict]:
+    from app.services.evaluator import make_interpreter
+
+    interpreter = make_interpreter(tflite_bytes, no_delegate=True)
+    return interpreter._get_ops_details()  # stable since TF 2.6
+
+
+def estimate_arena_bytes(tflite_bytes: bytes) -> Dict[str, int]:
+    """Peak simultaneous activation memory + TFLM bookkeeping, in bytes."""
+    from app.services.evaluator import make_interpreter
+
+    interpreter = make_interpreter(tflite_bytes, no_delegate=True)
+    ops = interpreter._get_ops_details()
+    details = {d["index"]: d for d in interpreter.get_tensor_details()}
+
+    def nbytes(idx: int) -> int:
+        d = details.get(idx)
+        if d is None:
+            return 0
+        return int(np.prod(d["shape"])) * np.dtype(d["dtype"]).itemsize if len(d["shape"]) else np.dtype(d["dtype"]).itemsize
+
+    inputs = [d["index"] for d in interpreter.get_input_details()]
+    outputs = [d["index"] for d in interpreter.get_output_details()]
+    first_def: Dict[int, int] = {i: -1 for i in inputs}
+    last_use: Dict[int, int] = {}
+    for step, op in enumerate(ops):
+        for t in op["outputs"]:
+            if t >= 0:
+                first_def.setdefault(t, step)
+        for t in op["inputs"]:
+            if t in first_def:  # only activations (weights are never produced by an op)
+                last_use[t] = step
+    for t in outputs:
+        last_use[t] = len(ops)
+    for t, s in first_def.items():
+        last_use.setdefault(t, s)
+
+    peak = 0
+    for step in range(-1, len(ops) + 1):
+        live = sum(nbytes(t) for t, s in first_def.items() if s <= step <= last_use[t])
+        peak = max(peak, live)
+    arena = peak + TFLM_FIXED_OVERHEAD_BYTES + TFLM_PER_OP_OVERHEAD_BYTES * len(ops)
+    return {"arena_bytes": int(arena), "peak_activation_bytes": int(peak), "ops": len(ops)}
+
+
+# Builtin ops TensorFlow Lite Micro implements (used when the optional
+# tflite-micro package isn't installed to flag models that can't run).
+TFLM_SUPPORTED_OPS = {
+    "ABS", "ADD", "ADD_N", "ARG_MAX", "ARG_MIN", "AVERAGE_POOL_2D", "BATCH_MATMUL", "BATCH_TO_SPACE_ND",
+    "BROADCAST_ARGS", "BROADCAST_TO", "CAST", "CEIL", "CONCATENATION", "CONV_2D", "COS", "CUMSUM",
+    "DEPTH_TO_SPACE", "DEPTHWISE_CONV_2D", "DEQUANTIZE", "DIV", "ELU", "EQUAL", "EXP", "EXPAND_DIMS",
+    "FILL", "FLOOR", "FLOOR_DIV", "FLOOR_MOD", "FULLY_CONNECTED", "GATHER", "GATHER_ND", "GREATER",
+    "GREATER_EQUAL", "HARD_SWISH", "L2_NORMALIZATION", "L2_POOL_2D", "LEAKY_RELU", "LESS", "LESS_EQUAL",
+    "LOG", "LOG_SOFTMAX", "LOGICAL_AND", "LOGICAL_NOT", "LOGICAL_OR", "LOGISTIC", "MAX_POOL_2D", "MAXIMUM",
+    "MEAN", "MINIMUM", "MIRROR_PAD", "MUL", "NEG", "NOT_EQUAL", "PACK", "PAD", "PADV2", "PRELU", "QUANTIZE",
+    "REDUCE_MAX", "REDUCE_MIN", "RELU", "RELU6", "RESHAPE", "RESIZE_BILINEAR", "RESIZE_NEAREST_NEIGHBOR",
+    "ROUND", "RSQRT", "SELECT_V2", "SHAPE", "SIN", "SLICE", "SOFTMAX", "SPACE_TO_BATCH_ND", "SPACE_TO_DEPTH",
+    "SPLIT", "SPLIT_V", "SQRT", "SQUARE", "SQUARED_DIFFERENCE", "SQUEEZE", "STRIDED_SLICE", "SUB", "SUM",
+    "SVDF", "TANH", "TRANSPOSE", "TRANSPOSE_CONV", "UNIDIRECTIONAL_SEQUENCE_LSTM", "UNPACK", "ZEROS_LIKE",
+}
+
+
+def tflm_verify(tflite_bytes: bytes, max_arena: int = 16 * 1024 * 1024) -> Dict:
+    """Check a model against TensorFlow Lite Micro.
+
+    With the optional `tflite-micro` package installed this runs the real
+    TFLM interpreter: it confirms every op is supported, finds the minimum
+    tensor arena by bisection, and compares TFLM output with the desktop
+    interpreter on a random input. Without it, ops are checked against
+    TFLM_SUPPORTED_OPS.
+    """
+    try:
+        ops = sorted({o["op_name"] for o in graph_ops(tflite_bytes)})
+    except Exception as exc:
+        return {"available": False, "error": f"Could not read model ops: {exc}", "ops": []}
+    unsupported = [o for o in ops if o not in TFLM_SUPPORTED_OPS]
+    result: Dict = {"ops": ops, "unsupported_ops": unsupported}
+    try:
+        from tflite_micro.python.tflite_micro import runtime as tflm
+    except Exception:
+        result.update({"available": False, "supported": not unsupported})
+        return result
+
+    result["available"] = True
+
+    def _fits(size: int) -> bool:
+        try:
+            tflm.Interpreter.from_bytes(tflite_bytes, arena_size=size)
+            return True
+        except Exception:
+            return False
+
+    if not _fits(max_arena):
+        result.update({"supported": False,
+                       "error": f"TFLM failed to allocate (unsupported ops: {unsupported or 'unknown'})"})
+        return result
+    lo, hi = 1024, max_arena
+    while hi - lo > 512:
+        mid = (lo + hi) // 2
+        if _fits(mid):
+            hi = mid
+        else:
+            lo = mid
+    result.update({"supported": True, "arena_bytes": int(hi)})
+
+    try:
+        from app.services.evaluator import make_interpreter
+
+        ref = make_interpreter(tflite_bytes, no_delegate=True)
+        inp, out = ref.get_input_details()[0], ref.get_output_details()[0]
+        x = np.random.default_rng(0).random(inp["shape"]).astype(np.float32)
+        if inp["dtype"] in (np.int8, np.uint8):
+            from app.services.preprocessing import quantize_input
+
+            x = quantize_input(x, *inp["quantization"], inp["dtype"])
+        ref.set_tensor(inp["index"], x)
+        ref.invoke()
+        micro = tflm.Interpreter.from_bytes(tflite_bytes, arena_size=hi + 4096)
+        micro.set_input(x, 0)
+        micro.invoke()
+        diff = np.abs(micro.get_output(0).astype(np.float32) - ref.get_tensor(out["index"]).astype(np.float32))
+        result["max_abs_diff"] = float(diff.max())
+    except Exception as exc:
+        result["comparison_error"] = str(exc)
+    return result
+
+
 class MCUAdvisor:
     """Hardware advisor for microcontroller deployment"""
 
@@ -36,6 +170,7 @@ class MCUAdvisor:
         "ESP32_S3_N16R8": {
             "name": "ESP32-S3 N16R8",
             "ram_kb": 8192,       # 8MB PSRAM + 512KB on-chip SRAM
+            "internal_sram_kb": 320,  # usable for static buffers
             "flash_kb": 16384,    # 16MB flash
             "cpu": "Xtensa LX7 dual-core @ 240 MHz",
             "clock_ghz": 0.240,
@@ -46,6 +181,7 @@ class MCUAdvisor:
         "ESP32_CAM": {
             "name": "ESP32-CAM (AI-Thinker, OV2640)",
             "ram_kb": 4096 + 520,  # ~4MB PSRAM + 520KB on-chip SRAM
+            "internal_sram_kb": 160,
             "flash_kb": 4096,     # common AI-Thinker variant; some boards ship 8/16MB
             "cpu": "Xtensa LX6 dual-core @ 240 MHz",
             "clock_ghz": 0.240,
@@ -86,68 +222,24 @@ class MCUAdvisor:
     # -------------------------------------------------------------------
 
     def _estimate_ram_usage_kb(self, tflite_path: str, optimized_size_kb: float) -> Dict[str, float]:
-        """
-        Heuristic RAM estimate. TFLite Micro's real arena size depends on
-        the graph's tensor allocation plan, which can only be known exactly
-        by actually allocating tensors with TFLite Micro on the target.
-        As an honest approximation we:
-          1. Try to sum the byte-size of all non-constant (activation)
-             tensors reported by the desktop TFLite interpreter - these
-             are the tensors that must live in the arena at runtime.
-          2. Add a fixed ~20KB overhead for the interpreter / op resolver
-             bookkeeping structures.
-        If introspection fails for any reason, we fall back to a
-        documented multiplier of the model's flash size.
+        """Tensor-arena estimate from a liveness analysis of the TFLite graph.
+
+        Walks the ops in execution order, tracks when each activation tensor
+        is produced and last consumed, and takes the peak total size of
+        tensors alive at the same time - the same quantity TFLite Micro's
+        greedy memory planner minimises. Weights stay in flash and are not
+        counted. A per-op allowance covers TFLM's persistent buffers
+        (quantization params, op state). Falls back to a size multiplier if
+        the graph can't be introspected.
         """
         try:
-            import tensorflow as tf
-
-            interpreter = tf.lite.Interpreter(model_path=tflite_path)
-            interpreter.allocate_tensors()
-
-            all_details = interpreter.get_tensor_details()
-            input_indices = {d["index"] for d in interpreter.get_input_details()}
-            output_indices = {d["index"] for d in interpreter.get_output_details()}
-
-            activation_bytes = 0
-            for d in all_details:
-                try:
-                    tensor = interpreter.tensor(d["index"])()
-                    # Weight/bias tensors already hold trained values and are
-                    # stored in flash (memory-mapped), not counted toward RAM.
-                    # We can't perfectly distinguish weights from activations
-                    # from the public API, so as a heuristic we count only
-                    # input/output/intermediate tensors that are small enough
-                    # to plausibly be activations (weights are typically the
-                    # largest tensors in a CNN and dominate flash, not RAM).
-                    is_io = d["index"] in input_indices or d["index"] in output_indices
-                    if is_io:
-                        activation_bytes += tensor.nbytes
-                except Exception:
-                    continue
-
-            # Double-buffer estimate for intermediate activations: TFLite Micro
-            # typically needs room for ~2 concurrent activation tensors plus
-            # input/output. We approximate intermediate activation memory as
-            # 2x the largest single input tensor (a common rule of thumb for
-            # simple feed-forward CNNs), since exact liveness analysis
-            # requires the actual TFLite Micro allocator.
-            largest_input_bytes = max(
-                (interpreter.tensor(d["index"])().nbytes for d in interpreter.get_input_details()),
-                default=0,
-            )
-            estimated_arena_bytes = activation_bytes + (largest_input_bytes * 2) + (20 * 1024)
-            return {
-                "ram_kb": round(estimated_arena_bytes / 1024, 1),
-                "method": "heuristic_tensor_introspection",
-            }
+            est = estimate_arena_bytes(Path(tflite_path).read_bytes())
+            return {"ram_kb": round(est["arena_bytes"] / 1024, 1), "method": "liveness_analysis",
+                    "peak_activation_kb": round(est["peak_activation_bytes"] / 1024, 1),
+                    "ops": est["ops"]}
         except Exception as e:
-            logger.warning(f"RAM heuristic introspection failed, falling back to size multiplier: {e}")
-            # Documented fallback: TFLite Micro arenas for small CNNs are
-            # commonly observed in the 1.2x-1.8x range of the model's flash
-            # size; we use a conservative 1.5x plus fixed overhead.
-            fallback_kb = (optimized_size_kb * 1.5) + 20
-            return {"ram_kb": round(fallback_kb, 1), "method": "size_multiplier_fallback"}
+            logger.warning(f"Arena liveness analysis failed, falling back to size multiplier: {e}")
+            return {"ram_kb": round(optimized_size_kb * 1.5 + 20, 1), "method": "size_multiplier_fallback"}
 
     def _estimate_on_device_ms(self, measured_host_ms: Optional[float], board_clock_ghz: float) -> Optional[float]:
         """
@@ -193,7 +285,11 @@ class MCUAdvisor:
         if isinstance(comparison, dict) and "optimized" in comparison:
             measured_ms = comparison["optimized"].get("avg_inference_ms")
 
+        tflm = (session.get("metrics") or {}).get("tflm") or {}
         ram_info = (
+            {"ram_kb": round(tflm["arena_bytes"] / 1024, 1), "method": "tflite_micro_measured"}
+            if tflm.get("supported") and tflm.get("arena_bytes") else None
+        ) or (
             self._estimate_ram_usage_kb(str(output_path), model_size_kb)
             if output_path and output_path.exists()
             else {"ram_kb": model_size_kb * 1.5 + 20, "method": "size_multiplier_fallback"}
@@ -217,6 +313,15 @@ class MCUAdvisor:
             suggestions.append("Model may not fit on device. Try pruning, weight clustering, or a smaller base model")
         if ram_info["method"] == "size_multiplier_fallback":
             warnings.append("RAM usage is a rough estimate (could not introspect tensor allocation directly)")
+        tflm_blocked = bool(tflm.get("unsupported_ops")) or (tflm.get("available") and not tflm.get("supported"))
+        if tflm_blocked:
+            warnings.append(
+                "TensorFlow Lite Micro cannot run this model"
+                + (f" (unsupported ops: {', '.join(tflm['unsupported_ops'])})" if tflm.get("unsupported_ops") else "")
+            )
+            suggestions.append("Re-train with a TFLM-friendly architecture or re-run the optimization with this version")
+        if specs.get("internal_sram_kb") and ram_usage_kb > specs["internal_sram_kb"] and board.startswith("ESP32"):
+            suggestions.append("Tensor arena exceeds internal SRAM - the exported sketch allocates it in PSRAM automatically")
 
         if board == "ESP32_S3_N16R8":
             suggestions.append("Store the model in PSRAM to free on-chip SRAM for buffers")
@@ -244,10 +349,11 @@ class MCUAdvisor:
             "estimated_inference_ms_on_device": estimated_on_device_ms,
             "estimation_note": (
                 "On-device latency is a clock-speed-scaled estimate from host timing, "
-                "not a hardware measurement. RAM usage is a heuristic based on tensor "
-                "introspection, not a compiled TFLite Micro arena size."
+                "not a hardware measurement. RAM usage is a liveness-analysis estimate of the "
+                "TFLite Micro tensor arena (peak simultaneous activations plus bookkeeping)."
             ),
             "warnings": warnings,
             "suggestions": suggestions,
-            "deployment_feasible": flash_percentage < 90 and ram_percentage < 90,
+            "deployment_feasible": flash_percentage < 90 and ram_percentage < 90 and not tflm_blocked,
+            "tflm": tflm or None,
         }

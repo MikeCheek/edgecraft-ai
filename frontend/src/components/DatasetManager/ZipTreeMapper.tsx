@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   FolderTree,
   X,
@@ -13,7 +13,6 @@ import {
   Tag,
   Settings2,
   Loader,
-  BoxSelect,
   CheckCircle
 } from 'lucide-react';
 import { useAPI } from '../../hooks/useAPI';
@@ -124,7 +123,7 @@ export function ZipTreeMapper({ uploadId, tree, task, annotationFormat, annotati
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [discoveredClasses, setDiscoveredClasses] = useState<{ name: string, count: number }[]>([]);
-  const [regexError, setRegexError] = useState<string | null>(null);
+  const [regexError] = useState<string | null>(null);
   const [visibleFilesCount, setVisibleFilesCount] = useState<Record<string, number>>({});
 
   const { treeRoot, initialExpanded } = useMemo(() => {
@@ -155,17 +154,6 @@ export function ZipTreeMapper({ uploadId, tree, task, annotationFormat, annotati
   }, [mapping]);
 
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(initialExpanded);
-
-  const uniqueClassesSummary = useMemo(() => {
-    const classesMap: Record<string, number> = {};
-    mapping.forEach((item) => {
-      if (!item.ignore && item.label.trim()) {
-        const normalized = item.label.trim();
-        classesMap[normalized] = (classesMap[normalized] || 0) + item.file_count;
-      }
-    });
-    return Object.entries(classesMap).sort((a, b) => b[1] - a[1]);
-  }, [mapping]);
 
   const toggleFolder = (path: string) => {
     const next = new Set(expandedFolders);

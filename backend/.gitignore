@@ -47,3 +47,7 @@ models/
 # Environment
 .env
 .env.local
+
+# Runtime data
+data_storage/
+optimizations/

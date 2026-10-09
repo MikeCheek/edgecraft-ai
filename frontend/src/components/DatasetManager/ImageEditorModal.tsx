@@ -1,5 +1,6 @@
+import { apiFetch } from '../../config';
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { X, Crop as CropIcon, Check, RefreshCw, Maximize2, BoxSelect, Pencil, Trash2 } from 'lucide-react';
+import { X, Crop as CropIcon, Check, RefreshCw, BoxSelect, Pencil, Trash2 } from 'lucide-react';
 import { BoundingBox } from '../../types';
 import AnnotationOverlay from './AnnotationOverlay';
 import { useAPI } from '../../hooks/useAPI';
@@ -47,7 +48,7 @@ function ImageEditorModal({ imageUrl, sampleId, sampleLabel, annotations, onClos
     setBlobUrl(null);
     setLoadError(false);
 
-    fetch(imageUrl)
+    apiFetch(imageUrl)
       .then(res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.blob();

@@ -105,7 +105,9 @@ success "Standard dependencies installed"
 
 info "Downloading TensorFlow and CUDA wheels (~2 GB, please wait)..."
 # Now install TensorFlow with verbose logs so you can watch the download progress
-uv pip install -v --python .venv/bin/python "tensorflow[and-cuda]==2.17.1"
+uv pip install -v --python .venv/bin/python -r requirements-gpu.txt
+uv pip install --python .venv/bin/python -r requirements-optional.txt || warn "tflite-micro unavailable - TFLM verification disabled"
+rm -f req_fast.txt
 success "Backend dependencies completely installed"
 
 # ── 6. CUDA library path fix ─────────────────────────────────────────────────

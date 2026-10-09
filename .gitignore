@@ -19,13 +19,15 @@ frontend/.env.local
 .DS_Store
 Thumbs.db
 
+# Stray sample / runtime data files
 **.bin
-**.json
+backend/**/*.json
 **.mp3
-**.waw
+**.wav
 
 backend.*
 frontend.*
 
 backend/data_storage/
 .aider*
+backend/req_fast.txt

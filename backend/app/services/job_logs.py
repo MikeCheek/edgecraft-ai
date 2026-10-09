@@ -36,6 +36,7 @@ class JobLogBroker:
         self._buffers: Dict[str, Deque[dict]] = {}
         self._subscribers: Dict[str, List] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._seq: Dict[str, int] = {}
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Called once at app startup so log() can schedule websocket sends
@@ -46,7 +47,11 @@ class JobLogBroker:
         """Append a line to job_id's buffer and push it to any connected
         WebSocket clients. Safe to call from any thread."""
         buf = self._buffers.setdefault(job_id, deque(maxlen=MAX_LINES_PER_JOB))
-        entry = {"ts": time.time(), "level": level, "message": message}
+        # Per-job sequence number lets clients de-duplicate the history that
+        # is replayed when they reconnect.
+        seq = self._seq.get(job_id, 0) + 1
+        self._seq[job_id] = seq
+        entry = {"seq": seq, "ts": time.time(), "level": level, "message": message}
         buf.append(entry)
 
         subs = self._subscribers.get(job_id)
@@ -78,6 +83,7 @@ class JobLogBroker:
     def clear(self, job_id: str) -> None:
         self._buffers.pop(job_id, None)
         self._subscribers.pop(job_id, None)
+        self._seq.pop(job_id, None)
 
 
 # Module-level singleton, imported by trainer.py, optimizer.py, and the

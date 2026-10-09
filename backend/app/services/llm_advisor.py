@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 
+from app import config
 from app.services.shared_state import data_manager
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ def get_provider_config() -> dict:
 
 
 class LLMAdvisor:
-    async def generate_suggestions(self, context, provider="openrouter", model_name="google/gemini-2.0-flash-lite-preview-02-05:free", past_sessions=None):
+    async def generate_suggestions(self, context, provider="openrouter", model_name=config.DEFAULT_OPENROUTER_MODEL, past_sessions=None):
         # 1. Safely Extract Training Context
         # NOTE: `context` here is the raw training session dict returned by
         # Trainer.get_training_status() - a FLAT dict (task, dataset_id,
@@ -143,7 +144,7 @@ class LLMAdvisor:
         The user has run {len(past_sessions)} previous training(s) on the same dataset. Analyze these to identify what worked, what didn't, and avoid repeating failed approaches.
         {json.dumps(past_sessions, indent=2)}
         ''' if past_sessions else ''}
-        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{f' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
+        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
         """
 
         # 6. Dispatch to your LLM API Wrapper (e.g., OpenRouter, OpenAI, or Ollama)
@@ -281,15 +282,16 @@ class LLMAdvisor:
 
     async def get_optimization_advice(
         self, optimization_id: str, board: str,
-        use_local_llm: bool = False, model_name: str = "phi3",
+        provider: str = None, model_name: str = None,
     ) -> dict:
         """
-        Real, grounded advice about deploying a specific completed
-        optimization session to a specific board - pulls the actual
-        model size / compression ratio / measured inference time rather
-        than making generic statements.
+        Board-specific deployment advice grounded in the real optimization
+        session (size, compression ratio, measured accuracy/latency). Uses the
+        chosen LLM provider when given, and always falls back to a
+        rule-based answer (marked source="rules") if the LLM is unavailable.
         """
         from app.services.optimizer import get_session
+        from app.services.mcu_advisor import MCUAdvisor
 
         session = get_session(optimization_id)
         if not session or session.get("status") != "completed":
@@ -300,20 +302,45 @@ class LLMAdvisor:
         ratio = session.get("compression_ratio", 0.0)
         method = session.get("frontend_method", session.get("method"))
         comparison = session.get("comparison") or {}
+        rules = self._rule_based_optimization_advice(board, optimized_kb, original_kb, ratio, method, comparison)
 
-        if use_local_llm:
-            try:
-                from app.services.local_llm_advisor import LocalLLMAdvisor
-                local = LocalLLMAdvisor(model_name=model_name)
-                status = local.get_status()
-                if status.get("available"):
-                    return local.get_optimization_advice(board=board, model_size_kb=optimized_kb)
-            except Exception as e:
-                logger.warning(f"Local LLM optimization advice failed, falling back to rules: {e}")
+        if provider not in ("openrouter", "ollama"):
+            return {**rules, "source": "rules"}
 
-        return self._rule_based_optimization_advice(
-            board, optimized_kb, original_kb, ratio, method, comparison
-        )
+        specs = MCUAdvisor.BOARD_SPECS.get(board, {})
+        facts = {
+            "board": board, "board_specs": {k: specs.get(k) for k in ("name", "ram_kb", "flash_kb", "cpu")},
+            "method": method, "original_float32_tflite_kb": original_kb, "optimized_kb": optimized_kb,
+            "compression_ratio": ratio,
+            "evaluation": {k: v for k, v in comparison.items() if k in ("deltas", "test_split_used", "num_samples_evaluated")},
+            "optimized_metrics": (comparison.get("optimized") or {}).get("metrics", {}).get("per_class"),
+        }
+        messages = [
+            {"role": "system", "content": (
+                "You are an embedded ML deployment expert inside EdgeCraft AI. Respond ONLY with JSON: "
+                '{"summary": str, "strategies": [str], "challenges": [str], "testing": [str]}. '
+                "Ground every point in the numbers provided; 3-5 items per list."
+            )},
+            {"role": "user", "content": json.dumps(facts, indent=2)},
+        ]
+        try:
+            if provider == "openrouter":
+                result = await self._call_openrouter(messages, model_name or config.DEFAULT_OPENROUTER_MODEL)
+            else:
+                if not _ollama_enabled():
+                    raise ValueError("Ollama is not enabled (OLLAMA_ENABLED=true in backend .env).")
+                result = await self._call_ollama(messages, model_name)
+            if isinstance(result, list) and result:
+                result = result[0]
+            if not isinstance(result, dict) or "summary" not in result:
+                raise RuntimeError("LLM response missing 'summary'.")
+            for key in ("strategies", "challenges", "testing"):
+                if not isinstance(result.get(key), list):
+                    result[key] = rules.get(key, [])
+            return {**result, "source": provider}
+        except Exception as e:
+            logger.warning(f"LLM optimization advice failed, using rules: {e}")
+            return {**rules, "source": "rules", "llm_error": str(e)}
 
     @staticmethod
     def _rule_based_optimization_advice(
@@ -368,7 +395,7 @@ class LLMAdvisor:
             "ARDUINO_NANO_33_BLE": {
                 "strategies": [
                     "Maximum INT8 quantisation plus pruning/clustering is strongly recommended",
-                    "Prefer the Custom3LayerCNN / MFCC_CNN architectures over any MobileNet variant",
+                    "Prefer the Custom3LayerCNN (image) or DS_CNN (audio) architectures over any MobileNet variant",
                 ],
                 "challenges": [
                     "256KB RAM is extremely limited for anything beyond tiny models",
@@ -402,7 +429,7 @@ class LLMAdvisor:
 
     async def recommend_training_params(
         self, task: str, dataset_stats: dict, target_board: str = "ESP32_S3_N16R8",
-        provider: str = "openrouter", model_name: str = "google/gemini-2.0-flash-lite-preview-02-05:free",
+        provider: str = "openrouter", model_name: str = config.DEFAULT_OPENROUTER_MODEL,
     ) -> dict:
         """
         Suggest a starting base_model + hyperparameters for a NEW training
@@ -436,8 +463,9 @@ class LLMAdvisor:
         Dataset: {json.dumps(dataset_stats, indent=2)}
 
         Recommend a base_model (from: MobileNetV2, MobileNetV3Small, MobileNetV1_0.25,
-        EfficientNet, ResNet50V2, Custom3LayerCNN for image tasks, or MFCC_CNN, AudioLSTM,
-        AudioGRU for audio tasks) and full hyperparameters optimised for this specific
+        EfficientNet, ResNet50V2, Custom3LayerCNN for image classification / visual wake words;
+        FOMO_MobileNetV2, FOMO_Tiny for object detection; DS_CNN, MFCC_CNN, AudioGRU,
+        AudioLSTM for audio tasks) and full hyperparameters optimised for this specific
         microcontroller's memory constraints, not just for accuracy. Favor smaller,
         efficient architectures when RAM/Flash are tight. If the dataset's image_stats
         show non-uniform aspect ratios or resolutions much larger/smaller than your
@@ -449,28 +477,87 @@ class LLMAdvisor:
             {"role": "user", "content": user_prompt},
         ]
 
-        if provider == "openrouter":
-            result = await self._call_openrouter(messages, model_name)
-        elif provider == "ollama":
-            if not _ollama_enabled():
-                raise ValueError(
-                    "Ollama is not enabled on this backend. Set OLLAMA_ENABLED=true "
-                    "in the backend .env (optionally with OLLAMA_MODEL / OLLAMA_HOST), "
-                    "or switch the provider back to 'openrouter'."
-                )
-            result = await self._call_ollama(messages, model_name)
+        try:
+            if provider == "openrouter":
+                result = await self._call_openrouter(messages, model_name)
+            elif provider == "ollama":
+                if not _ollama_enabled():
+                    raise ValueError(
+                        "Ollama is not enabled on this backend. Set OLLAMA_ENABLED=true "
+                        "in the backend .env (optionally with OLLAMA_MODEL / OLLAMA_HOST)."
+                    )
+                result = await self._call_ollama(messages, model_name)
+            else:
+                raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
+            if isinstance(result, list) and result:
+                result = result[0]
+            if not isinstance(result, dict) or "base_model" not in result:
+                raise RuntimeError(f"LLM response missing 'base_model': {str(result)[:300]}")
+            recommendation = self.validate_training_recommendation(task, result)
+            recommendation["source"] = provider
+            return recommendation
+        except Exception as e:
+            logger.warning(f"LLM training recommendation failed, using rules: {e}")
+            rec = self._rule_based_training_recommendation(task, dataset_stats, target_board)
+            rec["source"] = "rules"
+            rec["llm_error"] = str(e)
+            return rec
+
+    @staticmethod
+    def validate_training_recommendation(task: str, rec: dict) -> dict:
+        """Clamp an LLM recommendation to values the trainer actually supports,
+        so an invented model name or a nonsensical shape can't reach training."""
+        from app.services.model_factory import AUDIO_MODELS, IMAGE_BACKBONES, OD_MODELS, ModelFactory
+        from app.services import preprocessing
+
+        if task in preprocessing.AUDIO_TASKS:
+            allowed = AUDIO_MODELS
+        elif task == "OBJECT_DETECTION":
+            allowed = OD_MODELS
         else:
-            raise ValueError(f"Unknown provider '{provider}'. Expected 'openrouter' or 'ollama'.")
+            allowed = IMAGE_BACKBONES
+        out = dict(rec)
+        notes = []
+        base = ModelFactory.resolve_name(str(rec.get("base_model", "")))
+        if base not in allowed:
+            notes.append(f"'{rec.get('base_model')}' is not available; using {allowed[0]}.")
+            base = allowed[0]
+        out["base_model"] = base
 
-        if isinstance(result, dict) and "base_model" in result:
-            return result
-        if isinstance(result, list) and result and "base_model" in result[0]:
-            return result[0]
+        default_shape = list(preprocessing.default_input_shape(task))
+        shape = rec.get("input_shape")
+        if preprocessing.is_audio_task(task):
+            out["input_shape"] = default_shape  # fixed by the audio front-end
+        else:
+            try:
+                shape = [int(v) for v in shape]
+                if len(shape) != 3 or shape[2] not in (1, 3) or not (16 <= shape[0] <= 320 and 16 <= shape[1] <= 320):
+                    raise ValueError
+                if task == "OBJECT_DETECTION":
+                    shape = [shape[0] - shape[0] % 8, shape[1] - shape[1] % 8, shape[2]]
+                out["input_shape"] = shape
+            except Exception:
+                notes.append(f"Invalid input_shape {shape}; using {default_shape}.")
+                out["input_shape"] = default_shape
 
-        raise RuntimeError(
-            f"LLM response did not contain a usable recommendation (missing 'base_model'). "
-            f"Raw response: {str(result)[:500]}"
-        )
+        def _num(key, lo, hi, default, cast=float):
+            try:
+                v = cast(rec.get(key, default))
+                return min(hi, max(lo, v))
+            except Exception:
+                return default
+
+        out["batch_size"] = _num("batch_size", 1, 256, 16, int)
+        out["epochs"] = _num("epochs", 1, 300, 30, int)
+        out["learning_rate"] = _num("learning_rate", 1e-6, 0.1, 0.001)
+        out["dropout_rate"] = _num("dropout_rate", 0.0, 0.9, 0.3)
+        aug = rec.get("augmentation") if isinstance(rec.get("augmentation"), dict) else {}
+        out["augmentation"] = {k: v for k, v in aug.items() if k in (
+            "horizontal_flip", "vertical_flip", "random_rotation", "random_zoom",
+            "random_translation", "random_brightness", "random_contrast")}
+        if notes:
+            out["reasoning"] = (str(rec.get("reasoning", "")) + " [Adjusted: " + " ".join(notes) + "]").strip()
+        return out
 
     @staticmethod
     def _rule_based_training_recommendation(task: str, dataset_stats: dict, target_board: str) -> dict:
@@ -483,9 +570,14 @@ class LLMAdvisor:
         is_audio = task in ("AUDIO_CLASSIFICATION", "KEYWORD_SPOTTING")
         sample_count = dataset_stats.get("sample_count", 0)
 
+        from app.services import preprocessing
+
         if is_audio:
-            base_model = "MFCC_CNN"
-            input_shape = [40, 101, 1] if task == "KEYWORD_SPOTTING" else [64, 101, 1]
+            base_model = "DS_CNN"
+            input_shape = list(preprocessing.default_input_shape(task))
+        elif task == "OBJECT_DETECTION":
+            base_model = "FOMO_Tiny" if is_tiny_board else "FOMO_MobileNetV2"
+            input_shape = [96, 96, 1] if is_tiny_board else [96, 96, 3]
         elif task == "VISUAL_WAKE_WORDS":
             base_model = "Custom3LayerCNN" if is_tiny_board else "MobileNetV3Small"
             input_shape = [96, 96, 1]
@@ -512,7 +604,7 @@ class LLMAdvisor:
             "epochs": epochs,
             "learning_rate": 0.001,
             "dropout_rate": dropout_rate,
-            "augmentation": {"horizontal_flip": True, "random_rotation": 0.1} if not is_audio else {},
+            "augmentation": {"horizontal_flip": True, "random_rotation": 0.1} if task in ("IMAGE_CLASSIFICATION", "VISUAL_WAKE_WORDS") else {},
             "reasoning": (
                 f"{target_board} has ~{ram_kb}KB RAM, so a "
                 f"{'very compact custom CNN' if is_tiny_board else 'lightweight MobileNet variant'} "

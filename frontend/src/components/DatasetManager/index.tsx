@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Trash2, RefreshCw, Database, Edit2, Check, X,
-  Eye, Tags, Download, Upload, AlertTriangle, Shuffle
+  Eye, Tags, Download, Upload, AlertTriangle, Shuffle, ShieldCheck
 } from 'lucide-react';
 import { CardSkeleton } from '../Skeleton';
 import { useAPI, API_BASE } from '../../hooks/useAPI';
+import { withAuthQuery } from '../../config';
 import { useToast } from '../../context/ToastContext';
 import { TinyMLTask, DatasetInfo } from '../../types';
 import ClassManager from './ClassManager';
 import DataImporter from './DataImporter';
 import DatasetExplorer from './DatasetExplorer';
+import QualityPanel from './QualityPanel';
 
 interface DatasetManagerProps {
   task: TinyMLTask;
@@ -36,6 +38,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const [editName, setEditName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [expandedUpload, setExpandedUpload] = useState<string | null>(null);
+  const [expandedQuality, setExpandedQuality] = useState<string | null>(null);
   const [expandedClasses, setExpandedClasses] = useState<string | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
 
@@ -127,7 +130,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const handleExportFull = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`full-${dataset.id}`);
-    try { window.location.href = `${API_BASE}/datasets/export/full/${dataset.id}`; }
+    try { window.location.href = withAuthQuery(`${API_BASE}/datasets/export/full/${dataset.id}`); }
     catch { toast('error', 'Export failed'); }
     finally { setExportingId(null); }
   };
@@ -135,7 +138,7 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
   const handleExportSplit = async (dataset: DatasetInfo, e: React.MouseEvent) => {
     e.stopPropagation();
     setExportingId(`split-${dataset.id}`);
-    try { window.location.href = `${API_BASE}/datasets/export/split/${dataset.id}`; }
+    try { window.location.href = withAuthQuery(`${API_BASE}/datasets/export/split/${dataset.id}`); }
     catch { toast('error', 'Export failed'); }
     finally { setExportingId(null); }
   };
@@ -153,7 +156,9 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
     try {
       const res = await apiClient.getSplitSummary(datasetId);
       setSplitSummaries(prev => ({ ...prev, [datasetId]: res.summary }));
-    } catch { }
+    } catch {
+      /* summary refresh is best-effort; the list reloads on the next change */
+    }
     onDatasetChanged?.();
   };
 
@@ -330,6 +335,10 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                           className={`p-1.5 rounded-lg transition ${expandedClasses === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quick Classes">
                           <Tags className="w-4 h-4" />
                         </button>
+                        <button onClick={() => setExpandedQuality(prev => prev === dataset.id ? null : dataset.id)}
+                          className={`p-1.5 rounded-lg transition ${expandedQuality === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Quality check" aria-label="Quality check">
+                          <ShieldCheck className="w-4 h-4" />
+                        </button>
                         <button onClick={() => setExpandedUpload(prev => prev === dataset.id ? null : dataset.id)}
                           className={`p-1.5 rounded-lg transition ${expandedUpload === dataset.id ? 'bg-slate-700 text-white' : 'text-gray-400 hover:text-white'}`} title="Upload & Import">
                           <Upload className="w-4 h-4" />
@@ -358,10 +367,16 @@ export function DatasetManager({ task, onDatasetChanged }: DatasetManagerProps) 
                   </div>
                 )}
 
+                {expandedQuality === dataset.id && (
+                  <div className="px-4 pb-4 pt-3 border-t border-slate-700 bg-slate-900/20">
+                    <QualityPanel datasetId={dataset.id} onChanged={() => { fetchDatasets(); onDatasetChanged?.(); }} />
+                  </div>
+                )}
+
                 {expandedUpload === dataset.id && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-700 bg-slate-900/20">
                     <DataImporter datasetId={dataset.id} task={task}
-                      onImportSuccess={(newId) => { fetchDatasets(); onDatasetChanged?.(); }} />
+                      onImportSuccess={() => { fetchDatasets(); onDatasetChanged?.(); }} />
                   </div>
                 )}
               </div>

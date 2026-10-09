@@ -260,7 +260,7 @@ function DatasetExplorer({ dataset, apiBase, onClose, onChanged }: ExplorerProps
 
         {viewingSample && (
           <ImageEditorModal
-            imageUrl={`/api/datasets/image/${viewingSample.id}${viewingSample.updated_at ? `?v=${viewingSample.updated_at}` : ''}`}
+            imageUrl={`${apiBase}/datasets/image/${viewingSample.id}${viewingSample.updated_at ? `?v=${viewingSample.updated_at}` : ''}`}
             sampleId={viewingSample.id}
             sampleLabel={viewingSample.label}
             annotations={viewingSample.annotations}

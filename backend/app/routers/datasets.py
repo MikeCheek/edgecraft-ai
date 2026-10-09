@@ -10,13 +10,12 @@ import zipfile
 import asyncio
 import shutil
 import json
-import queue
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from app.utils.zip_processor import extract_zip_with_mapping, scan_zip_tree
 from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, Body
-from fastapi.responses import Response, FileResponse, StreamingResponse
+from fastapi.responses import Response, FileResponse
 from starlette.background import BackgroundTasks
+from app import config
 from app.services.shared_state import data_manager
 import time
 
@@ -27,8 +26,28 @@ _DISK_EXECUTOR = ThreadPoolExecutor(max_workers=min(32, (os.cpu_count() or 1) + 
 
 router = APIRouter()
 
-CHUNK_DIR = os.path.join(tempfile.gettempdir(), "edgecraft_chunks")
+CHUNK_DIR = str(config.UPLOAD_DIR)
 os.makedirs(CHUNK_DIR, exist_ok=True)
+
+MAX_UPLOAD_BYTES = config.MAX_UPLOAD_MB * 1024 * 1024
+MAX_CHUNK_BYTES = config.MAX_CHUNK_MB * 1024 * 1024
+MAX_SAMPLE_BYTES = config.MAX_SAMPLE_MB * 1024 * 1024
+_UPLOAD_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _upload_dir(upload_id: str) -> str:
+    """Directory for a chunked upload. upload_id comes from the URL/body, so
+    it must be a server-issued UUID - anything else (e.g. "..") would let a
+    request read or delete arbitrary directories."""
+    if not _UPLOAD_ID_RE.match(upload_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid upload id")
+    return os.path.join(CHUNK_DIR, upload_id)
+
+
+def _safe_component(part: str) -> str:
+    """One path component for an exported ZIP entry (no traversal)."""
+    part = str(part).replace("\\", "_").replace("/", "_").strip()
+    return part if part not in ("", ".", "..") else "_"
 
 UPLOAD_TRACKER: dict[str, int] = {}
 WRITE_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB
@@ -103,6 +122,26 @@ async def update_dataset_metadata(
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+@router.get("/{dataset_id}/quality")
+async def dataset_quality(dataset_id: str):
+    """Class balance, split coverage, duplicates / train-test leakage,
+    unreadable files and annotation problems, as a list of issues."""
+    from app.services.dataset_quality import analyze_dataset
+
+    try:
+        return {"status": "success", "report": await _run_in_executor(analyze_dataset, dataset_id)}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{dataset_id}/remove_duplicates")
+async def dataset_remove_duplicates(dataset_id: str):
+    from app.services.dataset_quality import remove_duplicates
+
+    removed = await _run_in_executor(remove_duplicates, dataset_id)
+    return {"status": "success", "removed": removed}
+
+
 @router.get("/{dataset_id}/image_stats")
 async def get_dataset_image_stats(dataset_id: str):
     """Aggregate image size / aspect-ratio / storage stats for a dataset -
@@ -139,7 +178,9 @@ async def upload_dataset_sample(
     file: UploadFile = File(...),
 ):
     try:
-        content = await file.read()
+        content = await file.read(MAX_SAMPLE_BYTES + 1)
+        if len(content) > MAX_SAMPLE_BYTES:
+            return {"status": "error", "message": f"File exceeds the {config.MAX_SAMPLE_MB} MB limit."}
         ext = os.path.splitext(file.filename or "")[1].lower()
         width, height = (None, None)
         if ext in IMAGE_EXTENSIONS:
@@ -178,6 +219,7 @@ async def upload_folder(
         parse_yolo_classes,
         parse_voc_xml,
         parse_csv_annotations,
+        parse_coco_json,
     )
 
     total_processed = 0
@@ -333,7 +375,7 @@ async def upload_folder(
 @router.delete("/upload_zip/{upload_id}")
 async def abort_zip_upload(upload_id: str):
     """Abort an in-progress chunked ZIP upload, cleaning up chunks on disk."""
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     if os.path.isdir(upload_dir):
         shutil.rmtree(upload_dir, ignore_errors=True)
     UPLOAD_TRACKER.pop(upload_id, None)
@@ -347,6 +389,10 @@ async def init_zip_upload(
     total_chunks: int = Body(...),
     file_size: int = Body(...),
 ):
+    if file_size <= 0 or file_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Upload exceeds the {config.MAX_UPLOAD_MB} MB limit.")
+    if total_chunks <= 0 or total_chunks > 100000:
+        raise HTTPException(status_code=400, detail="Invalid chunk count.")
     upload_id = str(uuid.uuid4())
     upload_dir = os.path.join(CHUNK_DIR, upload_id)
     os.makedirs(upload_dir, exist_ok=True)
@@ -369,15 +415,20 @@ async def init_zip_upload(
 
 async def _upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Request):
     t_start = time.perf_counter()
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     if not os.path.isdir(upload_dir):
         raise HTTPException(status_code=404, detail=f"Unknown session: {upload_id}")
 
+    if chunk_index < 0 or chunk_index > 100000:
+        raise HTTPException(status_code=400, detail="Invalid chunk index")
     chunk_path = os.path.join(upload_dir, f"chunk_{chunk_index:06d}")
 
-    # 1. Measure Network/Streaming Time
     t_net_start = time.perf_counter()
-    chunk_data = await request.body()
+    chunk_data = bytearray()
+    async for part in request.stream():
+        chunk_data.extend(part)
+        if len(chunk_data) > MAX_CHUNK_BYTES:
+            raise HTTPException(status_code=413, detail=f"Chunk exceeds the {config.MAX_CHUNK_MB} MB limit.")
     t_net_end = time.perf_counter()
 
     # Write it directly to disk in one shot using the optimized disk executor
@@ -406,7 +457,7 @@ async def upload_zip_chunk_put(upload_id: str, chunk_index: int, request: Reques
 
 @router.get("/upload_zip/status/{upload_id}")
 async def zip_upload_status(upload_id: str):
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     if not os.path.isdir(upload_dir):
         raise HTTPException(status_code=404, detail=f"Unknown upload session: {upload_id}")
 
@@ -420,169 +471,12 @@ async def zip_upload_status(upload_id: str):
     received = await _run_in_executor(_scan)
     return {"status": "success", "upload_id": upload_id, "received_chunks": received}
 
-def _assemble_and_process_zip(upload_dir: str, total_chunks: int, dataset_id: str, task: str) -> int:
-    # NOTE: kept for backward compatibility - not currently called by any
-    # route. The active flow is finalize -> scan_zip_tree -> (user maps
-    # folders in the UI) -> process_zip_upload -> extract_zip_with_mapping.
-    assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
-
-    # Assemble chunks into a single file from CHUNK_DIR/{upload_id}
-    with open(assembled_zip_path, "wb") as outfile:
-        for i in range(total_chunks):
-            chunk_path = os.path.join(upload_dir, f"chunk_{i:06d}")
-            if not os.path.exists(chunk_path):
-                raise ValueError(f"Missing chunk index {i}")
-
-            with open(chunk_path, "rb") as infile:
-                shutil.copyfileobj(infile, outfile, length=WRITE_BUFFER_SIZE)
-
-    valid_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav"}
-    total_processed = 0
-
-    # Normalized mapping for recognized split folder names
-    split_mapping = {
-        "train": "train",
-        "val": "val",
-        "valid": "val",
-        "validation": "val",
-        "test": "test"
-    }
-
-    # Batched extraction
-    # Pre-split and cache lookup sets to reduce runtime string parsing overhead
-    split_set = {"train", "val", "valid", "validation", "test"}
-
-    with zipfile.ZipFile(assembled_zip_path, 'r') as z:
-        # Filter out junk quickly with a lightweight list comprehension
-        valid_items = [
-            info for info in z.infolist()
-            if not info.is_dir()
-            and not info.filename.startswith("__MACOSX")
-            and not info.filename.split("/")[-1].startswith(".")
-        ]
-
-        if not valid_items:
-            raise ValueError("Archive has no valid assets.")
-
-        # Pre-calculate tree structure once instead of per-iteration to maintain prior high-speeds
-        first_parts = {info.filename.split("/")[0] for info in valid_items}
-        has_files_at_root = any("/" not in info.filename for info in valid_items)
-        has_common_root = len(first_parts) == 1 and not has_files_at_root
-
-        file_data_list = []
-        q = queue.Queue(maxsize=4)
-
-        def _writer():
-            while True:
-                batch = q.get()
-                if batch is None:
-                    break
-                data_manager.bulk_add_samples(dataset_id, task, batch)
-                total_processed_ref[0] += len(batch)
-
-        total_processed_ref = [0]
-        writer_thread = threading.Thread(target=_writer, daemon=True)
-        writer_thread.start()
-        for info in valid_items:
-            # Quick structural validation splitting
-            parts = [p for p in info.filename.split("/") if p]
-            if not parts:
-                continue
-
-            filename = parts[-1]
-            ext = os.path.splitext(filename)[1].lower()
-            if ext not in valid_extensions:
-                continue
-
-            split = "unassigned"
-            label = "unknown"
-
-            # Optimization: Fast checks using direct lookups instead of deep list mutations
-            p0_lower = parts[0].lower()
-            if p0_lower in split_set:
-                if len(parts) >= 3:
-                    split = split_mapping.get(p0_lower, "unassigned")
-                    label = parts[1]
-            elif len(parts) >= 4 and parts[1].lower() in split_set:
-                split = split_mapping.get(parts[1].lower(), "unassigned")
-                label = parts[2]
-            else:
-                # Fallback to the original flat extraction logic style
-                if has_common_root:
-                    if len(parts) >= 3:
-                        label = parts[1]
-                else:
-                    if len(parts) >= 2:
-                        label = parts[0]
-
-                size = info.file_size
-                buf = bytearray(size)
-                mv = memoryview(buf)
-                pos = 0
-                with z.open(info) as extracted_file:
-                    while pos < size:
-                        n = extracted_file.readinto(mv[pos:])
-                        if not n:
-                            break
-                        pos += n
-                content = bytes(buf)
-            file_data_list.append({
-                    "label": label,
-                    "filename": filename,
-                    "content": content,
-                    "split": split
-                })
-
-            if len(file_data_list) >= ZIP_PROCESSING_BATCH_SIZE:
-                q.put(file_data_list[:])
-                file_data_list.clear()
-                total_processed += len(file_data_list)
-                file_data_list.clear()
-
-    shutil.rmtree(upload_dir, ignore_errors=True)
-    return total_processed
-
-def clean_dataset_directory(dataset_dir):
-    # TensorFlow supported formats
-    valid_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif'}
-    removed_count = 0
-
-    for root, dirs, files in os.walk(dataset_dir):
-        for file in files:
-            file_path = os.path.join(root, file)
-
-            # 1. Remove hidden/system files immediately
-            if file.startswith('.') or file.lower() == 'thumbs.db':
-                logger.info(f"Removing hidden file: {file_path}")
-                os.remove(file_path)
-                removed_count += 1
-                continue
-
-            # 2. Check if the extension is strictly valid
-            ext = os.path.splitext(file)[1].lower()
-            if ext not in valid_extensions:
-                logger.info(f"Removing unsupported format: {file_path}")
-                os.remove(file_path)
-                removed_count += 1
-                continue
-
-            # 3. Open the file to verify header integrity (catches fake/corrupt images)
-            try:
-                with Image.open(file_path) as img:
-                    img.verify() # Reads the header, doesn't load whole image into memory
-            except Exception as e:
-                logger.info(f"Removing corrupted image: {file_path} - {e}")
-                os.remove(file_path)
-                removed_count += 1
-
-    logger.info(f"Cleanup finished! Removed {removed_count} invalid files.")
-
 @router.post("/upload_zip/finalize")
 async def finalize_zip_upload(
     upload_id: str = Body(...),
     total_chunks: int = Body(...),
 ):
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     if not os.path.isdir(upload_dir):
         raise HTTPException(status_code=404, detail="Upload target expired or missing")
 
@@ -593,12 +487,19 @@ async def finalize_zip_upload(
     if meta["total_chunks"] != total_chunks:
         raise HTTPException(status_code=400, detail="Incomplete stream packet data loss detected")
 
+    missing = [i for i in range(total_chunks) if not os.path.exists(os.path.join(upload_dir, f"chunk_{i:06d}"))]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing chunks: {missing[:20]}")
+
     try:
-        # Assemble chunks into a single file
         assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
+        total = 0
         with open(assembled_zip_path, "wb") as outfile:
             for i in range(total_chunks):
                 chunk_path = os.path.join(upload_dir, f"chunk_{i:06d}")
+                total += os.path.getsize(chunk_path)
+                if total > MAX_UPLOAD_BYTES:
+                    raise ValueError(f"Upload exceeds the {config.MAX_UPLOAD_MB} MB limit.")
                 with open(chunk_path, "rb") as infile:
                     shutil.copyfileobj(infile, outfile, length=WRITE_BUFFER_SIZE)
 
@@ -621,7 +522,7 @@ async def preview_zip_regex(
     upload_id: str = Body(...),
     regex_pattern: str = Body(...)
 ):
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
 
     if not os.path.exists(assembled_zip_path):
@@ -679,7 +580,7 @@ async def process_zip_upload(
     what happened instead of a silent mismatch between "preview" and
     "apply".
     """
-    upload_dir = os.path.join(CHUNK_DIR, upload_id)
+    upload_dir = _upload_dir(upload_id)
     assembled_zip_path = os.path.join(upload_dir, "assembled_dataset.zip")
 
     if not os.path.exists(assembled_zip_path):
@@ -767,11 +668,12 @@ def _build_export_zip(samples: list, dataset_name: str, mode: str) -> str:
         for s in samples:
             data = data_manager.get_sample_data(s["id"])
             if data:
+                label = _safe_component(s["label"])
+                fname = _safe_component(os.path.basename(s["filename"] or s["id"]))
                 if mode == "split":
-                    split_dir = s.get("split", "unassigned")
-                    arc_path = f"{split_dir}/{s['label']}/{s['filename']}"
+                    arc_path = f"{_safe_component(s.get('split', 'unassigned'))}/{label}/{fname}"
                 else:
-                    arc_path = f"{s['label']}/{s['filename']}"
+                    arc_path = f"{label}/{fname}"
                 zip_file.writestr(arc_path, data)
     return temp_zip_path
 

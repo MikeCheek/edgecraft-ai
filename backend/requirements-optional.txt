@@ -1,0 +1,4 @@
+# Runs exported models in the real TensorFlow Lite Micro interpreter during
+# optimization: verifies op support and measures the exact tensor arena.
+# Linux/macOS wheels only.
+tflite-micro>=0.dev0

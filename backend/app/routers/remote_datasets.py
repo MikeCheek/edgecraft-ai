@@ -1,17 +1,15 @@
 import os
 import uuid
 import shutil
-import tempfile
 import zipfile
 import asyncio
 import json
-import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from app.utils.zip_processor import extract_zip_with_mapping, scan_zip_tree
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -22,8 +20,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="remote_dl")
-DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "edgecraft_remote_downloads")
+from app import config
+
+DOWNLOAD_DIR = str(config.REMOTE_DOWNLOAD_DIR)
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+MAX_DOWNLOAD_BYTES = config.MAX_UPLOAD_MB * 1024 * 1024
+
+
+def _download_dir(download_id: str) -> str:
+    """Every download lives in its own directory, so cleaning one up can
+    never touch another (previously URL / Hugging Face ZIPs sat directly in
+    the shared folder and processing one deleted the whole folder)."""
+    path = os.path.join(DOWNLOAD_DIR, download_id)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".wav"}
 ZIP_PROCESSING_BATCH_SIZE = 500
@@ -153,7 +163,6 @@ async def download_stream(
     _state = {"dataset_id": dataset_id}
 
     async def event_generator():
-        download_path = None
         download_dir = None
         try:
             # Auto-create dataset if dataset_id not provided
@@ -184,7 +193,6 @@ async def download_stream(
                 result: dict = {}
                 async for downloaded, total in _download_from_url_stream(url, did, task, download_id, result):
                     yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
-                download_path = result.get("path")
                 yield _sse_event({"type": "processing", "message": "Extracting archive..."})
                 yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id"), "annotation_format": result.get("annotation_format"), "annotation_classes": result.get("annotation_classes", [])})
                 yield _sse_event({"type": "complete", "count": 0})
@@ -269,13 +277,15 @@ async def download_stream(
             logger.exception(f"Download stream error ({source})")
             yield _sse_event({"type": "error", "message": str(e)})
         finally:
+            # Keep the files only while a ZIP is waiting for the user to map
+            # its folders (POST /process cleans up after that); otherwise
+            # (error, cancel, direct import) remove this download's directory.
             info = _active_downloads.get(download_id, {})
             if not info.get("zip_path"):
                 _active_downloads.pop(download_id, None)
-            if download_path and os.path.exists(download_path):
-                os.remove(download_path)
-            if download_dir and os.path.exists(download_dir):
-                shutil.rmtree(download_dir, ignore_errors=True)
+                shutil.rmtree(os.path.join(DOWNLOAD_DIR, download_id), ignore_errors=True)
+                if download_dir and os.path.exists(download_dir):
+                    shutil.rmtree(download_dir, ignore_errors=True)
 
     return StreamingResponse(
         event_generator(),
@@ -406,7 +416,9 @@ async def _download_from_url_stream(
     """
     import httpx
 
-    download_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError("Only http(s) URLs are supported.")
+    download_path = os.path.join(_download_dir(download_id), "download.zip")
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=600) as client:
         async with client.stream("GET", url) as response:
@@ -414,6 +426,8 @@ async def _download_from_url_stream(
                 raise ValueError(f"HTTP {response.status_code}: {response.reason_phrase} — check URL is a direct download link")
 
             total = int(response.headers.get("content-length", 0))
+            if total > MAX_DOWNLOAD_BYTES:
+                raise ValueError(f"Download is larger than the {config.MAX_UPLOAD_MB} MB limit.")
             downloaded = 0
 
             with open(download_path, "wb") as f:
@@ -422,6 +436,8 @@ async def _download_from_url_stream(
                         raise ValueError("Download canceled by user")
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > MAX_DOWNLOAD_BYTES:
+                        raise ValueError(f"Download is larger than the {config.MAX_UPLOAD_MB} MB limit.")
                     _active_downloads[download_id]["downloaded"] = downloaded
                     _active_downloads[download_id]["total"] = total
                     yield downloaded, total  # <-- this is what was missing
@@ -491,7 +507,8 @@ def _kaggle_download_thread(
         except Exception:
             total = 0
 
-        download_dir = os.path.join(DOWNLOAD_DIR, download_id)
+        download_root = _download_dir(download_id)
+        download_dir = os.path.join(download_root, "raw")
         os.makedirs(download_dir, exist_ok=True)
 
         stop_polling = threading.Event()
@@ -553,7 +570,8 @@ def _huggingface_download_thread(
     try:
         from huggingface_hub import snapshot_download  # type: ignore
 
-        download_dir = os.path.join(DOWNLOAD_DIR, download_id)
+        download_root = _download_dir(download_id)
+        download_dir = os.path.join(download_root, "raw")
         os.makedirs(download_dir, exist_ok=True)
 
         stop_polling = threading.Event()
@@ -589,7 +607,7 @@ def _huggingface_download_thread(
             raise ValueError("Download canceled by user")
 
         # 1. FIX: HF downloads raw files. We need to zip them for `zip_processor.py`.
-        zip_path = os.path.join(DOWNLOAD_DIR, f"{download_id}.zip")
+        zip_path = os.path.join(download_root, "dataset.zip")
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for root, _, files in os.walk(download_dir):
                 # Ignore .git and .cache folders that huggingface_hub creates
@@ -786,10 +804,10 @@ async def process_remote_zip(req: ProcessRemoteRequest):
             extract_zip_with_mapping,
             info["zip_path"], req.dataset_id, req.task, req.mapping
         )
-        # Clean up
-        base_dir = os.path.dirname(info["zip_path"])
-        if "edgecraft_remote_downloads" in base_dir:
-            shutil.rmtree(base_dir, ignore_errors=True)
+        # Clean up only this download's own directory.
+        own_dir = os.path.abspath(os.path.join(DOWNLOAD_DIR, req.download_id))
+        if os.path.commonpath([own_dir, os.path.abspath(info["zip_path"])]) == own_dir:
+            shutil.rmtree(own_dir, ignore_errors=True)
         _active_downloads.pop(req.download_id, None)
 
         count = result["processed"] if isinstance(result, dict) else result

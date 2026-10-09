@@ -1,8 +1,12 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 import io
+
+from app import config
+from app.services.job_queue import job_queue
 
 from app.services.shared_state import trainer
 from app.services.mcu_advisor import MCUAdvisor
@@ -15,7 +19,8 @@ from app.services.optimizer import (
     get_optimization_result,
     get_output_path,
     list_optimization_sessions,
-    OPTIMIZATION_DIR,
+    cancel_optimization,
+    delete_optimization,
 )
 from app.services import exporter
 
@@ -37,6 +42,7 @@ FRONTEND_TO_INTERNAL_METHOD = {
     "DYNAMIC_QUANTIZATION": "dynamic_range",
     "PRUNING": "pruning",
     "WEIGHT_CLUSTERING": "weight_clustering",
+    # Kept only so old clients get a clear error message (see optimizer).
     "TRANSFER_LEARNING": "transfer_learning",
 }
 INTERNAL_TO_FRONTEND_METHOD = {v: k for k, v in FRONTEND_TO_INTERNAL_METHOD.items()}
@@ -57,8 +63,13 @@ def _to_internal_method(method: str) -> str:
 class OptimizationRequest(BaseModel):
     training_id: str
     method: str
-    sparsity_level: float = 0.5
-    representative_dataset_size: int = 100
+    sparsity_level: float = Field(0.5, ge=0.0, lt=1.0)
+    representative_dataset_size: int = 100  # accepted for back-compat; calibration uses up to 200 real samples
+    # Pruning / clustering only: epochs of fine-tuning on the real training
+    # set (with pruning masks enforced) and the follow-up quantization.
+    fine_tune_epochs: int = Field(2, ge=0, le=50)
+    quantization: str = "dynamic"  # "dynamic" | "int8" | "none"
+    num_clusters: int = Field(16, ge=2, le=256)
 
 class BoardEvaluationRequest(BaseModel):
     optimization_id: str
@@ -67,13 +78,15 @@ class BoardEvaluationRequest(BaseModel):
 class LLMSuggestRequest(BaseModel):
     training_id: str
     provider: str = "openrouter"
-    model_name: str = "openrouter/free"
+    model_name: str = config.DEFAULT_OPENROUTER_MODEL
     past_sessions: Optional[List[dict]] = None
 
 class LLMOptimizeRequest(BaseModel):
     optimization_id: str
     board: str
-    use_local_llm: bool = False
+    provider: Optional[str] = None  # "openrouter" | "ollama" | None (rule-based)
+    model_name: Optional[str] = None
+    use_local_llm: bool = False  # legacy alias for provider="ollama"
     local_model_name: str = "phi3"
 # -----------------------
 # NOTE: pre-training recommendations (base_model/hyperparameter suggestions
@@ -82,20 +95,37 @@ class LLMOptimizeRequest(BaseModel):
 # an already-optimized model.
 
 @router.post("/quantize")
-async def quantize_model(
-    request: OptimizationRequest, background_tasks: BackgroundTasks
-):
+async def quantize_model(request: OptimizationRequest):
     internal_method = _to_internal_method(request.method)
+    if request.training_id not in trainer.training_sessions:
+        raise HTTPException(status_code=404, detail="Training session not found.")
     optimization_id = create_optimization_session(
         training_id=request.training_id,
         method=internal_method,
         sparsity_level=request.sparsity_level,
         frontend_method=request.method,
+        fine_tune_epochs=request.fine_tune_epochs,
+        quantization=request.quantization,
+        num_clusters=request.num_clusters,
     )
-    background_tasks.add_task(
-        optimize, optimization_id, trainer.storage_dir
-    )
-    return {"status": "success", "optimization_id": optimization_id}
+    job_queue.submit(optimization_id, optimize, optimization_id)
+    return {"status": "success", "optimization_id": optimization_id,
+            "queue_position": job_queue.position(optimization_id)}
+
+@router.post("/cancel/{optimization_id}")
+async def cancel_optimization_job(optimization_id: str):
+    if not cancel_optimization(optimization_id):
+        return {"status": "error", "message": "Only queued optimizations can be cancelled."}
+    return {"status": "success"}
+
+@router.delete("/session/{optimization_id}")
+async def delete_optimization_session(optimization_id: str):
+    try:
+        if not delete_optimization(optimization_id):
+            raise HTTPException(status_code=404, detail="Optimization session not found.")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"status": "success"}
 
 @router.get("/history")
 async def get_optimization_history():
@@ -116,7 +146,7 @@ async def get_active_optimization(training_id: str = None):
     """
     try:
         sessions = list_optimization_sessions()
-        active = [s for s in sessions if s.get("status") == "running"]
+        active = [s for s in sessions if s.get("status") in ("queued", "running")]
         if training_id:
             active = [s for s in active if s.get("training_id") == training_id]
         active.sort(key=lambda s: s.get("created_at", 0), reverse=True)
@@ -168,7 +198,7 @@ async def export_as_c_array(optimization_id: str):
     """Real C array generated from the actual optimized model bytes
     (previously this returned a placeholder 0x00,0x01,0x02... array)."""
     try:
-        return {"status": "success", "c_array": exporter.generate_c_array_only(optimization_id)}
+        return {"status": "success", "c_array": await run_in_threadpool(exporter.generate_c_array_only, optimization_id)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -204,6 +234,9 @@ class ExportConfigRequest(BaseModel):
     #   "cs": .., "dc": .., "rst": .., "sck": .., "mosi": .., "backlight": ..  # optional pin overrides
     # }
     display_config: Optional[dict] = None
+    # Audio models only: {"module_preset": "INMP441_ESP32_S3" | "INMP441_ESP32" | "NONE",
+    #                     "enabled": bool, "sck": .., "ws": .., "sd": ..}
+    mic_config: Optional[dict] = None
 
 @router.post("/export/{optimization_id}")
 async def export_project(optimization_id: str, request: ExportConfigRequest):
@@ -212,11 +245,13 @@ async def export_project(optimization_id: str, request: ExportConfigRequest):
     configuration (a named camera module preset or hand-wired pins, and an
     optional attached status display, also from a named preset)."""
     try:
-        zip_bytes = exporter.generate_export_package(
+        zip_bytes = await run_in_threadpool(
+            exporter.generate_export_package,
             optimization_id, request.board,
             camera_pins=request.camera_pins,
             display_config=request.display_config,
             camera_config=request.camera_config,
+            mic_config=request.mic_config,
         )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -237,11 +272,13 @@ async def preview_export_sketch(optimization_id: str, request: ExportConfigReque
     """Return just the generated .ino source (no zip) so the Deployment tab
     can show a live 'ready to flash' preview as pin values are edited."""
     try:
-        sketch = exporter.preview_sketch(
+        sketch = await run_in_threadpool(
+            exporter.preview_sketch,
             optimization_id, request.board,
             camera_pins=request.camera_pins,
             display_config=request.display_config,
             camera_config=request.camera_config,
+            mic_config=request.mic_config,
         )
         return {"status": "success", "sketch": sketch}
     except Exception as e:
@@ -250,9 +287,8 @@ async def preview_export_sketch(optimization_id: str, request: ExportConfigReque
 @router.post("/evaluate-board")
 async def evaluate_for_board(request: BoardEvaluationRequest):
     try:
-        recommendation = mcu_advisor.evaluate_model(
-            optimization_id=request.optimization_id,
-            board=request.board,
+        recommendation = await run_in_threadpool(
+            mcu_advisor.evaluate_model, request.optimization_id, request.board
         )
         return {"status": "success", "recommendation": recommendation}
     except Exception as e:
@@ -269,7 +305,7 @@ async def get_supported_boards():
 async def get_llm_status():
     """Check whether a local Ollama LLM is available."""
     try:
-        return {"status": "success", "llm": local_llm.get_status()}
+        return {"status": "success", "llm": await run_in_threadpool(local_llm.get_status)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -310,11 +346,12 @@ async def get_llm_optimization_advice(request: LLMOptimizeRequest):
     """Board-specific deployment advice grounded in the real optimization
     session (size, compression ratio, measured test-set inference time)."""
     try:
+        provider = request.provider or ("ollama" if request.use_local_llm else None)
         advice = await llm_advisor.get_optimization_advice(
             optimization_id=request.optimization_id,
             board=request.board,
-            use_local_llm=request.use_local_llm,
-            model_name=request.local_model_name,
+            provider=provider,
+            model_name=request.model_name or (request.local_model_name if provider == "ollama" else None),
         )
         return {"status": "success", "advice": advice}
     except Exception as e:

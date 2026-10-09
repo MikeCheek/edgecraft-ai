@@ -3,37 +3,33 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - DEBUG=true
-      # NOTE: CORS origins are currently hardcoded in app/main.py, not read
-      # from env. If you add `http://localhost` there (for the dockerized
-      # frontend on port 80), you can drop this var — it's a no-op today.
-      - ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost
-      # Needed if you want OpenRouter LLM suggestions to work from inside Docker.
-      # Put OPENROUTER_API_KEY in backend/.env (kept out of this file / git).
+    # Only reachable through the frontend's nginx by default. Uncomment to
+    # expose the API directly (then set EDGECRAFT_API_TOKEN in backend/.env).
+    # ports:
+    #   - "127.0.0.1:8000:8000"
     env_file:
       - ./backend/.env
+    environment:
+      - EDGECRAFT_STORAGE_DIR=/data
     volumes:
-      # Real runtime storage paths (Trainer/DataManager default to "data_storage",
-      # relative to the backend's working directory in the container).
-      - ./backend/data_storage:/app/data_storage
-      # Optimized .tflite outputs currently live under the OS temp dir
-      # (tempfile.gettempdir()/edgecraft_optimizations) — mount that too,
-      # or better: fix optimizer.py to use a configurable, non-temp path.
-      - ./backend/optimizations:/tmp/edgecraft_optimizations
+      - ./backend/data_storage:/data
     extra_hosts:
-      # Lets the backend reach an Ollama instance running on the host machine
-      # via OLLAMA_BASE_URL=http://localhost:11434 (which otherwise resolves
-      # to the container itself). Works on Linux with Docker 20.10+; Docker
-      # Desktop (Mac/Windows) provides host.docker.internal automatically.
+      # Reach an Ollama server on the host: OLLAMA_HOST=http://host.docker.internal:11434
       - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
+    # NVIDIA GPU (requires nvidia-container-toolkit and requirements-gpu.txt):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
 
   frontend:
     build:
@@ -44,11 +40,3 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    # NOTE: the frontend currently hardcodes API_BASE = "http://localhost:8000/api"
-    # in its source (useAPI.ts, OptimizationStudio, remoteDatasetApi.ts) instead
-    # of reading any env var, so this setting has no effect until that's fixed.
-    # It happens to work anyway here because the backend port is published to
-    # the host and the browser (not the container) makes the request — but
-    # only once CORS above allows the `http://localhost` origin.
-    environment:
-      - VITE_API_BASE_URL=http://localhost:8000/api
