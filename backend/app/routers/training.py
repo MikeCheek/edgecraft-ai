@@ -169,7 +169,12 @@ async def delete_training_session(training_id: str):
 @router.get("/models")
 async def list_trained_models(include_archived: bool = False):
     try:
-        return {"status": "success", "models": trainer.get_trained_models(include_archived=include_archived)}
+        from app.services.optimizer import list_optimization_sessions
+
+        optimized = {s["training_id"] for s in list_optimization_sessions() if s.get("status") == "completed"}
+        models = [{**m, "optimized": m.get("training_id") in optimized}
+                  for m in trainer.get_trained_models(include_archived=include_archived)]
+        return {"status": "success", "models": models}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

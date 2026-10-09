@@ -30,7 +30,6 @@ def _ints(values: List[int], per_line: int = 16) -> str:
 def generate_mfcc_header(task: str, n_mfcc: int, n_frames: int) -> str:
     p = preprocessing.audio_params(task, n_mfcc)
     n_fft, hop, n_mels = int(p["n_fft"]), int(p["hop_length"]), int(p["n_mels"])
-    n_bins = n_fft // 2 + 1
     mel = preprocessing.mel_filterbank(int(p["sample_rate"]), n_fft, n_mels, float(p["fmin"]), float(p["fmax"]))
     dct = preprocessing.dct_matrix(n_mfcc, n_mels)
 
@@ -48,7 +47,7 @@ def generate_mfcc_header(task: str, n_mfcc: int, n_frames: int) -> str:
 // Bit-for-bit port of the training-time MFCC front-end:
 //   16 kHz mono, {p['duration']} s clip, periodic Hann window, {n_fft}-point FFT,
 //   hop {hop}, {n_mels} mel bands ({p['fmin']:.0f}-{p['fmax']:.0f} Hz, Slaney),
-//   10*log10 power clamped to max-{p['top_db']:.0f} dB, orthonormal DCT-II,
+//   10*log10 power relative to the clip maximum, clamped at -{p['top_db']:.0f} dB, orthonormal DCT-II,
 //   then per-clip z-score normalisation.
 // Feed it float samples in [-1, 1] (the absolute scale does not matter:
 // the log + z-score steps cancel any constant gain).
@@ -147,9 +146,10 @@ static void mfcc_compute(const float* audio, float* out) {{
       if (db > max_db) max_db = db;
     }}
   }}
-  const float floor_db = max_db - MFCC_TOP_DB;
+  // dB relative to the clip's loudest bin, clamped at -MFCC_TOP_DB (gain-invariant).
   for (int i = 0; i < MFCC_N_FRAMES * MFCC_N_MELS; i++) {{
-    if (g_mfcc_logmel[i] < floor_db) g_mfcc_logmel[i] = floor_db;
+    float v = g_mfcc_logmel[i] - max_db;
+    g_mfcc_logmel[i] = v < -MFCC_TOP_DB ? -MFCC_TOP_DB : v;
   }}
 
   double sum = 0.0, sq = 0.0;

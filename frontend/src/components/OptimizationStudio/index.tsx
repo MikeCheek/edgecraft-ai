@@ -112,7 +112,12 @@ interface Comparison {
 }
 
 const ACTIVE = new Set(["queued", "pending", "running"]);
-const labelFor = (m: string) => METHODS.find((x) => x.method === m)?.label ?? m.replace(/_/g, " ").toLowerCase();
+const INTERNAL_METHODS: Record<string, OptimizationMethod> = {
+  int8: "INT8_QUANTIZATION", float16: "FLOAT16_QUANTIZATION", dynamic_range: "DYNAMIC_QUANTIZATION",
+  pruning: "PRUNING", weight_clustering: "WEIGHT_CLUSTERING",
+};
+const labelFor = (m: string) =>
+  METHODS.find((x) => x.method === (INTERNAL_METHODS[m] ?? m))?.label ?? m.replace(/_/g, " ").toLowerCase();
 
 const card = "rounded-2xl border border-slate-700 bg-slate-900/60 p-5";
 const sectionTitle = "text-xs font-semibold uppercase tracking-widest text-slate-400";
@@ -123,7 +128,10 @@ const OptimizationStudio: React.FC<OptimizationStudioProps> = ({ models }) => {
   const { toast } = useToast();
   const modelParam = searchParams.get("model");
   const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  useEffect(() => {
+    mountedRef.current = true; // StrictMode runs mount -> unmount -> mount
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // ---------------- model selection ----------------
   const datasetOptions = useMemo(() => Array.from(

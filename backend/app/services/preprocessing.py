@@ -194,8 +194,11 @@ def compute_mfcc(audio: np.ndarray, task: str, n_mfcc: int = None) -> np.ndarray
     mel = power @ mel_filterbank(
         int(p["sample_rate"]), n_fft, int(p["n_mels"]), float(p["fmin"]), float(p["fmax"])
     ).T  # (frames, n_mels)
+    # dB relative to the loudest bin of the clip (librosa ref=np.max), clamped
+    # to top_db below it: makes the features independent of recording gain,
+    # so a quiet device microphone matches louder training recordings.
     log_mel = 10.0 * np.log10(np.maximum(mel, 1e-10))
-    log_mel = np.maximum(log_mel, log_mel.max() - float(p["top_db"]))
+    log_mel = np.maximum(log_mel - log_mel.max(), -float(p["top_db"]))
 
     mfcc = log_mel @ dct_matrix(int(p["n_mfcc"]), int(p["n_mels"])).T  # (frames, n_mfcc)
     mfcc = mfcc.T

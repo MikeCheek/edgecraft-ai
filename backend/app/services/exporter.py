@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import io
 import zipfile
-from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 
 from app.services import preprocessing
@@ -1146,7 +1145,6 @@ def _camera_setup_loop_pixel_hud(
     channels = input_shape[2] if len(input_shape) >= 3 else 1
     is_rgb = channels == 3
     src_w, src_h = 160, 120  # QQVGA - decoded once, reused for both display + model input
-    img_h_expr = f"(DISP_H - TOP_BAR_H - BOT_BAR_H)"
 
     if is_rgb:
         model_pixel_extract = """      uint16_t pixel = rgbBuf[sy * src_w + sx];

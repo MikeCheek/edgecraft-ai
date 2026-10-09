@@ -732,7 +732,6 @@ class DataManager:
         annotated = 0
         total_bboxes = 0
         class_counts: Dict[str, int] = {}
-        fmt = None
 
         for sid in sample_ids:
             s = self.samples[sid]

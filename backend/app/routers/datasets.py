@@ -10,12 +10,10 @@ import zipfile
 import asyncio
 import shutil
 import json
-import queue
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from app.utils.zip_processor import extract_zip_with_mapping, scan_zip_tree
 from fastapi import APIRouter, File, Request, UploadFile, Form, HTTPException, Body
-from fastapi.responses import Response, FileResponse, StreamingResponse
+from fastapi.responses import Response, FileResponse
 from starlette.background import BackgroundTasks
 from app import config
 from app.services.shared_state import data_manager
@@ -201,6 +199,7 @@ async def upload_folder(
         parse_yolo_classes,
         parse_voc_xml,
         parse_csv_annotations,
+        parse_coco_json,
     )
 
     total_processed = 0

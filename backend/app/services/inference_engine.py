@@ -14,7 +14,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
 

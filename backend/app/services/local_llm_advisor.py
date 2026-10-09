@@ -15,7 +15,7 @@ import json
 import os
 import urllib.request
 import urllib.error
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 # BUGFIX: these used to be hardcoded, so a backend .env with
 # OLLAMA_HOST=http://some-other-host:11434 or OLLAMA_MODEL=mistral was

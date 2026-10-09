@@ -1,17 +1,15 @@
 import os
 import uuid
 import shutil
-import tempfile
 import zipfile
 import asyncio
 import json
-import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from app.utils.zip_processor import extract_zip_with_mapping, scan_zip_tree
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -165,7 +163,6 @@ async def download_stream(
     _state = {"dataset_id": dataset_id}
 
     async def event_generator():
-        download_path = None
         download_dir = None
         try:
             # Auto-create dataset if dataset_id not provided
@@ -196,7 +193,6 @@ async def download_stream(
                 result: dict = {}
                 async for downloaded, total in _download_from_url_stream(url, did, task, download_id, result):
                     yield _sse_event({"type": "progress", "downloaded": downloaded, "total": total})
-                download_path = result.get("path")
                 yield _sse_event({"type": "processing", "message": "Extracting archive..."})
                 yield _sse_event({"type": "ready_to_map", "tree": result.get("tree"), "download_id": result.get("download_id"), "annotation_format": result.get("annotation_format"), "annotation_classes": result.get("annotation_classes", [])})
                 yield _sse_event({"type": "complete", "count": 0})

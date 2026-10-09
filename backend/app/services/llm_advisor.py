@@ -144,7 +144,7 @@ class LLMAdvisor:
         The user has run {len(past_sessions)} previous training(s) on the same dataset. Analyze these to identify what worked, what didn't, and avoid repeating failed approaches.
         {json.dumps(past_sessions, indent=2)}
         ''' if past_sessions else ''}
-        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{f' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
+        Focus your advice heavily on microcontroller constraints. If validation loss is diverging from training loss, suggest TinyML-friendly regularization (like Dropout or heavier data augmentation). If accuracy is plateauing, suggest LR tuning or architecture changes. If the image stats show wide variance in size/aspect ratio, factor that into your resizing/augmentation advice.{' Compare the current run against the past trials above: note which hyperparameter changes improved or degraded results, and recommend the next best experiment to try.' if past_sessions else ''}
         """
 
         # 6. Dispatch to your LLM API Wrapper (e.g., OpenRouter, OpenAI, or Ollama)
